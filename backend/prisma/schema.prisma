@@ -1,7 +1,6 @@
 generator client { // initializes the client which we import at top of files
-  provider = "prisma-client"
-  output = "../generated/prisma"
-}
+  provider = "prisma-client-js"
+  }
 
 datasource db { 
   provider = "postgresql"
@@ -11,7 +10,7 @@ model User {
   id Int @id @default(autoincrement())
   email String @unique
   password String
-  budgets Budget[]
+  budgets Budget[] // This is not a column in the table. User has many Budgets. When I query a user, also give me their budgets.
 }
 
 model Budget{
@@ -19,7 +18,7 @@ model Budget{
   name String
   amount Decimal @db.Decimal(10, 2)
   userId Int
-  user User @relation(fields: [userId], references: [id])
+  user User @relation(fields: [userId], references: [id]) // The userId column is a foreign key that references id in the users table.
   createdAt DateTime @default(now())
   categories Category[]
 }
