@@ -1,0 +1,42 @@
+generator client { // initializes the client which we import at top of files
+  provider = "prisma-client"
+  output = "../generated/prisma"
+}
+
+datasource db { 
+  provider = "postgresql"
+}
+
+model User {
+  id Int @id @default(autoincrement())
+  email String @unique
+  password String
+  budgets Budget[]
+}
+
+model Budget{
+  id Int @id @default(autoincrement())
+  name String
+  amount Decimal @db.Decimal(10, 2)
+  userId Int
+  user User @relation(fields: [userId], references: [id])
+  createdAt DateTime @default(now())
+  categories Category[]
+}
+
+model Category {
+  id           Int           @id @default(autoincrement())
+  name         String
+  budgetId     Int
+  budget       Budget        @relation(fields: [budgetId], references: [id])
+  transactions Transaction[]
+}
+
+model Transaction {
+  id          Int      @id @default(autoincrement())
+  description String?
+  amount      Decimal  @db.Decimal(10, 2)
+  date        DateTime @default(now())
+  categoryId  Int
+  category    Category @relation(fields: [categoryId], references: [id])
+}
