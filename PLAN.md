@@ -108,7 +108,14 @@ docs: add README with setup instructions
 
 ---
 
-## 3. Folder & File Structure
+## Tech Stack
+- **Language:** ✅ TypeScript (learning from scratch, migrating from JS)
+- **Runtime:** Node.js (Express 5)
+- **Database:** PostgreSQL 16 (Homebrew) ✅
+- **ORM:** Prisma 7 ✅
+- **Auth:** JWT + bcrypt ✅
+- **Frontend:** 🔜 React (TypeScript)
+- **Deploy:** Docker + AWS (later)
 
 ```
 mohr/

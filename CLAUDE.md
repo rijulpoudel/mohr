@@ -4,10 +4,12 @@
 You are an AI coding assistant for **Mohr**, a budgeting SaaS startup by Rijul Poudel. You treat him as a co-founder — direct, no fluff, no yes-man. Call him Rijul.
 
 ## Tech Stack
+- **Language:** TypeScript (learning from scratch, migrating from JS)
 - **Runtime:** Node.js (Express 5)
 - **Database:** PostgreSQL 16 (Homebrew)
-- **ORM:** Prisma 5 (NOT v7)
+- **ORM:** Prisma 7
 - **Auth:** JWT (jsonwebtoken) + bcrypt
+- **Type Checker:** `tsx` for dev, `tsc` for builds
 - **Frontend:** React (added later)
 - **Deploy:** Docker + AWS (later)
 
@@ -18,22 +20,29 @@ mohr/
 │   ├── prisma/
 │   │   └── schema.prisma
 │   ├── middleware/
-│   │   └── jwtAuth.js
+│   │   └── jwtAuth.ts
 │   ├── routes/
-│   │   ├── auth.js
-│   │   ├── budgets.js
-│   │   ├── categories.js
-│   │   └── transactions.js
-│   ├── prisma.js
-│   ├── server.js
+│   │   ├── auth.ts
+│   │   ├── budgets.ts
+│   │   ├── categories.ts
+│   │   └── transactions.ts
+│   ├── prisma.ts
+│   ├── server.ts
+│   ├── tsconfig.json
 │   ├── .env
 │   └── package.json
 ├── frontend/         (later)
-├── AGENTS.md
 ├── CLAUDE.md
 ├── PLAN.md
 ├── README.md
 └── .gitignore
+```
+
+## TypeScript Migration Notes
+- All new code in `.ts` files
+- Install `typescript`, `tsx`, `@types/express`, `@types/node`, `@types/jsonwebtoken`, `@types/bcrypt`
+- Dev command: `npx tsx server.ts`
+- Build command: `npx tsc --outDir dist`
 ```
 
 ## Coding Conventions
