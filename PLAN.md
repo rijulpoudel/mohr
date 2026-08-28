@@ -1,229 +1,265 @@
-# Mohr — Master Plan
+# Mohr v0.1 MVP Plan
 
-> Budgeting SaaS. Solo founder. Build fast, build right.
+> A focused personal-finance app that tells users where their money went and what they can safely spend this month.
 
----
+## Product promise
 
-## 1. Software Development Lifecycle (SDLC)
+Mohr helps students and young professionals manually track accounts, transactions, and monthly budgets from one clear dashboard.
 
-### Workflow
+## MVP user journey
 
-```
-Issue → Branch → Commits → PR → Merge (squash) → Close Issue
-```
+A user can:
 
-| Step | What You Do |
-|------|-------------|
-| **1. Create Issue** | On GitHub. Describe what needs to be built. Add to a Milestone. |
-| **2. Create Branch** | `git checkout -b feat/<issue-num>-short-name` |
-| **3. Write Code** | Small, logical commits. One concern per commit. |
-| **4. Open PR** | PR title = issue title. Body = summary of changes. |
-| **5. Self-Merge** | Squash commit to `main`. Delete the branch. |
-| **6. Close Issue** | Done. Move to next. |
+1. Create an account and log in.
+2. Create financial accounts such as Checking, Savings, or Cash.
+3. Create income and expense categories.
+4. Record income and expense transactions.
+5. Create monthly spending budgets for expense categories.
+6. View total balance, monthly income, monthly spending, remaining budget, and recent transactions.
+7. Edit or delete their own records.
+8. Never access another user's financial data.
 
-### Branch Naming
+## Included in v0.1
 
-```
-feat/<num>-<kebab-description>
-fix/<num>-<kebab-description>
-chore/<num>-<kebab-description>
-docs/<num>-<kebab-description>
-```
+### Authentication
 
-### Commit Message Format
+- User registration
+- User login and logout
+- Secure password hashing
+- Authenticated API requests
+- Strict user-level data isolation
 
-```
-<type>: <short description>
+### Accounts
 
-Examples:
-feat: add Prisma schema with User, Budget, Category models
-feat: implement JWT signup and login routes
-fix: correct email validation in auth routes
-chore: add .gitignore and install deps
-docs: add README with setup instructions
-```
+- Create, list, retrieve, update, and archive accounts
+- Account types: checking, savings, cash, and credit card
+- Opening balance
+- Current balance calculated from the opening balance and transactions
 
-### Code Quality (Solo, Keep It Simple)
+### Categories
 
-| Practice | How |
-|----------|-----|
-| One file = one concern | Routes in routes/, middleware in middleware/ |
-| Handle errors | Always wrap async routes in try/catch |
-| Use meaningful names | `budgetName` not `bn` |
-| Remove dead code | If it's commented out, delete it |
-| Keep secrets out | `.env` in gitignore ✅ |
+- Income and expense category types
+- Create, list, update, and archive custom categories
+- Category names unique per user and category type
 
----
+### Transactions
 
-## 2. Milestones
+- Create, list, retrieve, update, and delete transactions
+- Positive decimal amount
+- Income or expense type
+- Date and optional note
+- Connected account and category
+- Filter by account, category, type, and date range
 
-### Milestone 1: Foundation  (1–2 days)
-**Goal:** Working backend with database and auth
+### Monthly budgets
 
-| # | Issue | Est. |
-|---|-------|------|
-| 1 | Set up Prisma schema with User, Budget, Category, Transaction models | 30m |
-| 2 | Add JWT auth (signup + login + middleware) | 1h |
-| 3 | Create server.js with Express app setup | 30m |
+- Set a spending limit for an expense category and month
+- Show spent and remaining amounts
+- Prevent duplicate budgets for the same user, category, and month
 
-### Milestone 2: Core API  (2–3 days)
-**Goal:** Full CRUD for budgets, categories, transactions
+### Dashboard
 
-| # | Issue | Est. |
-|---|-------|------|
-| 4 | Build Budget CRUD routes (create, list, get, update, delete) | 1.5h |
-| 5 | Build Category routes (create under budget, list) | 1h |
-| 6 | Build Transaction routes (create under category, list, filter by date) | 1.5h |
+- Total balance across active accounts
+- Current-month income
+- Current-month expenses
+- Total budgeted amount
+- Remaining budget
+- Recent transactions
 
-### Milestone 3: Frontend MVP  (1 week)
-**Goal:** A working web app users can interact with
+### Quality requirements
 
-| # | Issue | Est. |
-|---|-------|------|
-| 7 | Learn React basics needed for this app | 2d |
-| 8 | Build login/signup pages | 1d |
-| 9 | Build dashboard with budgets list | 1d |
-| 10 | Build budget detail page with categories + transactions | 1d |
+- Django REST Framework API
+- PostgreSQL database
+- Automated API tests for successful and invalid behavior
+- Consistent JSON errors
+- Environment-based secrets
+- API documentation
+- React and TypeScript web interface
+- Responsive layout
+- Deployed MVP
 
-### Milestone 4: Ship It  (3–4 days)
-**Goal:** Deployed and usable
+## Explicitly excluded from v0.1
 
-| # | Issue | Est. |
-|---|-------|------|
-| 11 | Containerize with Docker | 1d |
-| 12 | Deploy backend to AWS (ECS or Railway) | 1d |
-| 13 | Add custom domain + HTTPS | 1d |
-| 14 | Polish: Loading states, error UI, responsive | 1d |
+- Bank synchronization and Plaid
+- Transfers between accounts
+- Recurring transaction automation
+- Shared or household budgets
+- Investment and cryptocurrency tracking
+- Multiple currencies
+- Receipt scanning
+- AI financial advice
+- Native mobile applications
+- GraphQL
+- Redis, Celery, and Kubernetes
 
-### Milestone 5: Post-Launch (Ongoing)
-**Goal:** Make it a real product
+These features remain out until the core ledger, ownership rules, tests, and deployment are reliable.
 
-| # | Issue | Est. |
-|---|-------|------|
-| 15 | Add spending limits and alerts | — |
-| 16 | Add CSV import/export | — |
-| 17 | Add recurring transactions | — |
-| 18 | Multi-currency support | — |
-| 19 | Plaid API integration (bank sync) | — |
+## Production stack
 
----
+### Backend
 
-## Tech Stack
-- **Language:** ✅ TypeScript (learning from scratch, migrating from JS)
-- **Runtime:** Node.js (Express 5)
-- **Database:** PostgreSQL 16 (Homebrew) ✅
-- **ORM:** Prisma 7 ✅
-- **Auth:** JWT + bcrypt ✅
-- **Frontend:** 🔜 React (TypeScript)
-- **Deploy:** Docker + AWS (later)
+- Python 3.11
+- Django 5.2 LTS
+- Django REST Framework
+- PostgreSQL
+- Django migrations
+- Django test framework and DRF `APITestCase`
 
-```
-mohr/
-├── backend/
-│   ├── prisma/
-│   │   └── schema.prisma       ← Database models
-│   ├── middleware/
-│   │   └── jwtAuth.js          ← JWT verification
-│   ├── routes/
-│   │   ├── auth.js             ← /signup, /login
-│   │   ├── budgets.js          ← /budgets CRUD
-│   │   ├── categories.js       ← /categories CRUD
-│   │   └── transactions.js     ← /transactions CRUD
-│   ├── prisma.js               ← PrismaClient singleton
-│   ├── server.js               ← Express app entry point
-│   ├── .env                    ← Secrets (gitignored)
-│   └── package.json
-├── frontend/                   ← React app (later)
-├── AGENTS.md                   ← AI instructions for future sessions
-├── CLAUDE.md                   ← AI instructions for Claude
-├── PLAN.md                     ← This file
-├── README.md                   ← Project overview for visitors
-├── .gitignore
-└── LICENSE
+### Frontend
+
+- React
+- TypeScript
+- Vite
+- A minimal dark interface with one accent color: `#5eead4`
+
+### Delivery
+
+- GitHub issues and milestones
+- One issue branch per change
+- Conventional commits
+- Pull requests with squash merges
+- Stable `main`
+- Docker for repeatable deployment
+- CI for backend tests and frontend checks
+
+## Core data model
+
+```text
+User
+├── Account
+│   └── Transaction
+├── Category
+│   ├── Transaction
+│   └── MonthlyBudget
+└── Dashboard summaries are calculated from owned records
 ```
 
----
+### User
 
-## 4. Issue Template (Copy This)
+- `id`
+- `email`, unique
+- securely hashed password
+- timestamps
 
-```
-## Description
-[What needs to be built/fixed]
+### Account
 
-## Acceptance Criteria
-- [ ] Criterion 1
-- [ ] Criterion 2
-- [ ] Criterion 3
+- `id`
+- `user`, foreign key
+- `name`
+- `account_type`
+- `opening_balance`, decimal
+- `is_archived`
+- timestamps
 
-## Technical Notes
-[Any implementation details, gotchas, or references]
-```
+### Category
 
----
+- `id`
+- `user`, foreign key
+- `name`
+- `category_type`: income or expense
+- `is_archived`
+- timestamps
 
-## 5. PR Template (Copy This)
+### Transaction
 
-```
-## Summary
-[What does this PR do?]
+- `id`
+- `user`, foreign key for explicit ownership
+- `account`, foreign key
+- `category`, foreign key
+- `transaction_type`: income or expense
+- `amount`, positive decimal
+- `date`
+- optional `note`
+- timestamps
 
-## Changes
-- [Change 1]
-- [Change 2]
+### MonthlyBudget
 
-## Testing
-- [ ] Tested locally with curl
-- [ ] Edge cases handled (empty, invalid, missing)
+- `id`
+- `user`, foreign key
+- `category`, foreign key to an expense category
+- `month`, stored as the first date of the month
+- `amount`, positive decimal
+- timestamps
+- unique constraint on user, category, and month
 
-## Related Issue
-Closes #N
-```
+## Ownership rule
 
----
+Every query for private financial data must be scoped to the authenticated user.
 
-## 6. What We've Set Up So Far
-
-```
-✅ GitHub repo: rijulpoudel/mohr
-✅ MIT License
-✅ .gitignore (node_modules, .env, .DS_Store)
-✅ backend/package.json (npm init -y)
-✅ backend/node_modules (express, bcrypt, jsonwebtoken installed)
-✅ backend/prisma.js (PrismaClient singleton — not yet created)
-✅ CLAUDE.md (AI instructions for this repo)
-✅ PLAN.md (this file)
-```
-
----
-
-## 7. Environment & Tools
-
-| Tool | How to Get It |
-|------|---------------|
-| PostgreSQL 16 | `brew services start postgresql@16` |
-| Node.js v22 | `node --version` ✅ |
-| npm | `npm --version` ✅ |
-| Prisma CLI | `npx prisma` (installed per project) |
-
-### Ports
-- Backend: 3001
-- React dev server: 5173 (later)
-
-### .env Template
-```
-DATABASE_URL="postgresql://localhost:5432/mohr?schema=public"
-JWT_SECRET="<generate-a-random-string>"
+```text
+Correct: Transaction.objects.filter(user=request.user)
+Wrong:   Transaction.objects.all()
 ```
 
----
+Object IDs alone never grant access. A user requesting another user's object receives HTTP 404.
 
-## 8. Key Reminders
+## API outline
 
-| Rule | Why |
-|------|-----|
-| Never commit to `main` directly | Branch + PR every time |
-| Commit after every meaningful step | Easy rollback, clean history |
-| Always `await` Prisma calls | Otherwise you get Promise objects, not data |
-| `parseInt(id)` on route params | Prisma expects Int, not String |
-| Start server on 3001 | Avoid port conflicts |
-| One try/catch per handler | Don't crash the server |
+```text
+POST   /api/auth/register/
+POST   /api/auth/login/
+POST   /api/auth/logout/
+GET    /api/auth/me/
+
+GET    /api/accounts/
+POST   /api/accounts/
+GET    /api/accounts/<id>/
+PATCH  /api/accounts/<id>/
+DELETE /api/accounts/<id>/
+
+GET    /api/categories/
+POST   /api/categories/
+GET    /api/categories/<id>/
+PATCH  /api/categories/<id>/
+DELETE /api/categories/<id>/
+
+GET    /api/transactions/
+POST   /api/transactions/
+GET    /api/transactions/<id>/
+PATCH  /api/transactions/<id>/
+DELETE /api/transactions/<id>/
+
+GET    /api/budgets/
+POST   /api/budgets/
+GET    /api/budgets/<id>/
+PATCH  /api/budgets/<id>/
+DELETE /api/budgets/<id>/
+
+GET    /api/dashboard/summary/
+```
+
+The exact authentication mechanism will be selected during the authentication issue. Security and browser behavior matter more than forcing the old Express JWT design into Django.
+
+## Implementation order
+
+1. Replace stale project documentation.
+2. Scaffold Django, DRF, PostgreSQL configuration, and health check.
+3. Add CI and the first automated test.
+4. Build authentication and ownership test helpers.
+5. Build accounts.
+6. Build categories.
+7. Build transactions.
+8. Build monthly budgets.
+9. Build dashboard summaries.
+10. Build the React and TypeScript frontend.
+11. Run security, accessibility, and end-to-end checks.
+12. Deploy the MVP.
+
+## Definition of done for every backend feature
+
+- GitHub issue with acceptance criteria
+- Issue branch created from current `main`
+- Tests written for success, validation failure, authentication, and ownership
+- Implementation passes focused tests
+- Full backend suite passes
+- API response shape documented
+- No secrets committed
+- Pull request reviewed and squash-merged
+
+## Git workflow
+
+```text
+Issue → issue-N branch → logical commits → PR → checks → squash merge → stable main
+```
+
+Never develop directly on `main`.
