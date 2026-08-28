@@ -10,7 +10,10 @@ router.post("/signup", async (req, res) => {
   const { email, password } = req.body;
 
   const exists = await prisma.user.findFirst({ where: { email } });
-  if (exists) return res.status(409).json({ error: "Email already taken" });
+  if (exists) {
+    res.status(409).json({ error: "Email already taken" });
+    return;
+  }
 
   const hashed = await bcrypt.hash(password, 10);
   const user = await prisma.user.create({
@@ -26,12 +29,16 @@ router.post("/login", async (req, res) => {
   const { email, password } = req.body;
 
   const user = await prisma.user.findFirst({ where: { email } });
-  if (!user)
-    return res.status(401).json({ error: "Invalid email or password" });
+  if (!user) {
+    res.status(401).json({ error: "Invalid email or password" });
+    return;
+  }
 
   const valid = await bcrypt.compare(password, user.password);
-  if (!valid)
-    return res.status(401).json({ error: "Invalid email or password" });
+  if (!valid) {
+    res.status(401).json({ error: "Invalid email or password" });
+    return;
+  }
 
   const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: "7d" });
 
