@@ -1,5 +1,20 @@
-node_modules/
+# Environment and operating system
 .env
 .DS_Store
-*.sqlite
 
+# JavaScript
+node_modules/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Django
+*.sqlite
+*.sqlite3
+staticfiles/

@@ -9,7 +9,7 @@ Mohr is a personal-finance and monthly-budgeting web application for people who 
 
 Mohr is under active development toward its `v0.1 MVP`.
 
-The project is migrating from a preserved Express and Prisma prototype to a production direction built with Django REST Framework and PostgreSQL. The Django scaffold has not been merged yet, so local setup instructions will be added with the scaffold issue rather than documented prematurely.
+The backend uses Django REST Framework and PostgreSQL. The preserved Express and Prisma prototype remains available through Git history and the `express-prototype-v0.1` tag.
 
 ## MVP capabilities
 
@@ -71,7 +71,53 @@ Mohr began as an Express, TypeScript, and Prisma prototype. That work remains pr
 
 ## Local development
 
-Local development instructions will be added when the Django scaffold is merged. Until then, the existing root `backend/` directory is legacy prototype code and should not be treated as the final application structure.
+### Prerequisites
+
+- Python 3.11
+- [uv](https://docs.astral.sh/uv/)
+- PostgreSQL 16 or another version supported by Django 5.2
+
+### Backend setup
+
+From the repository root:
+
+```bash
+cd backend
+uv sync
+cp .env.example .env
+```
+
+Fill the blank values in `.env`. Generate a development secret with:
+
+```bash
+uv run python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"
+```
+
+Create the local PostgreSQL database if it does not exist, then apply migrations:
+
+```bash
+createdb mohr
+uv run python manage.py migrate
+```
+
+Run the checks and automated tests:
+
+```bash
+uv run python manage.py check --database default
+uv run python manage.py test
+```
+
+Start the development server:
+
+```bash
+uv run python manage.py runserver
+```
+
+Verify the health endpoint at `http://127.0.0.1:8000/api/health/`. A healthy backend returns:
+
+```json
+{"status": "ok"}
+```
 
 ## Contributing
 
