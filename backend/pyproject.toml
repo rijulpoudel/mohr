@@ -8,3 +8,8 @@ dependencies = [
     "djangorestframework==3.17.2",
     "psycopg[binary]>=3.2,<4",
 ]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16.5",
+]
