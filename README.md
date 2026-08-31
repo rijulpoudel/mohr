@@ -103,6 +103,8 @@ uv run python manage.py migrate
 Run the checks and automated tests:
 
 ```bash
+uv run ruff check .
+uv run ruff format --check .
 uv run python manage.py check --database default
 uv run python manage.py test
 ```
