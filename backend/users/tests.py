@@ -168,6 +168,54 @@ class RegistrationAPITests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
         self.assertFalse(get_user_model().objects.exists())
 
+    def test_register_requires_csrf_token(self):
+        csrf_client = APIClient(enforce_csrf_checks=True)
+
+        response = csrf_client.post(
+            reverse("auth-register"),
+            {
+                "email": "new-user@example.com",
+                "password": "StrongTestPassword123!",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response["Content-Type"], "application/json")
+        self.assertEqual(response.json(), {"detail": "CSRF verification failed."})
+        self.assertFalse(get_user_model().objects.exists())
+        self.assertNotIn("_auth_user_id", csrf_client.session)
+
+    def test_csrf_cookie_allows_registration_without_creating_session(self):
+        csrf_client = APIClient(enforce_csrf_checks=True)
+
+        csrf_response = csrf_client.get(reverse("auth-csrf"))
+
+        self.assertEqual(csrf_response.status_code, status.HTTP_200_OK)
+        csrf_token = csrf_response.cookies["csrftoken"].value
+
+        response = csrf_client.post(
+            reverse("auth-register"),
+            {
+                "email": "new-user@example.com",
+                "password": "StrongTestPassword123!",
+            },
+            format="json",
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        user = get_user_model().objects.get(email="new-user@example.com")
+        self.assertTrue(user.check_password("StrongTestPassword123!"))
+        self.assertNotIn("_auth_user_id", csrf_client.session)
+
+
+class CsrfCookieAPITests(APITestCase):
+    def test_csrf_cookie_rejects_unsupported_method(self):
+        response = self.client.post(reverse("auth-csrf"))
+
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
 
 class LoginAPITests(APITestCase):
     def setUp(self):
@@ -349,7 +397,7 @@ class LogoutAPITests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertEqual(response["Content-Type"], "application/json")
-        self.assertIn("detail", response.data)
+        self.assertEqual(response.json(), {"detail": "CSRF verification failed."})
         self.assertEqual(
             int(csrf_client.session["_auth_user_id"]),
             self.user.id,

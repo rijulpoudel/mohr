@@ -90,12 +90,12 @@ Registration does not start a session; the user logs in afterward.
 ### Browser flow
 
 1. `GET /api/auth/csrf/` to receive the `csrftoken` cookie.
-2. Read the cookie value and send it as the `X-CSRFToken` header on `POST /api/auth/login/` and on later authenticated unsafe requests.
+2. Read the cookie value and send it as the `X-CSRFToken` header on `POST /api/auth/register/`, `POST /api/auth/login/`, and later authenticated unsafe requests.
 3. On successful login, Django sends the session cookie. The browser sends it automatically on later requests.
 4. `GET /api/auth/me/` restores the current user after a page reload.
 5. `POST /api/auth/logout/` with the CSRF header ends the session and clears the session cookie.
 
-Safe `GET` requests such as `/api/auth/csrf/` and `/api/auth/me/` do not require a CSRF token. Login and logout are CSRF protected. Same-origin requests include cookies automatically. If the frontend and backend run on different origins, three separate requirements apply, and none is configured yet:
+Safe `GET` requests such as `/api/auth/csrf/` and `/api/auth/me/` do not require a CSRF token. Registration, login, and logout are CSRF protected. Same-origin requests include cookies automatically. If the frontend and backend run on different origins, three separate requirements apply, and none is configured yet:
 
 1. Include credentials on requests (`credentials: "include"` with `fetch`, `withCredentials: true` with axios).
 2. Allow the exact frontend origin in credentialed CORS.

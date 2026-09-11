@@ -19,6 +19,9 @@ def csrf_cookie(request):
 
 @api_view(["POST"])
 @permission_classes([AllowAny])
+# @csrf_protect must stay innermost: @api_view marks the outer view csrf_exempt,
+# so the global middleware skips it and only this wrapper enforces CSRF.
+@csrf_protect
 def register(request):
     serializer = RegistrationSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
@@ -28,6 +31,8 @@ def register(request):
 
 @api_view(["POST"])
 @permission_classes([AllowAny])
+# @csrf_protect must stay innermost: @api_view marks the outer view csrf_exempt,
+# so the global middleware skips it and only this wrapper enforces CSRF.
 @csrf_protect
 def login_view(request):
     serializer = LoginSerializer(data=request.data)
