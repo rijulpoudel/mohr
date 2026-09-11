@@ -484,3 +484,341 @@ class AccountCollectionAPITests(APITestCase):
 
         response = self.client.head(reverse("account-list"))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+
+def format_datetime(value):
+    return value.isoformat().replace("+00:00", "Z")
+
+
+class AccountDetailAPITests(APITestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = get_user_model().objects.create_user(
+            email="account-detail-owner@example.com",
+            password="TestOnlyPassword123!",
+        )
+        cls.other_user = get_user_model().objects.create_user(
+            email="account-detail-other@example.com",
+            password="TestOnlyPassword123!",
+        )
+        cls.other_account = Account.objects.create(
+            user=cls.other_user,
+            name="Their Savings",
+            account_type=AccountType.SAVINGS,
+            opening_balance=Decimal("200.00"),
+        )
+
+    def create_account(self, **overrides):
+        values = {
+            "user": self.user,
+            "name": "Everyday Checking",
+            "account_type": AccountType.CHECKING,
+            "opening_balance": Decimal("100.00"),
+        }
+        values.update(overrides)
+        return Account.objects.create(**values)
+
+    def detail_url(self, account):
+        return reverse("account-detail", args=[account.pk])
+
+    def test_detail_returns_exact_account_shape(self):
+        account = self.create_account()
+        self.client.force_login(self.user)
+
+        response = self.client.get(self.detail_url(account))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data,
+            {
+                "id": account.id,
+                "name": "Everyday Checking",
+                "account_type": "checking",
+                "opening_balance": "100.00",
+                "is_archived": False,
+                "created_at": format_datetime(account.created_at),
+                "updated_at": format_datetime(account.updated_at),
+            },
+        )
+
+    def test_patch_partially_updates_name_only(self):
+        account = self.create_account()
+        self.client.force_login(self.user)
+
+        response = self.client.patch(
+            self.detail_url(account),
+            {"name": "Renamed"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        account.refresh_from_db()
+        self.assertEqual(account.name, "Renamed")
+        self.assertEqual(account.account_type, "checking")
+        self.assertEqual(account.opening_balance, Decimal("100.00"))
+        self.assertFalse(account.is_archived)
+        self.assertEqual(
+            response.data,
+            {
+                "id": account.id,
+                "name": "Renamed",
+                "account_type": "checking",
+                "opening_balance": "100.00",
+                "is_archived": False,
+                "created_at": format_datetime(account.created_at),
+                "updated_at": format_datetime(account.updated_at),
+            },
+        )
+
+    def test_delete_archives_row_and_returns_204_empty(self):
+        account = self.create_account()
+        self.client.force_login(self.user)
+
+        response = self.client.delete(self.detail_url(account))
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(response.content, b"")
+        account.refresh_from_db()
+        self.assertTrue(account.is_archived)
+        self.assertEqual(account.user, self.user)
+        self.assertEqual(account.name, "Everyday Checking")
+        self.assertEqual(account.account_type, "checking")
+        self.assertEqual(account.opening_balance, Decimal("100.00"))
+
+    def test_detail_returns_archived_owned_account(self):
+        account = self.create_account(is_archived=True)
+        self.client.force_login(self.user)
+
+        response = self.client.get(self.detail_url(account))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["id"], account.id)
+        self.assertTrue(response.data["is_archived"])
+
+    def test_detail_returns_404_for_another_users_account_without_side_effects(self):
+        self.client.force_login(self.user)
+        url = self.detail_url(self.other_account)
+
+        for method in ("get", "patch", "delete"):
+            with self.subTest(method=method):
+                response = getattr(self.client, method)(
+                    url,
+                    {"name": "Spoofed"},
+                    format="json",
+                )
+                self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+        self.other_account.refresh_from_db()
+        self.assertEqual(self.other_account.name, "Their Savings")
+        self.assertFalse(self.other_account.is_archived)
+
+    def test_detail_returns_404_for_missing_id_without_side_effects(self):
+        self.client.force_login(self.user)
+        url = reverse("account-detail", args=[999999])
+
+        for method in ("get", "patch", "delete"):
+            with self.subTest(method=method):
+                response = getattr(self.client, method)(
+                    url,
+                    {"name": "Spoofed"},
+                    format="json",
+                )
+                self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+        self.assertEqual(Account.objects.count(), 1)
+
+    def test_detail_requires_authentication(self):
+        account = self.create_account()
+        url = self.detail_url(account)
+
+        for method in ("get", "patch", "delete"):
+            with self.subTest(method=method):
+                response = getattr(self.client, method)(url, {}, format="json")
+
+                self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+                self.assertEqual(
+                    response.data,
+                    {"detail": "Authentication credentials were not provided."},
+                )
+
+        account.refresh_from_db()
+        self.assertEqual(account.name, "Everyday Checking")
+        self.assertFalse(account.is_archived)
+
+    def test_patch_updates_type_and_balance_with_exact_decimal_string(self):
+        account = self.create_account()
+        self.client.force_login(self.user)
+
+        response = self.client.patch(
+            self.detail_url(account),
+            {"account_type": "credit_card", "opening_balance": "-250.50"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        account.refresh_from_db()
+        self.assertEqual(account.account_type, "credit_card")
+        self.assertEqual(account.opening_balance, Decimal("-250.50"))
+        self.assertEqual(response.data["account_type"], "credit_card")
+        self.assertEqual(response.data["opening_balance"], "-250.50")
+
+    def test_patch_cannot_change_read_only_or_ownership_fields(self):
+        account = self.create_account()
+        account_id = account.id
+        created_at = account.created_at
+        self.client.force_login(self.user)
+
+        response = self.client.patch(
+            self.detail_url(account),
+            {
+                "id": account_id + 1,
+                "user": self.other_user.id,
+                "is_archived": True,
+                "created_at": "2000-01-01T00:00:00Z",
+                "updated_at": "2000-01-01T00:00:00Z",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        account.refresh_from_db()
+        self.assertEqual(account.id, account_id)
+        self.assertEqual(account.user, self.user)
+        self.assertFalse(account.is_archived)
+        self.assertEqual(account.created_at, created_at)
+        self.assertEqual(response.data["id"], account_id)
+        self.assertFalse(response.data["is_archived"])
+        self.assertEqual(
+            response.data["updated_at"],
+            format_datetime(account.updated_at),
+        )
+        self.assertNotEqual(account.updated_at.year, 2000)
+
+    def test_patch_rejects_invalid_values_without_mutation(self):
+        account = self.create_account()
+        self.client.force_login(self.user)
+        url = self.detail_url(account)
+
+        invalid_patches = (
+            ({"name": "x" * 101}, "name"),
+            ({"name": "   "}, "name"),
+            ({"account_type": "crypto"}, "account_type"),
+            ({"opening_balance": "not-a-number"}, "opening_balance"),
+            ({"opening_balance": "10.123"}, "opening_balance"),
+        )
+
+        for payload, field in invalid_patches:
+            with self.subTest(payload=payload):
+                response = self.client.patch(url, payload, format="json")
+
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn(field, response.data)
+
+        account.refresh_from_db()
+        self.assertEqual(account.name, "Everyday Checking")
+        self.assertEqual(account.account_type, "checking")
+        self.assertEqual(account.opening_balance, Decimal("100.00"))
+        self.assertFalse(account.is_archived)
+
+    def test_patch_requires_csrf_token(self):
+        account = self.create_account()
+        csrf_client = APIClient(enforce_csrf_checks=True)
+        csrf_client.force_login(self.user)
+
+        response = csrf_client.patch(
+            self.detail_url(account),
+            {"name": "Blocked"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response["Content-Type"], "application/json")
+        self.assertEqual(response.json(), {"detail": "CSRF verification failed."})
+        account.refresh_from_db()
+        self.assertEqual(account.name, "Everyday Checking")
+
+    def test_csrf_token_allows_patch(self):
+        account = self.create_account()
+        csrf_client = APIClient(enforce_csrf_checks=True)
+        csrf_client.force_login(self.user)
+        csrf_token = csrf_client.get(reverse("auth-csrf")).cookies["csrftoken"].value
+
+        response = csrf_client.patch(
+            self.detail_url(account),
+            {"name": "Allowed"},
+            format="json",
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        account.refresh_from_db()
+        self.assertEqual(account.name, "Allowed")
+
+    def test_delete_is_idempotent(self):
+        account = self.create_account()
+        self.client.force_login(self.user)
+
+        first = self.client.delete(self.detail_url(account))
+        second = self.client.delete(self.detail_url(account))
+
+        self.assertEqual(first.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(second.status_code, status.HTTP_204_NO_CONTENT)
+        account.refresh_from_db()
+        self.assertTrue(account.is_archived)
+        self.assertEqual(Account.objects.filter(pk=account.pk).count(), 1)
+
+    def test_delete_requires_csrf_token(self):
+        account = self.create_account()
+        csrf_client = APIClient(enforce_csrf_checks=True)
+        csrf_client.force_login(self.user)
+
+        response = csrf_client.delete(self.detail_url(account))
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response["Content-Type"], "application/json")
+        self.assertEqual(response.json(), {"detail": "CSRF verification failed."})
+        account.refresh_from_db()
+        self.assertFalse(account.is_archived)
+
+    def test_csrf_token_allows_delete(self):
+        account = self.create_account()
+        csrf_client = APIClient(enforce_csrf_checks=True)
+        csrf_client.force_login(self.user)
+        csrf_token = csrf_client.get(reverse("auth-csrf")).cookies["csrftoken"].value
+
+        response = csrf_client.delete(
+            self.detail_url(account),
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        account.refresh_from_db()
+        self.assertTrue(account.is_archived)
+
+    def test_detail_rejects_post_and_put(self):
+        account = self.create_account()
+        self.client.force_login(self.user)
+        url = self.detail_url(account)
+
+        for method in ("post", "put"):
+            with self.subTest(method=method):
+                response = getattr(self.client, method)(
+                    url,
+                    {"name": "Ignored"},
+                    format="json",
+                )
+                self.assertEqual(
+                    response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED
+                )
+
+        account.refresh_from_db()
+        self.assertEqual(account.name, "Everyday Checking")
+        self.assertFalse(account.is_archived)
+
+    def test_detail_supports_options_and_head(self):
+        account = self.create_account()
+        self.client.force_login(self.user)
+        url = self.detail_url(account)
+
+        self.assertEqual(self.client.options(url).status_code, status.HTTP_200_OK)
+        self.assertEqual(self.client.head(url).status_code, status.HTTP_200_OK)
