@@ -376,3 +376,67 @@ class LogoutAPITests(APITestCase):
         response = self.client.get(reverse("auth-logout"))
 
         self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+
+class CurrentUserAPITests(APITestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            email="current@example.com",
+            password="StrongTestPassword123!",
+        )
+        self.other_user = get_user_model().objects.create_user(
+            email="other@example.com",
+            password="AnotherStrongPassword123!",
+        )
+
+    def test_me_returns_authenticated_users_public_profile(self):
+        csrf_client = APIClient(enforce_csrf_checks=True)
+        csrf_client.force_login(self.user)
+        user_count = get_user_model().objects.count()
+
+        response = csrf_client.get(reverse("auth-me"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data,
+            {
+                "id": self.user.id,
+                "email": self.user.email,
+            },
+        )
+        self.assertNotIn("password", response.data)
+        self.assertNotIn("is_staff", response.data)
+        self.assertNotIn("is_superuser", response.data)
+        self.assertNotIn(self.other_user.email, response.data.values())
+        self.assertEqual(get_user_model().objects.count(), user_count)
+
+    def test_me_rejects_unauthenticated_request(self):
+        response = self.client.get(reverse("auth-me"))
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(
+            response.data,
+            {"detail": "Authentication credentials were not provided."},
+        )
+
+    def test_me_rejects_inactive_user(self):
+        self.user.is_active = False
+        self.user.save(update_fields=["is_active"])
+        self.client.force_login(self.user)
+
+        response = self.client.get(reverse("auth-me"))
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(
+            response.data,
+            {"detail": "Authentication credentials were not provided."},
+        )
+
+    def test_me_rejects_unsupported_method(self):
+        self.client.force_login(self.user)
+        user_count = get_user_model().objects.count()
+
+        response = self.client.post(reverse("auth-me"))
+
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        self.assertEqual(get_user_model().objects.count(), user_count)

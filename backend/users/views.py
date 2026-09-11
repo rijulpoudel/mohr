@@ -47,6 +47,12 @@ def login_view(request):
     return Response(UserSerializer(user).data)
 
 
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def current_user(request):
+    return Response(UserSerializer(request.user).data)
+
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def logout_view(request):
