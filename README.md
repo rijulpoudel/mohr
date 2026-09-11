@@ -111,6 +111,40 @@ CORS alone does not make CSRF checks pass; `CSRF_TRUSTED_ORIGINS` is separate.
 - A failed CSRF check returns JSON `403` with a generic detail. Internal failure reasons are not exposed.
 - Unsupported methods return `405`.
 
+## Accounts API
+
+Accounts routes live under `/api/accounts/`. Every request must come from an authenticated session, and ownership always comes from that session, never from client input. An object ID never grants access: requesting another user's account returns `404`, the same as a missing ID, so the response never reveals whether another user owns that ID.
+
+Every account response uses exactly this public shape:
+
+```json
+{
+  "id": 1,
+  "name": "Everyday Checking",
+  "account_type": "checking",
+  "opening_balance": "100.00",
+  "is_archived": false,
+  "created_at": "2026-09-11T14:52:48.008850Z",
+  "updated_at": "2026-09-11T14:52:48.008850Z"
+}
+```
+
+`opening_balance` is always a JSON string with exactly two decimal places, so money values never lose precision. It may be positive, zero, or negative; a negative opening balance means the account started in debt, such as a credit card balance owed. `account_type` is one of `checking`, `savings`, `cash`, or `credit_card`.
+
+| Method | Endpoint | Purpose | Success |
+| --- | --- | --- | --- |
+| `GET` | `/api/accounts/` | List the authenticated user's accounts in creation order, including archived ones | `200` with a JSON array |
+| `POST` | `/api/accounts/` | Create an account owned by the authenticated user | `201` with the account |
+| `GET` | `/api/accounts/<id>/` | Retrieve one owned account, archived or not | `200` with the account |
+| `PATCH` | `/api/accounts/<id>/` | Partially update an owned account | `200` with the account |
+| `DELETE` | `/api/accounts/<id>/` | Archive an owned account | `204` with no body |
+
+Only `name`, `account_type`, and `opening_balance` are writable. `id`, `is_archived`, `created_at`, and `updated_at` are read-only: values sent for them are ignored. `PATCH` changes only the fields included in the request and leaves omitted fields unchanged. There is no full `PUT` update.
+
+`DELETE` never removes a row. It sets `is_archived` to `true` and preserves the account, its owner, and its data so historical transactions can still reference it. Archived accounts remain visible in list and retrieve responses. Repeated `DELETE` is idempotent and returns `204` again.
+
+Every endpoint requires an authenticated session, and unauthenticated requests return `401` before method dispatch. Authenticated clients may use only the methods listed above; unsupported methods return `405`. `POST`, `PATCH`, and `DELETE` additionally require the CSRF token from `/api/auth/csrf/`, sent as the `X-CSRFToken` header, and a failed CSRF check returns `403`.
+
 ## Repository history
 
 Mohr began as an Express, TypeScript, and Prisma prototype. That work remains preserved in Git history and the `express-prototype-v0.1` tag for reference. The production direction is now Django REST Framework.
