@@ -65,6 +65,52 @@ User
 └── Dashboard summaries
 ```
 
+## Authentication API
+
+Mohr uses Django server-side session authentication, not JWT. This fits a first-party browser frontend: the session cookie is HttpOnly, the server can revoke a session at any time, and no token has to be stored or refreshed in JavaScript. All authentication routes live under `/api/auth/`.
+
+Successful responses return only the public user shape:
+
+```json
+{"id": 1, "email": "user@example.com"}
+```
+
+Password hashes, `is_staff`, and `is_superuser` are never returned.
+
+| Method | Endpoint | Purpose | Success |
+| --- | --- | --- | --- |
+| `GET` | `/api/auth/csrf/` | Set the CSRF cookie before an unsafe request | `200` |
+| `POST` | `/api/auth/register/` | Create a user from `email` and `password` | `201` with the public user shape |
+| `POST` | `/api/auth/login/` | Start a session | `200` with the public user shape |
+| `POST` | `/api/auth/logout/` | End the session | `204` with no body |
+| `GET` | `/api/auth/me/` | Return the authenticated user | `200` with the public user shape |
+
+Registration does not start a session; the user logs in afterward.
+
+### Browser flow
+
+1. `GET /api/auth/csrf/` to receive the `csrftoken` cookie.
+2. Read the cookie value and send it as the `X-CSRFToken` header on `POST /api/auth/register/`, `POST /api/auth/login/`, and later authenticated unsafe requests.
+3. On successful login, Django sends the session cookie. The browser sends it automatically on later requests.
+4. `GET /api/auth/me/` restores the current user after a page reload.
+5. `POST /api/auth/logout/` with the CSRF header ends the session and clears the session cookie.
+
+Safe `GET` requests such as `/api/auth/csrf/` and `/api/auth/me/` do not require a CSRF token. Registration, login, and logout are CSRF protected. Same-origin requests include cookies automatically. If the frontend and backend run on different origins, three separate requirements apply, and none is configured yet:
+
+1. Include credentials on requests (`credentials: "include"` with `fetch`, `withCredentials: true` with axios).
+2. Allow the exact frontend origin in credentialed CORS.
+3. List that origin in Django's `CSRF_TRUSTED_ORIGINS` so unsafe requests pass CSRF checks.
+
+CORS alone does not make CSRF checks pass; `CSRF_TRUSTED_ORIGINS` is separate.
+
+### Authentication errors
+
+- Missing authentication returns JSON `401` with `{"detail": "Authentication credentials were not provided."}`.
+- A failed login returns JSON `401` with `{"detail": "Invalid email or password."}` for an unknown email, a wrong password, or an inactive user, so the response never reveals which part failed.
+- Invalid registration or login input returns JSON `400` with field errors.
+- A failed CSRF check returns JSON `403` with a generic detail. Internal failure reasons are not exposed.
+- Unsupported methods return `405`.
+
 ## Repository history
 
 Mohr began as an Express, TypeScript, and Prisma prototype. That work remains preserved in Git history and the `express-prototype-v0.1` tag for reference. The production direction is now Django REST Framework.

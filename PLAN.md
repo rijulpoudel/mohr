@@ -196,6 +196,7 @@ Object IDs alone never grant access. A user requesting another user's object rec
 ## API outline
 
 ```text
+GET    /api/auth/csrf/
 POST   /api/auth/register/
 POST   /api/auth/login/
 POST   /api/auth/logout/
@@ -228,7 +229,7 @@ DELETE /api/budgets/<id>/
 GET    /api/dashboard/summary/
 ```
 
-The exact authentication mechanism will be selected during the authentication issue. Security and browser behavior matter more than forcing the old Express JWT design into Django.
+Mohr uses Django server-side session authentication for its first-party browser frontend, not JWT. The session cookie is HttpOnly and server-revocable, and no token is stored in JavaScript, which limits XSS exposure. Registration, login, logout, and later authenticated unsafe requests are CSRF protected: the frontend fetches the CSRF cookie and sends the matching `X-CSRFToken` header. Cross-origin deployments require three separate settings: credentials included on requests, credentialed CORS for the exact frontend origin, and that origin in `CSRF_TRUSTED_ORIGINS` for unsafe requests. CORS alone does not satisfy CSRF checks, and none of these settings is configured yet.
 
 ## Implementation order
 
