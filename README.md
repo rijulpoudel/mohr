@@ -143,7 +143,7 @@ Only `name`, `account_type`, and `opening_balance` are writable. `id`, `is_archi
 
 `DELETE` never removes a row. It sets `is_archived` to `true` and preserves the account, its owner, and its data so historical transactions can still reference it. Archived accounts remain visible in list and retrieve responses. Repeated `DELETE` is idempotent and returns `204` again.
 
-`GET` requires an authenticated session. `POST`, `PATCH`, and `DELETE` additionally require the CSRF token from `/api/auth/csrf/`, sent as the `X-CSRFToken` header. Missing authentication returns `401`, a failed CSRF check returns `403`, and unsupported methods return `405`.
+Every endpoint requires an authenticated session, and unauthenticated requests return `401` before method dispatch. Authenticated clients may use only the methods listed above; unsupported methods return `405`. `POST`, `PATCH`, and `DELETE` additionally require the CSRF token from `/api/auth/csrf/`, sent as the `X-CSRFToken` header, and a failed CSRF check returns `403`.
 
 ## Repository history
 

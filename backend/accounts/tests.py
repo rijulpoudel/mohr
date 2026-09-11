@@ -309,15 +309,36 @@ class AccountCollectionAPITests(APITestCase):
             },
         )
 
-    def test_create_ownership_comes_only_from_session(self):
+    def test_create_ownership_and_server_controlled_fields_ignore_client_input(self):
         self.client.force_login(self.user)
 
-        response = self.post_account(user=self.other_user.id)
+        response = self.post_account(
+            user=self.other_user.id,
+            id=999,
+            is_archived=True,
+            created_at="2000-01-01T00:00:00Z",
+            updated_at="2000-01-01T00:00:00Z",
+        )
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         account = Account.objects.get()
+        self.assertEqual(Account.objects.count(), 1)
         self.assertEqual(account.user, self.user)
+        self.assertNotEqual(account.id, 999)
+        self.assertFalse(account.is_archived)
+        self.assertNotEqual(account.created_at.year, 2000)
+        self.assertNotEqual(account.updated_at.year, 2000)
         self.assertNotIn("user", response.data)
+        self.assertEqual(response.data["id"], account.id)
+        self.assertFalse(response.data["is_archived"])
+        self.assertEqual(
+            response.data["created_at"],
+            self.format_datetime(account.created_at),
+        )
+        self.assertEqual(
+            response.data["updated_at"],
+            self.format_datetime(account.updated_at),
+        )
 
     def test_create_rejects_blank_or_whitespace_only_name(self):
         self.client.force_login(self.user)
