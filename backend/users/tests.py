@@ -310,3 +310,69 @@ class LoginAPITests(APITestCase):
             int(csrf_client.session["_auth_user_id"]),
             self.user.id,
         )
+
+
+class LogoutAPITests(APITestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            email="user@example.com",
+            password="StrongTestPassword123!",
+        )
+
+    def test_logout_ends_session(self):
+        self.client.force_login(self.user)
+        self.assertEqual(
+            int(self.client.session["_auth_user_id"]),
+            self.user.id,
+        )
+
+        response = self.client.post(reverse("auth-logout"))
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(response.content, b"")
+        self.assertNotIn("_auth_user_id", self.client.session)
+
+    def test_logout_rejects_unauthenticated_request(self):
+        response = self.client.post(reverse("auth-logout"))
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(
+            response.data,
+            {"detail": "Authentication credentials were not provided."},
+        )
+
+    def test_logout_requires_csrf_token(self):
+        csrf_client = APIClient(enforce_csrf_checks=True)
+        csrf_client.force_login(self.user)
+
+        response = csrf_client.post(reverse("auth-logout"))
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response["Content-Type"], "application/json")
+        self.assertIn("detail", response.data)
+        self.assertEqual(
+            int(csrf_client.session["_auth_user_id"]),
+            self.user.id,
+        )
+
+    def test_csrf_token_allows_logout(self):
+        csrf_client = APIClient(enforce_csrf_checks=True)
+        csrf_client.force_login(self.user)
+        csrf_response = csrf_client.get(reverse("auth-csrf"))
+        csrf_token = csrf_response.cookies["csrftoken"].value
+
+        response = csrf_client.post(
+            reverse("auth-logout"),
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(response.content, b"")
+        self.assertNotIn("_auth_user_id", csrf_client.session)
+
+    def test_logout_rejects_unsupported_method(self):
+        self.client.force_login(self.user)
+
+        response = self.client.get(reverse("auth-logout"))
+
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)

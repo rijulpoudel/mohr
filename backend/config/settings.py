@@ -48,6 +48,10 @@ INSTALLED_APPS = [
 AUTH_USER_MODEL = "users.User"
 CSRF_FAILURE_VIEW = "config.views.csrf_failure"
 
+REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": ("users.authentication.SessionAuthentication",),
+}
+
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",

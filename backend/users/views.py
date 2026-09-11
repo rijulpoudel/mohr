@@ -1,9 +1,10 @@
 from django.contrib.auth import authenticate
 from django.contrib.auth import login as django_login
+from django.contrib.auth import logout as django_logout
 from django.views.decorators.csrf import csrf_protect, ensure_csrf_cookie
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
 from users.serializers import LoginSerializer, RegistrationSerializer, UserSerializer
@@ -44,3 +45,10 @@ def login_view(request):
 
     django_login(request, user)
     return Response(UserSerializer(user).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def logout_view(request):
+    django_logout(request)
+    return Response(status=status.HTTP_204_NO_CONTENT)
