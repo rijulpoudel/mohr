@@ -145,6 +145,39 @@ Only `name`, `account_type`, and `opening_balance` are writable. `id`, `is_archi
 
 Every endpoint requires an authenticated session, and unauthenticated requests return `401` before method dispatch. Authenticated clients may use only the methods listed above; unsupported methods return `405`. `POST`, `PATCH`, and `DELETE` additionally require the CSRF token from `/api/auth/csrf/`, sent as the `X-CSRFToken` header, and a failed CSRF check returns `403`.
 
+## Categories API
+
+Categories routes live under `/api/categories/`. Every request must come from an authenticated session, and ownership always comes from that session, never from client input. An object ID never grants access: requesting another user's category returns `404`, the same as a missing ID, so the response never reveals whether another user owns that ID.
+
+Every category response uses exactly this public shape:
+
+```json
+{
+  "id": 1,
+  "name": "Salary",
+  "category_type": "income",
+  "is_archived": false,
+  "created_at": "2026-09-11T16:08:00.000000Z",
+  "updated_at": "2026-09-11T16:08:00.000000Z"
+}
+```
+
+`category_type` is exactly one of `income` or `expense`. A category name is unique for the authenticated user within its type after surrounding whitespace is trimmed and letter case is ignored, so `Food` and ` food ` are the same name. The same name may be used for an income category and an expense category, different users may use the same name freely, and archived categories continue to reserve their names.
+
+| Method | Endpoint | Purpose | Success |
+| --- | --- | --- | --- |
+| `GET` | `/api/categories/` | List the authenticated user's categories in creation order, including archived ones | `200` with a JSON array |
+| `POST` | `/api/categories/` | Create a category owned by the authenticated user | `201` with the category |
+| `GET` | `/api/categories/<id>/` | Retrieve one owned category, archived or not | `200` with the category |
+| `PATCH` | `/api/categories/<id>/` | Rename an owned category | `200` with the category |
+| `DELETE` | `/api/categories/<id>/` | Archive an owned category | `204` with no body |
+
+`name` and `category_type` are writable when creating a category. After creation only `name` is writable; `category_type`, `id`, `is_archived`, `created_at`, and `updated_at` are read-only, and values sent for them are ignored. `PATCH` changes only the fields included in the request and leaves omitted fields unchanged. There is no full `PUT` update.
+
+`DELETE` never removes a row. It sets `is_archived` to `true` and preserves the row, its owner, its name, its type, and its `created_at` so historical transactions can still reference it; `updated_at` records the archive operation. Archived categories remain visible in list and retrieve responses. Repeated `DELETE` is idempotent and returns `204` again.
+
+Every endpoint requires an authenticated session, and unauthenticated requests return `401` before method dispatch. Authenticated clients may use only the methods listed above; unsupported methods return `405`. `POST`, `PATCH`, and `DELETE` additionally require the CSRF token from `/api/auth/csrf/`, sent as the `X-CSRFToken` header, and a failed CSRF check returns `403`.
+
 ## Repository history
 
 Mohr began as an Express, TypeScript, and Prisma prototype. That work remains preserved in Git history and the `express-prototype-v0.1` tag for reference. The production direction is now Django REST Framework.
