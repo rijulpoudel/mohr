@@ -4,11 +4,81 @@ from rest_framework import serializers
 
 from accounts.models import Account
 from categories.models import Category
-from transactions.models import Transaction
+from transactions.models import Transaction, TransactionType
 
 ARCHIVED_ACCOUNT_MESSAGE = "Archived accounts cannot be used for new transactions."
 ARCHIVED_CATEGORY_MESSAGE = "Archived categories cannot be used for new transactions."
 CATEGORY_TYPE_MISMATCH_MESSAGE = "Category type must match the transaction type."
+
+
+# DRF treats an explicit blank value for an optional field in QueryDict/HTML
+# input as "not provided" (get_value returns the `empty` sentinel), but this
+# API must reject explicit blanks with a field-level 400.
+class StrictPrimaryKeyRelatedField(serializers.PrimaryKeyRelatedField):
+    def get_value(self, dictionary):
+        value = super().get_value(dictionary)
+        if value is serializers.empty and self.field_name in dictionary:
+            return ""
+        return value
+
+
+class StrictChoiceField(serializers.ChoiceField):
+    def get_value(self, dictionary):
+        value = super().get_value(dictionary)
+        if value is serializers.empty and self.field_name in dictionary:
+            return ""
+        return value
+
+
+class StrictDateField(serializers.DateField):
+    def get_value(self, dictionary):
+        value = super().get_value(dictionary)
+        if value is serializers.empty and self.field_name in dictionary:
+            return ""
+        return value
+
+
+REVERSED_DATE_RANGE_MESSAGE = "Start date must not be after end date."
+
+
+class TransactionFilterSerializer(serializers.Serializer):
+    account = StrictPrimaryKeyRelatedField(
+        queryset=Account.objects.none(),
+        required=False,
+        error_messages={
+            "does_not_exist": "Invalid account.",
+            "incorrect_type": "Invalid account.",
+        },
+    )
+    category = StrictPrimaryKeyRelatedField(
+        queryset=Category.objects.none(),
+        required=False,
+        error_messages={
+            "does_not_exist": "Invalid category.",
+            "incorrect_type": "Invalid category.",
+        },
+    )
+    transaction_type = StrictChoiceField(
+        choices=TransactionType.choices,
+        required=False,
+    )
+    start_date = StrictDateField(required=False)
+    end_date = StrictDateField(required=False)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        request = self.context["request"]
+        self.fields["account"].queryset = Account.objects.filter(user=request.user)
+        self.fields["category"].queryset = Category.objects.filter(user=request.user)
+
+    def validate(self, attrs):
+        start_date = attrs.get("start_date")
+        end_date = attrs.get("end_date")
+        if start_date is not None and end_date is not None and start_date > end_date:
+            raise serializers.ValidationError(
+                {"end_date": [REVERSED_DATE_RANGE_MESSAGE]}
+            )
+        return attrs
 
 
 class TransactionSerializer(serializers.ModelSerializer):

@@ -1658,3 +1658,480 @@ class TransactionDetailAPITests(APITestCase):
         self.assertIn("category", cross_user_category.json())
         transaction.refresh_from_db()
         self.assertEqual(self.snapshot(transaction), before)
+
+
+class TransactionFilterAPITests(APITestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = get_user_model().objects.create_user(
+            email="transaction-filter-owner@example.com",
+            password="TestOnlyPassword123!",
+        )
+        cls.other_user = get_user_model().objects.create_user(
+            email="transaction-filter-other@example.com",
+            password="TestOnlyPassword123!",
+        )
+        cls.account = Account.objects.create(
+            user=cls.user,
+            name="Everyday Checking",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("100.00"),
+        )
+        cls.second_account = Account.objects.create(
+            user=cls.user,
+            name="Travel Savings",
+            account_type=AccountType.SAVINGS,
+            opening_balance=Decimal("500.00"),
+        )
+        cls.archived_account = Account.objects.create(
+            user=cls.user,
+            name="Old Card",
+            account_type=AccountType.CREDIT_CARD,
+            opening_balance=Decimal("0.00"),
+            is_archived=True,
+        )
+        cls.category = Category.objects.create(
+            user=cls.user,
+            name="Salary",
+            category_type=CategoryType.INCOME,
+        )
+        cls.expense_category = Category.objects.create(
+            user=cls.user,
+            name="Groceries",
+            category_type=CategoryType.EXPENSE,
+        )
+        cls.freelance_category = Category.objects.create(
+            user=cls.user,
+            name="Freelance",
+            category_type=CategoryType.INCOME,
+        )
+        cls.archived_category = Category.objects.create(
+            user=cls.user,
+            name="Old Rent",
+            category_type=CategoryType.EXPENSE,
+            is_archived=True,
+        )
+        cls.other_account = Account.objects.create(
+            user=cls.other_user,
+            name="Their Checking",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("100.00"),
+        )
+        cls.other_category = Category.objects.create(
+            user=cls.other_user,
+            name="Their Salary",
+            category_type=CategoryType.INCOME,
+        )
+        cls.other_expense_category = Category.objects.create(
+            user=cls.other_user,
+            name="Their Groceries",
+            category_type=CategoryType.EXPENSE,
+        )
+
+    def create_transaction(self, **overrides):
+        values = {
+            "user": self.user,
+            "account": self.account,
+            "category": self.category,
+            "transaction_type": TransactionType.INCOME,
+            "amount": Decimal("25.50"),
+            "date": date(2026, 9, 1),
+        }
+        values.update(overrides)
+        return Transaction.objects.create(**values)
+
+    def get_list(self, **params):
+        return self.client.get(reverse("transaction-list"), params)
+
+    def test_list_filters_by_account_and_never_exposes_other_users_rows(self):
+        on_first = self.create_transaction(
+            amount=Decimal("50.00"), date=date(2026, 9, 1)
+        )
+        on_second = self.create_transaction(
+            account=self.second_account,
+            amount=Decimal("25.50"),
+            date=date(2026, 9, 10),
+        )
+        expense_on_first = self.create_transaction(
+            category=self.expense_category,
+            transaction_type=TransactionType.EXPENSE,
+            amount=Decimal("10.00"),
+            date=date(2026, 8, 1),
+        )
+        self.create_transaction(
+            user=self.other_user,
+            account=self.other_account,
+            category=self.other_category,
+            date=date(2026, 9, 15),
+        )
+        self.client.force_login(self.user)
+
+        response = self.get_list(account=self.account.id)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [item["id"] for item in response.data],
+            [on_first.id, expense_on_first.id],
+        )
+        self.assertNotIn(on_second.id, [item["id"] for item in response.data])
+        self.assertEqual(Transaction.objects.count(), 4)
+
+    def test_list_account_filter_accepts_owned_archived_account(self):
+        transaction = self.create_transaction(
+            account=self.archived_account,
+            date=date(2026, 9, 2),
+        )
+        self.client.force_login(self.user)
+
+        response = self.get_list(account=self.archived_account.id)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([item["id"] for item in response.data], [transaction.id])
+
+    def test_list_account_filter_rejects_foreign_and_missing_identically(self):
+        self.client.force_login(self.user)
+
+        foreign = self.get_list(account=self.other_account.id)
+        missing = self.get_list(account=999999)
+
+        self.assertEqual(foreign.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(missing.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(foreign.json(), missing.json())
+        self.assertEqual(foreign.json(), {"account": ["Invalid account."]})
+
+    def test_list_account_filter_rejects_blank_noninteger_zero_negative(self):
+        self.client.force_login(self.user)
+
+        for value in ("", "abc", "0", "-5"):
+            with self.subTest(account=value):
+                response = self.get_list(account=value)
+
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn("account", response.data)
+
+    def test_list_filters_by_category_and_never_exposes_other_users_rows(self):
+        income = self.create_transaction(amount=Decimal("50.00"), date=date(2026, 9, 1))
+        expense = self.create_transaction(
+            category=self.expense_category,
+            transaction_type=TransactionType.EXPENSE,
+            amount=Decimal("10.00"),
+            date=date(2026, 8, 1),
+        )
+        self.create_transaction(
+            account=self.second_account,
+            amount=Decimal("25.50"),
+            date=date(2026, 9, 10),
+        )
+        self.create_transaction(
+            user=self.other_user,
+            account=self.other_account,
+            category=self.other_expense_category,
+            transaction_type=TransactionType.EXPENSE,
+            date=date(2026, 9, 15),
+        )
+        self.client.force_login(self.user)
+
+        response = self.get_list(category=self.expense_category.id)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([item["id"] for item in response.data], [expense.id])
+        self.assertNotIn(income.id, [item["id"] for item in response.data])
+        self.assertEqual(Transaction.objects.count(), 4)
+
+    def test_list_category_filter_accepts_owned_archived_category(self):
+        transaction = self.create_transaction(
+            category=self.archived_category,
+            transaction_type=TransactionType.EXPENSE,
+            date=date(2026, 9, 2),
+        )
+        self.client.force_login(self.user)
+
+        response = self.get_list(category=self.archived_category.id)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([item["id"] for item in response.data], [transaction.id])
+
+    def test_list_category_filter_rejects_foreign_and_missing_identically(self):
+        self.client.force_login(self.user)
+
+        foreign = self.get_list(category=self.other_category.id)
+        missing = self.get_list(category=999999)
+
+        self.assertEqual(foreign.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(missing.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(foreign.json(), missing.json())
+        self.assertEqual(foreign.json(), {"category": ["Invalid category."]})
+
+    def test_list_category_filter_rejects_blank_noninteger_zero_negative(self):
+        self.client.force_login(self.user)
+
+        for value in ("", "abc", "0", "-5"):
+            with self.subTest(category=value):
+                response = self.get_list(category=value)
+
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn("category", response.data)
+
+    def test_list_filters_by_transaction_type_exactly(self):
+        income = self.create_transaction(amount=Decimal("50.00"), date=date(2026, 9, 1))
+        expense = self.create_transaction(
+            category=self.expense_category,
+            transaction_type=TransactionType.EXPENSE,
+            amount=Decimal("10.00"),
+            date=date(2026, 8, 1),
+        )
+        later_income = self.create_transaction(
+            account=self.second_account,
+            amount=Decimal("25.50"),
+            date=date(2026, 9, 10),
+        )
+        self.client.force_login(self.user)
+
+        income_response = self.get_list(transaction_type="income")
+        expense_response = self.get_list(transaction_type="expense")
+
+        self.assertEqual(income_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [item["id"] for item in income_response.data],
+            [later_income.id, income.id],
+        )
+        self.assertEqual(expense_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [item["id"] for item in expense_response.data],
+            [expense.id],
+        )
+
+    def test_list_transaction_type_filter_rejects_invalid_variants(self):
+        self.client.force_login(self.user)
+
+        for value in ("transfer", "INCOME", "Income", "", " income", "null"):
+            with self.subTest(transaction_type=value):
+                response = self.get_list(transaction_type=value)
+
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn("transaction_type", response.data)
+
+    def test_list_filters_by_start_date_inclusive(self):
+        before = self.create_transaction(amount=Decimal("50.00"), date=date(2026, 8, 1))
+        on_boundary = self.create_transaction(
+            account=self.second_account,
+            amount=Decimal("25.50"),
+            date=date(2026, 9, 1),
+        )
+        after = self.create_transaction(
+            account=self.second_account,
+            amount=Decimal("30.00"),
+            date=date(2026, 9, 10),
+        )
+        self.client.force_login(self.user)
+
+        response = self.get_list(start_date="2026-09-01")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [item["id"] for item in response.data],
+            [after.id, on_boundary.id],
+        )
+        self.assertNotIn(before.id, [item["id"] for item in response.data])
+
+    def test_list_filters_by_end_date_inclusive(self):
+        before = self.create_transaction(amount=Decimal("50.00"), date=date(2026, 8, 1))
+        on_boundary = self.create_transaction(
+            account=self.second_account,
+            amount=Decimal("25.50"),
+            date=date(2026, 8, 31),
+        )
+        after = self.create_transaction(
+            account=self.second_account,
+            amount=Decimal("30.00"),
+            date=date(2026, 9, 10),
+        )
+        self.client.force_login(self.user)
+
+        response = self.get_list(end_date="2026-08-31")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [item["id"] for item in response.data],
+            [on_boundary.id, before.id],
+        )
+        self.assertNotIn(after.id, [item["id"] for item in response.data])
+
+    def test_list_equal_start_and_end_dates_return_that_single_day(self):
+        matching = self.create_transaction(
+            amount=Decimal("50.00"), date=date(2026, 9, 1)
+        )
+        self.create_transaction(
+            account=self.second_account,
+            amount=Decimal("25.50"),
+            date=date(2026, 9, 2),
+        )
+        self.client.force_login(self.user)
+
+        response = self.get_list(start_date="2026-09-01", end_date="2026-09-01")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([item["id"] for item in response.data], [matching.id])
+
+    def test_list_rejects_invalid_and_blank_dates(self):
+        self.client.force_login(self.user)
+
+        for field in ("start_date", "end_date"):
+            for value in ("2026-13-01", "not-a-date", ""):
+                with self.subTest(field=field, value=value):
+                    response = self.get_list(**{field: value})
+
+                    self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                    self.assertIn(field, response.data)
+
+    def test_list_reversed_date_range_returns_400_under_end_date(self):
+        self.client.force_login(self.user)
+
+        response = self.get_list(start_date="2026-10-01", end_date="2026-09-01")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("end_date", response.data)
+
+    def test_list_combines_filters_with_logical_and(self):
+        self.create_transaction(amount=Decimal("50.00"), date=date(2026, 9, 1))
+        outside_range = self.create_transaction(
+            account=self.second_account,
+            amount=Decimal("25.50"),
+            date=date(2026, 9, 20),
+        )
+        same_type_decoy = self.create_transaction(
+            account=self.second_account,
+            category=self.freelance_category,
+            amount=Decimal("21.00"),
+            date=date(2026, 9, 10),
+        )
+        matching = self.create_transaction(
+            account=self.second_account,
+            category=self.category,
+            amount=Decimal("30.00"),
+            date=date(2026, 9, 10),
+        )
+        self.create_transaction(
+            user=self.other_user,
+            account=self.other_account,
+            category=self.other_category,
+            date=date(2026, 9, 10),
+        )
+        self.client.force_login(self.user)
+
+        response = self.get_list(
+            account=self.second_account.id,
+            category=self.category.id,
+            transaction_type="income",
+            start_date="2026-09-01",
+            end_date="2026-09-15",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([item["id"] for item in response.data], [matching.id])
+        self.assertNotIn(outside_range.id, [item["id"] for item in response.data])
+        self.assertNotIn(same_type_decoy.id, [item["id"] for item in response.data])
+
+    def test_list_valid_filter_with_no_matches_returns_empty_array(self):
+        self.create_transaction(amount=Decimal("50.00"), date=date(2026, 9, 1))
+        self.client.force_login(self.user)
+
+        response = self.get_list(
+            account=self.second_account.id,
+            transaction_type="expense",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, [])
+
+    def test_list_filtered_results_preserve_model_ordering(self):
+        older = self.create_transaction(amount=Decimal("50.00"), date=date(2026, 8, 1))
+        newer = self.create_transaction(
+            account=self.second_account,
+            amount=Decimal("25.50"),
+            date=date(2026, 9, 10),
+        )
+        newest = self.create_transaction(
+            account=self.second_account,
+            amount=Decimal("30.00"),
+            date=date(2026, 9, 15),
+        )
+        self.client.force_login(self.user)
+
+        response = self.get_list(account=self.second_account.id)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [item["id"] for item in response.data],
+            [newest.id, newer.id],
+        )
+        self.assertNotIn(older.id, [item["id"] for item in response.data])
+
+    def test_list_invalid_filters_do_not_mutate_rows(self):
+        transaction = self.create_transaction(
+            amount=Decimal("50.00"), date=date(2026, 9, 1)
+        )
+        before = (Transaction.objects.count(), transaction.note)
+        self.client.force_login(self.user)
+
+        self.get_list(account="abc")
+        self.get_list(category=0)
+        self.get_list(transaction_type="transfer")
+        self.get_list(start_date="not-a-date")
+        self.get_list(start_date="2026-10-01", end_date="2026-09-01")
+
+        transaction.refresh_from_db()
+        self.assertEqual((Transaction.objects.count(), transaction.note), before)
+
+    def test_list_anonymous_malformed_filter_still_returns_401(self):
+        response = self.get_list(account="abc", start_date="2026-13-01")
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(
+            response.data,
+            {"detail": "Authentication credentials were not provided."},
+        )
+
+    def test_detail_actions_ignore_query_params(self):
+        transaction = self.create_transaction()
+        other_transaction = self.create_transaction(
+            user=self.other_user,
+            account=self.other_account,
+            category=self.other_category,
+        )
+        self.client.force_login(self.user)
+        owned_url = reverse("transaction-detail", args=[transaction.pk])
+        foreign_url = reverse("transaction-detail", args=[other_transaction.pk])
+        invalid_query = "?account=abc&start_date=not-a-date&transaction_type=transfer"
+
+        get_response = self.client.get(f"{owned_url}{invalid_query}")
+        patch_response = self.client.patch(
+            f"{owned_url}{invalid_query}",
+            {"note": "Filter ignored"},
+            format="json",
+        )
+        delete_response = self.client.delete(f"{owned_url}{invalid_query}")
+        foreign_response = self.client.get(f"{foreign_url}{invalid_query}")
+
+        self.assertEqual(get_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(patch_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(foreign_response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(Transaction.objects.filter(pk=transaction.pk).exists())
+        self.assertTrue(Transaction.objects.filter(pk=other_transaction.pk).exists())
+
+    def test_head_and_options_remain_successful_with_filter_params(self):
+        self.create_transaction()
+        self.client.force_login(self.user)
+
+        head_response = self.client.head(
+            reverse("transaction-list"),
+            {"account": self.account.id, "transaction_type": "income"},
+        )
+        options_response = self.client.options(
+            reverse("transaction-list"),
+            {"start_date": "2026-09-01"},
+        )
+
+        self.assertEqual(head_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(options_response.status_code, status.HTTP_200_OK)
