@@ -274,6 +274,39 @@ The collection returns a plain JSON array with no pagination. It is ordered by n
 
 Every endpoint requires an authenticated session, and unauthenticated requests return `401` before method dispatch. Authenticated clients may use only the methods listed above; unsupported methods return `405`. `POST`, `PATCH`, and `DELETE` additionally require the CSRF token from `/api/auth/csrf/`, sent as the `X-CSRFToken` header, and a failed CSRF check returns `403`.
 
+## Dashboard Summary API
+
+The dashboard summary route is `GET /api/dashboard/summary/`. Every request must come from an authenticated session, and all values are calculated live from the authenticated user's own records; another user's data never affects the response.
+
+The response uses exactly this shape:
+
+```json
+{
+  "total_balance": "1420.50",
+  "current_month_income": "2500.00",
+  "current_month_expenses": "1579.50",
+  "total_budgeted": "500.00",
+  "remaining_budget": "424.75",
+  "recent_transactions": []
+}
+```
+
+| Method | Endpoint | Purpose | Success |
+| --- | --- | --- | --- |
+| `GET` | `/api/dashboard/summary/` | Read the authenticated user's dashboard summary | `200` with the summary object |
+
+`total_balance` is the sum of current balances across the authenticated user's active accounts only. Each account balance is its opening balance plus owned income minus owned expense across all dates; archived accounts contribute nothing. `current_month_income` and `current_month_expenses` are the user's income and expense transaction sums from the first day of the current month up to, but excluding, the first day of the next month, using Django's active timezone (currently UTC). History linked to archived accounts and categories still counts.
+
+`total_budgeted` is the sum of the user's budget amounts for the current month, including budgets whose categories were later archived. `remaining_budget` is the sum of each current-month budget's live remaining amount, following the same formula as the budgets API: budgeted minus owned expense transactions in the same category and calendar year and month. Overspending makes it negative.
+
+`recent_transactions` contains at most the five newest owned transactions in the exact transaction shape and order described above, including transactions outside the current month and those linked to archived accounts or categories. The owner is never exposed.
+
+All five money fields are JSON strings with exactly two decimal places, so money values never lose precision. They are calculated with the same 30-digit derived capacity used by account balances and budget spent/remaining totals, safely exceeding a single stored 12-digit amount. A user with no financial data receives `"0.00"` for every money field and `[]` for `recent_transactions`.
+
+The endpoint is read-only and never modifies data. Every request requires an authenticated session, and unauthenticated requests return `401` before method dispatch. Normal session authentication and CSRF checks happen before method dispatch: an authenticated unsafe request without a valid CSRF token returns the generic `403` JSON failure, and only after authentication and CSRF checks pass does an unsupported unsafe method reach dispatch and return `405`. After successful authentication and any required CSRF validation, unsupported methods return `405`. There are no query parameters.
+
+Query efficiency is fixed and independent of data size: after authentication, the financial summary itself is produced by exactly four SQL queries regardless of how many accounts, budgets, or transactions the user owns. One annotated query derives active-account balances, one aggregate query sums current-month income and expenses, one annotated query computes current-month budget spent and remaining totals, and one query fetches the five recent transactions. The normal session and user authentication lookups that DRF performs for any authenticated request are separate and not part of that count.
+
 ## Repository history
 
 Mohr began as an Express, TypeScript, and Prisma prototype. That work remains preserved in Git history and the `express-prototype-v0.1` tag for reference. The production direction is now Django REST Framework.
