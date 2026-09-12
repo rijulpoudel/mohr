@@ -45,6 +45,7 @@ INSTALLED_APPS = [
     "users.apps.UsersConfig",
     "accounts.apps.AccountsConfig",
     "categories.apps.CategoriesConfig",
+    "transactions.apps.TransactionsConfig",
 ]
 
 AUTH_USER_MODEL = "users.User"
