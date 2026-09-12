@@ -1,16 +1,47 @@
+import { BrowserRouter, Route, Routes } from 'react-router-dom'
+import { AuthProvider } from './auth/AuthProvider'
+import { AppShell } from './AppShell'
+import { GuestRoute, ProtectedRoute } from './routes/guards'
+import { LoginScreen } from './screens/LoginScreen'
+import { NotFoundScreen } from './screens/NotFoundScreen'
+import { ProtectedScreen } from './screens/ProtectedScreen'
+import { RegisterScreen } from './screens/RegisterScreen'
+
 function App() {
   return (
-    <>
-      <a className="skip-link" href="#main">
-        Skip to content
-      </a>
-      <header className="site-header">
-        <h1 className="brand">
-          <a href="/">Mohr</a>
-        </h1>
-      </header>
-      <main id="main" className="site-main"></main>
-    </>
+    <AuthProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route
+              path="/login"
+              element={
+                <GuestRoute>
+                  <LoginScreen />
+                </GuestRoute>
+              }
+            />
+            <Route
+              path="/register"
+              element={
+                <GuestRoute>
+                  <RegisterScreen />
+                </GuestRoute>
+              }
+            />
+            <Route
+              path="/"
+              element={
+                <ProtectedRoute>
+                  <ProtectedScreen />
+                </ProtectedRoute>
+              }
+            />
+            <Route path="*" element={<NotFoundScreen />} />
+          </Route>
+        </Routes>
+      </BrowserRouter>
+    </AuthProvider>
   )
 }
 
