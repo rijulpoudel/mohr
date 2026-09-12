@@ -1,4 +1,5 @@
 import { isDecimalString } from '../format/money'
+import { getCsrfToken } from './auth'
 import { apiFetch } from './client'
 import { ApiError } from './types'
 
@@ -68,7 +69,7 @@ function isTimestamp(value: unknown): value is string {
   return !isNaN(new Date(value).getTime())
 }
 
-function parseAccount(value: unknown): Account | null {
+export function parseAccount(value: unknown): Account | null {
   if (!isRecord(value) || !hasExactKeys(value, ACCOUNT_KEYS)) return null
   const {
     id,
@@ -130,6 +131,32 @@ export function fetchAccounts(): Promise<Account[]> {
     })
   }
   return inFlightAccounts
+}
+
+function parseCreatedAccount(payload: unknown, status: number): Account {
+  const account = parseAccount(payload)
+  if (account === null) {
+    throw new ApiError(MALFORMED_RESPONSE_MESSAGE, status, null, {})
+  }
+  return account
+}
+
+export async function createAccount(
+  name: string,
+  accountType: AccountType,
+  openingBalance: string,
+): Promise<Account> {
+  const token = await getCsrfToken()
+  const body = JSON.stringify({
+    name,
+    account_type: accountType,
+    opening_balance: openingBalance,
+  })
+  return apiFetch(
+    '/api/accounts/',
+    { method: 'POST', headers: { 'X-CSRFToken': token }, body },
+    parseCreatedAccount,
+  )
 }
 
 export function resetAccountsRequest(): void {
