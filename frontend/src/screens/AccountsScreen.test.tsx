@@ -5,6 +5,7 @@ import {
   CSRF_TOKEN,
   calls,
   deferred,
+  emptyResponse,
   installFetchMock,
   jsonResponse,
   renderApp,
@@ -1602,5 +1603,507 @@ describe('account editing', () => {
 
     expect(screen.queryByText('Renamed')).not.toBeInTheDocument()
     expect(calls(mock, '/api/accounts/7/', 'PATCH')).toHaveLength(1)
+  })
+})
+
+function deleteHandler(
+  onDelete: (url: string, init?: RequestInit) => Response | Promise<Response>,
+) {
+  return authenticatedMutationHandler((url, init) => {
+    if ((init?.method ?? 'GET') === 'GET') return jsonResponse(editAccounts())
+    if ((init?.method ?? 'GET') === 'DELETE') return onDelete(url, init)
+    return jsonResponse({}, 404)
+  })
+}
+
+async function openArchiveConfirm(
+  user: ReturnType<typeof userEvent.setup>,
+  accountName: string,
+) {
+  const item = accountItem(accountName)
+  await user.click(
+    within(item).getByRole('button', { name: `Archive ${accountName}` }),
+  )
+  return screen.getByRole('group', { name: 'Archive account' })
+}
+
+describe('account archiving', () => {
+  it('shows Archive only on active rows and keeps Edit on archived rows', async () => {
+    installFetchMock(authenticatedHandler(() => jsonResponse(editAccounts())))
+    renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    expect(
+      within(accountItem('Everyday Checking')).getByRole('button', {
+        name: 'Archive Everyday Checking',
+      }),
+    ).toBeInTheDocument()
+    expect(
+      within(accountItem('Cash Jar')).getByRole('button', {
+        name: 'Archive Cash Jar',
+      }),
+    ).toBeInTheDocument()
+    expect(
+      within(accountItem('Old Card')).queryByRole('button', {
+        name: 'Archive Old Card',
+      }),
+    ).not.toBeInTheDocument()
+    expect(
+      within(accountItem('Old Card')).getByRole('button', {
+        name: 'Edit Old Card',
+      }),
+    ).toBeInTheDocument()
+  })
+
+  it('opens an inline confirmation naming the account and explaining archive semantics', async () => {
+    const mock = installFetchMock(
+      authenticatedHandler(() => jsonResponse(editAccounts())),
+    )
+    renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    const user = userEvent.setup()
+    const confirm = await openArchiveConfirm(user, 'Everyday Checking')
+
+    expect(
+      within(confirm).getByText(
+        'Everyday Checking will be archived, not deleted.',
+      ),
+    ).toBeInTheDocument()
+    expect(
+      within(confirm).getByText('Historical transactions remain available.'),
+    ).toBeInTheDocument()
+    const confirmButton = within(confirm).getByRole('button', {
+      name: 'Confirm archive Everyday Checking',
+    })
+    expect(confirmButton).toHaveTextContent('Archive')
+    expect(
+      within(confirm).getByRole('button', { name: 'Cancel' }),
+    ).toBeInTheDocument()
+    expect(
+      within(accountItem('Everyday Checking')).queryByRole('button', {
+        name: 'Edit Everyday Checking',
+      }),
+    ).not.toBeInTheDocument()
+    expect(screen.getAllByRole('listitem')).toHaveLength(3)
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(0)
+    expect(calls(mock, '/api/accounts/7/', 'DELETE')).toHaveLength(0)
+  })
+
+  it('cancel closes the confirmation with zero mutation and restores the row', async () => {
+    const mock = installFetchMock(
+      authenticatedHandler(() => jsonResponse(editAccounts())),
+    )
+    renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    const user = userEvent.setup()
+    const confirm = await openArchiveConfirm(user, 'Everyday Checking')
+    await user.click(within(confirm).getByRole('button', { name: 'Cancel' }))
+
+    expect(
+      screen.queryByRole('group', { name: 'Archive account' }),
+    ).not.toBeInTheDocument()
+    const restored = accountItem('Everyday Checking')
+    expect(within(restored).getByText('Active')).toBeInTheDocument()
+    expect(
+      within(restored).getByRole('button', {
+        name: 'Archive Everyday Checking',
+      }),
+    ).toBeInTheDocument()
+    expect(
+      within(restored).getByRole('button', { name: 'Edit Everyday Checking' }),
+    ).toBeInTheDocument()
+    expect(screen.queryByText('Account archived.')).not.toBeInTheDocument()
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(0)
+    expect(calls(mock, '/api/accounts/7/', 'DELETE')).toHaveLength(0)
+  })
+
+  it('opening an editor closes an open archive confirmation', async () => {
+    installFetchMock(authenticatedHandler(() => jsonResponse(editAccounts())))
+    renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    const user = userEvent.setup()
+    await openArchiveConfirm(user, 'Everyday Checking')
+    await user.click(
+      within(accountItem('Cash Jar')).getByRole('button', {
+        name: 'Edit Cash Jar',
+      }),
+    )
+
+    expect(
+      screen.queryByRole('group', { name: 'Archive account' }),
+    ).not.toBeInTheDocument()
+    const editor = screen.getByRole('form', { name: 'Edit account' })
+    expect(within(editor).getByLabelText('Name')).toHaveValue('Cash Jar')
+  })
+
+  it('opening an archive confirmation closes an open editor', async () => {
+    installFetchMock(authenticatedHandler(() => jsonResponse(editAccounts())))
+    renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    const user = userEvent.setup()
+    const editor = await openEditForm(user, 'Everyday Checking')
+    await user.type(within(editor).getByLabelText('Name'), ' discarded')
+    await openArchiveConfirm(user, 'Cash Jar')
+
+    expect(
+      screen.queryByRole('form', { name: 'Edit account' }),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('group', { name: 'Archive account' }),
+    ).toBeInTheDocument()
+  })
+
+  it('sends an exact CSRF-bootstrapped DELETE with no body and announces on 204', async () => {
+    const mock = installFetchMock(
+      deleteHandler((url) => {
+        if (url === '/api/accounts/7/') return emptyResponse(204)
+        return jsonResponse({}, 404)
+      }),
+    )
+    renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    const user = userEvent.setup()
+    const confirm = await openArchiveConfirm(user, 'Everyday Checking')
+    await user.click(
+      within(confirm).getByRole('button', {
+        name: 'Confirm archive Everyday Checking',
+      }),
+    )
+
+    expect(await screen.findByText('Account archived.')).toBeInTheDocument()
+    expect(requestLog(mock)).toEqual([
+      'GET /api/auth/me/',
+      'GET /api/accounts/',
+      'GET /api/auth/csrf/',
+      'DELETE /api/accounts/7/',
+    ])
+    const deletes = calls(mock, '/api/accounts/7/', 'DELETE')
+    expect(deletes).toHaveLength(1)
+    const [input, init] = deletes[0]
+    expect(String(input)).toBe('/api/accounts/7/')
+    expect(init?.method).toBe('DELETE')
+    const headers = init?.headers as Headers
+    expect(headers.get('X-CSRFToken')).toBe(CSRF_TOKEN)
+    expect(init?.body).toBeUndefined()
+    expect(calls(mock, '/api/accounts/', 'GET')).toHaveLength(1)
+    expect(screen.queryByText('7')).not.toBeInTheDocument()
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  it('archives exactly that row in place without removing or reordering it', async () => {
+    const mock = installFetchMock(
+      deleteHandler((url) => {
+        if (url === '/api/accounts/7/') return emptyResponse(204)
+        return jsonResponse({}, 404)
+      }),
+    )
+    renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    const user = userEvent.setup()
+    const confirm = await openArchiveConfirm(user, 'Everyday Checking')
+    await user.click(
+      within(confirm).getByRole('button', {
+        name: 'Confirm archive Everyday Checking',
+      }),
+    )
+
+    await screen.findByText('Account archived.')
+    const items = screen.getAllByRole('listitem')
+    expect(items).toHaveLength(3)
+    expect(within(items[0]).getByText('Everyday Checking')).toBeInTheDocument()
+    expect(within(items[0]).getByText('Archived')).toBeInTheDocument()
+    expect(within(items[0]).getByText('Checking')).toBeInTheDocument()
+    expect(within(items[0]).getAllByText('$100.00')).toHaveLength(2)
+    expect(within(items[1]).getByText('Old Card')).toBeInTheDocument()
+    expect(within(items[2]).getByText('Cash Jar')).toBeInTheDocument()
+    expect(
+      within(items[0]).queryByRole('button', {
+        name: 'Archive Everyday Checking',
+      }),
+    ).not.toBeInTheDocument()
+    expect(
+      within(items[0]).getByRole('button', { name: 'Edit Everyday Checking' }),
+    ).toBeInTheDocument()
+    expect(calls(mock, '/api/accounts/', 'GET')).toHaveLength(1)
+    expect(calls(mock, '/api/accounts/7/', 'DELETE')).toHaveLength(1)
+  })
+
+  it('keeps archived rows editable after archiving', async () => {
+    installFetchMock(
+      authenticatedMutationHandler((url, init) => {
+        const method = init?.method ?? 'GET'
+        if (method === 'GET') return jsonResponse(editAccounts())
+        if (method === 'DELETE' && url === '/api/accounts/7/') {
+          return emptyResponse(204)
+        }
+        if (method === 'PATCH' && url === '/api/accounts/7/') {
+          return jsonResponse(
+            accountFixture({ id: 7, name: 'Everyday Renamed', is_archived: true }),
+            200,
+          )
+        }
+        return jsonResponse({}, 404)
+      }),
+    )
+    renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    const user = userEvent.setup()
+    const confirm = await openArchiveConfirm(user, 'Everyday Checking')
+    await user.click(
+      within(confirm).getByRole('button', {
+        name: 'Confirm archive Everyday Checking',
+      }),
+    )
+    await screen.findByText('Account archived.')
+
+    const editor = await openEditForm(user, 'Everyday Checking')
+    const nameInput = within(editor).getByLabelText('Name')
+    await user.clear(nameInput)
+    await user.type(nameInput, 'Everyday Renamed')
+    await user.click(within(editor).getByRole('button', { name: 'Save' }))
+
+    await screen.findByText('Account updated.')
+    const item = accountItem('Everyday Renamed')
+    expect(within(item).getByText('Archived')).toBeInTheDocument()
+  })
+
+  it('is duplicate-safe while pending and disables the confirmation controls', async () => {
+    const pending = deferred<Response>()
+    const mock = installFetchMock(
+      authenticatedMutationHandler((_url, init) => {
+        if ((init?.method ?? 'GET') === 'GET') return jsonResponse(editAccounts())
+        if ((init?.method ?? 'GET') === 'DELETE') return pending.promise
+        return jsonResponse({}, 404)
+      }),
+    )
+    renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    const user = userEvent.setup()
+    const confirm = await openArchiveConfirm(user, 'Everyday Checking')
+    const confirmButton = within(confirm).getByRole('button', {
+      name: 'Confirm archive Everyday Checking',
+    })
+    await user.click(confirmButton)
+
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Archiving account…',
+    )
+    expect(
+      screen.getByRole('button', { name: 'Confirm archive Everyday Checking' }),
+    ).toBeDisabled()
+    expect(within(confirm).getByRole('button', { name: 'Cancel' })).toBeDisabled()
+
+    await user.click(confirmButton)
+    expect(calls(mock, '/api/accounts/7/', 'DELETE')).toHaveLength(1)
+
+    await act(async () => {
+      pending.resolve(emptyResponse(204))
+    })
+    expect(await screen.findByText('Account archived.')).toBeInTheDocument()
+    expect(calls(mock, '/api/accounts/7/', 'DELETE')).toHaveLength(1)
+  })
+
+  const archiveFailureCases: Array<[string, () => Response, string]> = [
+    [
+      'a network failure',
+      () => {
+        throw new TypeError('Failed to fetch')
+      },
+      'Could not reach the server.',
+    ],
+    [
+      'a 403 response',
+      () => jsonResponse({ detail: 'Forbidden.' }, 403),
+      'Forbidden.',
+    ],
+    [
+      'a 404 response',
+      () =>
+        jsonResponse(
+          { detail: 'No Account matches the given query.' },
+          404,
+        ),
+      'No Account matches the given query.',
+    ],
+    [
+      'a 500 response',
+      () => new Response(null, { status: 500 }),
+      'Something went wrong. Please try again.',
+    ],
+    [
+      'an unexpected 200 response',
+      () => jsonResponse(accountFixture({ id: 7 }), 200),
+      'Unexpected server response.',
+    ],
+  ]
+
+  it.each(archiveFailureCases)(
+    'keeps the confirmation and list intact on %s',
+    async (_label, respond, message) => {
+      const mock = installFetchMock(
+        deleteHandler((url) => {
+          if (url === '/api/accounts/7/') return respond()
+          return jsonResponse({}, 404)
+        }),
+      )
+      renderApp('/accounts')
+      await screen.findByText('Everyday Checking')
+
+      const user = userEvent.setup()
+      const confirm = await openArchiveConfirm(user, 'Everyday Checking')
+      await user.click(
+        within(confirm).getByRole('button', {
+          name: 'Confirm archive Everyday Checking',
+        }),
+      )
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(message)
+      expect(
+        screen.getByRole('group', { name: 'Archive account' }),
+      ).toBeInTheDocument()
+      expect(
+        screen.getByRole('button', { name: 'Confirm archive Everyday Checking' }),
+      ).not.toBeDisabled()
+      expect(
+        screen.getByRole('button', { name: 'Cancel' }),
+      ).toBeInTheDocument()
+      expect(within(accountItem('Cash Jar')).getByText('Cash Jar')).toBeInTheDocument()
+      expect(screen.queryByText('Account archived.')).not.toBeInTheDocument()
+      expect(calls(mock, '/api/accounts/7/', 'DELETE')).toHaveLength(1)
+    },
+  )
+
+  it('lets the user retry after a failure and succeed on the second attempt', async () => {
+    let deleteCalls = 0
+    const mock = installFetchMock(
+      deleteHandler(() => {
+        deleteCalls += 1
+        if (deleteCalls === 1) return new Response(null, { status: 500 })
+        return emptyResponse(204)
+      }),
+    )
+    renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    const user = userEvent.setup()
+    const confirm = await openArchiveConfirm(user, 'Everyday Checking')
+    const confirmButton = within(confirm).getByRole('button', {
+      name: 'Confirm archive Everyday Checking',
+    })
+    await user.click(confirmButton)
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Something went wrong. Please try again.',
+    )
+    expect(
+      screen.getByRole('group', { name: 'Archive account' }),
+    ).toBeInTheDocument()
+
+    await user.click(confirmButton)
+    expect(await screen.findByText('Account archived.')).toBeInTheDocument()
+    expect(within(accountItem('Everyday Checking')).getByText('Archived')).toBeInTheDocument()
+    expect(calls(mock, '/api/accounts/7/', 'DELETE')).toHaveLength(2)
+    expect(calls(mock, '/api/accounts/', 'GET')).toHaveLength(1)
+  })
+
+  it('clears session and redirects to login on a 401 DELETE without logout or storage', async () => {
+    const mock = installFetchMock(
+      deleteHandler(() =>
+        jsonResponse(
+          { detail: 'Authentication credentials were not provided.' },
+          401,
+        ),
+      ),
+    )
+    renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    const user = userEvent.setup()
+    const confirm = await openArchiveConfirm(user, 'Everyday Checking')
+    await user.click(
+      within(confirm).getByRole('button', {
+        name: 'Confirm archive Everyday Checking',
+      }),
+    )
+
+    expect(await screen.findByLabelText('Email')).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/login')
+    expect(
+      requestLog(mock).some((entry) => entry.includes('/api/auth/logout/')),
+    ).toBe(false)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  it('clears session and redirects to login on a 401 CSRF bootstrap', async () => {
+    const mock = installFetchMock((url, init) => {
+      if (url === '/api/auth/me/') {
+        return jsonResponse({ id: 1, email: 'student@example.com' })
+      }
+      if (url === '/api/auth/csrf/') {
+        return jsonResponse(
+          { detail: 'Authentication credentials were not provided.' },
+          401,
+        )
+      }
+      if (url === '/api/accounts/' && (init?.method ?? 'GET') === 'GET') {
+        return jsonResponse(editAccounts())
+      }
+      return jsonResponse({}, 404)
+    })
+    renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    const user = userEvent.setup()
+    const confirm = await openArchiveConfirm(user, 'Everyday Checking')
+    await user.click(
+      within(confirm).getByRole('button', {
+        name: 'Confirm archive Everyday Checking',
+      }),
+    )
+
+    expect(await screen.findByLabelText('Email')).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/login')
+    expect(calls(mock, '/api/accounts/7/', 'DELETE')).toHaveLength(0)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  it('ignores an archive response that settles after unmount', async () => {
+    const pending = deferred<Response>()
+    const mock = installFetchMock(
+      authenticatedMutationHandler((_url, init) => {
+        if ((init?.method ?? 'GET') === 'GET') return jsonResponse(editAccounts())
+        if ((init?.method ?? 'GET') === 'DELETE') return pending.promise
+        return jsonResponse({}, 404)
+      }),
+    )
+    const view = renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    const user = userEvent.setup()
+    const confirm = await openArchiveConfirm(user, 'Everyday Checking')
+    await user.click(
+      within(confirm).getByRole('button', {
+        name: 'Confirm archive Everyday Checking',
+      }),
+    )
+    await screen.findByRole('status')
+
+    view.unmount()
+    await act(async () => {
+      pending.resolve(emptyResponse(204))
+    })
+
+    expect(screen.queryByText('Account archived.')).not.toBeInTheDocument()
+    expect(calls(mock, '/api/accounts/7/', 'DELETE')).toHaveLength(1)
   })
 })

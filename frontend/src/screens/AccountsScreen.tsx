@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import {
+  archiveAccount,
   createAccount,
   fetchAccounts,
   updateAccount,
@@ -268,18 +269,112 @@ function EditAccountForm({
   )
 }
 
-function AccountItem({
+function ArchiveAccountConfirm({
   account,
-  editing,
-  onEdit,
-  onUpdated,
+  onArchived,
   onCancelled,
 }: {
   account: Account
+  onArchived: (accountId: number) => void
+  onCancelled: () => void
+}) {
+  const { clearSession } = useAuth()
+  const [pending, setPending] = useState(false)
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const mountedRef = useRef(true)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+
+  async function handleConfirm() {
+    if (pending) return
+    setErrorMessage(null)
+    setPending(true)
+    try {
+      await archiveAccount(account.id)
+      if (mountedRef.current) {
+        onArchived(account.id)
+      }
+    } catch (caught) {
+      if (caught instanceof ApiError && caught.status === 401) {
+        clearSession()
+        return
+      }
+      if (!mountedRef.current) return
+      setErrorMessage(
+        caught instanceof ApiError ? userMessage(caught) : GENERIC_ERROR_MESSAGE,
+      )
+    } finally {
+      if (mountedRef.current) setPending(false)
+    }
+  }
+
+  return (
+    <div
+      className="account-archive"
+      role="group"
+      aria-labelledby="archive-account-heading"
+    >
+      <h3 id="archive-account-heading">Archive account</h3>
+      <p>{account.name} will be archived, not deleted.</p>
+      <p>Historical transactions remain available.</p>
+      {pending && (
+        <p role="status" className="notice">
+          Archiving account…
+        </p>
+      )}
+      {errorMessage !== null && (
+        <div className="error-summary" role="alert">
+          {errorMessage}
+        </div>
+      )}
+      <div className="account-archive-actions">
+        <button
+          type="button"
+          className="btn"
+          aria-label={`Confirm archive ${account.name}`}
+          onClick={handleConfirm}
+          disabled={pending}
+        >
+          {pending ? 'Archiving account…' : 'Archive'}
+        </button>
+        <button
+          type="button"
+          className="btn btn-secondary"
+          onClick={onCancelled}
+          disabled={pending}
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function AccountItem({
+  account,
+  editing,
+  archiving,
+  onEdit,
+  onArchiveRequest,
+  onUpdated,
+  onCancelled,
+  onArchived,
+  onArchiveCancelled,
+}: {
+  account: Account
   editing: boolean
+  archiving: boolean
   onEdit: () => void
+  onArchiveRequest: () => void
   onUpdated: (account: Account) => void
   onCancelled: () => void
+  onArchived: (accountId: number) => void
+  onArchiveCancelled: () => void
 }) {
   if (editing) {
     return (
@@ -288,6 +383,17 @@ function AccountItem({
           account={account}
           onUpdated={onUpdated}
           onCancelled={onCancelled}
+        />
+      </li>
+    )
+  }
+  if (archiving) {
+    return (
+      <li className="account-item">
+        <ArchiveAccountConfirm
+          account={account}
+          onArchived={onArchived}
+          onCancelled={onArchiveCancelled}
         />
       </li>
     )
@@ -320,6 +426,16 @@ function AccountItem({
         >
           Edit
         </button>
+        {!account.is_archived && (
+          <button
+            type="button"
+            className="btn btn-secondary"
+            aria-label={`Archive ${account.name}`}
+            onClick={onArchiveRequest}
+          >
+            Archive
+          </button>
+        )}
       </div>
     </li>
   )
@@ -504,7 +620,9 @@ export function AccountsScreen() {
   const [attempt, setAttempt] = useState(0)
   const [state, setState] = useState<AccountsState>({ status: 'loading' })
   const [editingId, setEditingId] = useState<number | null>(null)
+  const [archivingId, setArchivingId] = useState<number | null>(null)
   const [updatedNotice, setUpdatedNotice] = useState(false)
+  const [archivedNotice, setArchivedNotice] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -544,11 +662,39 @@ export function AccountsScreen() {
 
   const handleEdit = useCallback((accountId: number) => {
     setEditingId(accountId)
+    setArchivingId(null)
     setUpdatedNotice(false)
+    setArchivedNotice(false)
   }, [])
 
   const handleCancelled = useCallback(() => {
     setEditingId(null)
+  }, [])
+
+  const handleArchiveRequest = useCallback((accountId: number) => {
+    setArchivingId(accountId)
+    setEditingId(null)
+    setUpdatedNotice(false)
+    setArchivedNotice(false)
+  }, [])
+
+  const handleArchiveCancelled = useCallback(() => {
+    setArchivingId(null)
+  }, [])
+
+  const handleArchived = useCallback((accountId: number) => {
+    setState((current) => {
+      if (current.status !== 'ready') return current
+      const index = current.accounts.findIndex(
+        (account) => account.id === accountId,
+      )
+      if (index === -1) return current
+      const accounts = [...current.accounts]
+      accounts[index] = { ...accounts[index], is_archived: true }
+      return { status: 'ready', accounts }
+    })
+    setArchivingId(null)
+    setArchivedNotice(true)
   }, [])
 
   const handleUpdated = useCallback((updated: Account) => {
@@ -605,6 +751,11 @@ export function AccountsScreen() {
           Account updated.
         </p>
       )}
+      {archivedNotice && (
+        <p role="status" className="notice">
+          Account archived.
+        </p>
+      )}
       {state.accounts.length === 0 ? (
         <p className="empty-state">
           No accounts yet. Accounts you create will appear here.
@@ -616,9 +767,13 @@ export function AccountsScreen() {
               key={account.id}
               account={account}
               editing={editingId === account.id}
+              archiving={archivingId === account.id}
               onEdit={() => handleEdit(account.id)}
+              onArchiveRequest={() => handleArchiveRequest(account.id)}
               onUpdated={handleUpdated}
               onCancelled={handleCancelled}
+              onArchived={handleArchived}
+              onArchiveCancelled={handleArchiveCancelled}
             />
           ))}
         </ul>
