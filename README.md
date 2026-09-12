@@ -123,6 +123,7 @@ Every account response uses exactly this public shape:
   "name": "Everyday Checking",
   "account_type": "checking",
   "opening_balance": "100.00",
+  "current_balance": "100.00",
   "is_archived": false,
   "created_at": "2026-09-11T14:52:48.008850Z",
   "updated_at": "2026-09-11T14:52:48.008850Z"
@@ -130,6 +131,8 @@ Every account response uses exactly this public shape:
 ```
 
 `opening_balance` is always a JSON string with exactly two decimal places, so money values never lose precision. It may be positive, zero, or negative; a negative opening balance means the account started in debt, such as a credit card balance owed. `account_type` is one of `checking`, `savings`, `cash`, or `credit_card`.
+
+`current_balance` is a read-only JSON string with exactly two decimal places, derived live as `opening_balance` plus owned income transactions minus owned expense transactions for that account. It is not stored. Historical transactions continue to count after their linked account or category is archived, and balance-affecting transaction changes appear in the next account response automatically.
 
 | Method | Endpoint | Purpose | Success |
 | --- | --- | --- | --- |
@@ -139,7 +142,7 @@ Every account response uses exactly this public shape:
 | `PATCH` | `/api/accounts/<id>/` | Partially update an owned account | `200` with the account |
 | `DELETE` | `/api/accounts/<id>/` | Archive an owned account | `204` with no body |
 
-Only `name`, `account_type`, and `opening_balance` are writable. `id`, `is_archived`, `created_at`, and `updated_at` are read-only: values sent for them are ignored. `PATCH` changes only the fields included in the request and leaves omitted fields unchanged. There is no full `PUT` update.
+Only `name`, `account_type`, and `opening_balance` are writable. `id`, `current_balance`, `is_archived`, `created_at`, and `updated_at` are read-only: values sent for them are ignored. `PATCH` changes only the fields included in the request and leaves omitted fields unchanged. There is no full `PUT` update.
 
 `DELETE` never removes a row. It sets `is_archived` to `true` and preserves the account, its owner, and its data so historical transactions can still reference it. Archived accounts remain visible in list and retrieve responses. Repeated `DELETE` is idempotent and returns `204` again.
 
@@ -175,6 +178,52 @@ Every category response uses exactly this public shape:
 `name` and `category_type` are writable when creating a category. After creation only `name` is writable; `category_type`, `id`, `is_archived`, `created_at`, and `updated_at` are read-only, and values sent for them are ignored. `PATCH` changes only the fields included in the request and leaves omitted fields unchanged. There is no full `PUT` update.
 
 `DELETE` never removes a row. It sets `is_archived` to `true` and preserves the row, its owner, its name, its type, and its `created_at` so historical transactions can still reference it; `updated_at` records the archive operation. Archived categories remain visible in list and retrieve responses. Repeated `DELETE` is idempotent and returns `204` again.
+
+Every endpoint requires an authenticated session, and unauthenticated requests return `401` before method dispatch. Authenticated clients may use only the methods listed above; unsupported methods return `405`. `POST`, `PATCH`, and `DELETE` additionally require the CSRF token from `/api/auth/csrf/`, sent as the `X-CSRFToken` header, and a failed CSRF check returns `403`.
+
+## Transactions API
+
+Transactions routes live under `/api/transactions/`. Every request must come from an authenticated session, and ownership always comes from that session, never from client input. An object ID never grants access: requesting another user's transaction returns `404`, the same as a missing ID, so the response never reveals whether another user owns that ID.
+
+Every transaction response uses exactly this public shape:
+
+```json
+{
+  "id": 1,
+  "account": 1,
+  "category": 1,
+  "transaction_type": "expense",
+  "amount": "12.50",
+  "date": "2026-09-11",
+  "note": "Groceries",
+  "created_at": "2026-09-11T14:52:48.008850Z",
+  "updated_at": "2026-09-11T14:52:48.008850Z"
+}
+```
+
+`account` and `category` are account and category IDs. `amount` is always a JSON string with exactly two decimal places, so money values never lose precision.
+
+| Method | Endpoint | Purpose | Success |
+| --- | --- | --- | --- |
+| `GET` | `/api/transactions/` | List the authenticated user's transactions | `200` with a JSON array |
+| `POST` | `/api/transactions/` | Create a transaction owned by the authenticated user | `201` with the transaction |
+| `GET` | `/api/transactions/<id>/` | Retrieve one owned transaction | `200` with the transaction |
+| `PATCH` | `/api/transactions/<id>/` | Partially update an owned transaction | `200` with the transaction |
+| `DELETE` | `/api/transactions/<id>/` | Permanently delete an owned transaction | `204` with no body |
+
+Only `account`, `category`, `transaction_type`, `amount`, `date`, and `note` are writable. `id`, `user`, `created_at`, and `updated_at` are server-controlled, and `user` is never returned. `PATCH` changes only the fields included in the request and leaves omitted fields unchanged. There is no full `PUT` update.
+
+`amount` is a strictly positive decimal with a maximum of 12 digits in total and 2 decimal places. `transaction_type` is exactly one of `income` or `expense`, and it must match the linked category's type. `date` is required when creating a transaction and uses strict `YYYY-MM-DD` format. `note` is optional, surrounding whitespace is trimmed, an omitted or whitespace-only note becomes an empty string, and `null` is rejected.
+
+`account` and `category` IDs are owner-scoped: a foreign ID and a missing ID return the same field-level `400`, so the response never reveals whether another user owns that relation. New assignments to an archived account or archived category are rejected. Existing historical transactions remain readable after their account or category is archived, and unrelated scalar edits remain allowed; explicitly reassigning the archived relation is rejected.
+
+Detail transaction lookups are owner-scoped: a foreign transaction ID and a missing transaction ID both return a generic `404`.
+
+`DELETE` permanently removes only the transaction row and returns an empty `204`, leaving the linked account and category rows unchanged. A repeated delete returns `404`. This differs from account and category archive behavior, which preserve the row.
+
+The collection is ordered by newest `date`, then newest `created_at`, then newest `id`. It returns a plain JSON array with no pagination.
+
+The collection accepts the optional filters `account`, `category`, `transaction_type`, `start_date`, and `end_date`. Filters combine with `AND`. Dates are strict `YYYY-MM-DD` values and are inclusive. Equal dates are allowed; a reversed range returns `400` under `end_date`. Archived owned account and category values may be used to find historical transactions. Invalid, foreign, or missing relation filter IDs return a privacy-safe field-level `400`. A valid filter with no matches returns `[]`. Unknown query params are ignored.
 
 Every endpoint requires an authenticated session, and unauthenticated requests return `401` before method dispatch. Authenticated clients may use only the methods listed above; unsupported methods return `405`. `POST`, `PATCH`, and `DELETE` additionally require the CSRF token from `/api/auth/csrf/`, sent as the `X-CSRFToken` header, and a failed CSRF check returns `403`.
 

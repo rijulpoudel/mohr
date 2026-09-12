@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
@@ -11,6 +11,8 @@ from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
 
 from accounts.models import Account, AccountType
+from categories.models import Category, CategoryType
+from transactions.models import Transaction, TransactionType
 
 ACCOUNT_TYPE_CHOICES = [
     ("checking", "Checking"),
@@ -176,6 +178,129 @@ class AccountModelTests(TestCase):
         self.assertNotIn(self.user.email, str(account))
 
 
+class AccountCurrentBalanceModelTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = get_user_model().objects.create_user(
+            email="account-balance-owner@example.com",
+            password="TestOnlyPassword123!",
+        )
+        cls.other_user = get_user_model().objects.create_user(
+            email="account-balance-other@example.com",
+            password="TestOnlyPassword123!",
+        )
+        cls.account = Account.objects.create(
+            user=cls.user,
+            name="Everyday Checking",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("100.00"),
+        )
+        cls.other_account = Account.objects.create(
+            user=cls.user,
+            name="Travel Savings",
+            account_type=AccountType.SAVINGS,
+            opening_balance=Decimal("500.00"),
+        )
+        cls.income_category = Category.objects.create(
+            user=cls.user,
+            name="Salary",
+            category_type=CategoryType.INCOME,
+        )
+        cls.expense_category = Category.objects.create(
+            user=cls.user,
+            name="Groceries",
+            category_type=CategoryType.EXPENSE,
+        )
+
+    def create_transaction(self, **overrides):
+        values = {
+            "user": self.user,
+            "account": self.account,
+            "category": self.income_category,
+            "transaction_type": TransactionType.INCOME,
+            "amount": Decimal("25.50"),
+            "date": date(2026, 9, 1),
+        }
+        values.update(overrides)
+        return Transaction.objects.create(**values)
+
+    def test_current_balance_equals_opening_balance_without_transactions(self):
+        self.assertEqual(self.account.current_balance, Decimal("100.00"))
+        self.assertEqual(self.other_account.current_balance, Decimal("500.00"))
+
+    def test_current_balance_sums_income_and_expense_exactly(self):
+        self.create_transaction(amount=Decimal("50.00"))
+        self.create_transaction(amount=Decimal("25.50"))
+        self.create_transaction(
+            transaction_type=TransactionType.EXPENSE,
+            category=self.expense_category,
+            amount=Decimal("10.00"),
+        )
+
+        self.assertEqual(self.account.current_balance, Decimal("165.50"))
+
+    def test_current_balance_can_be_negative(self):
+        self.create_transaction(
+            transaction_type=TransactionType.EXPENSE,
+            category=self.expense_category,
+            amount=Decimal("250.00"),
+        )
+
+        self.assertEqual(self.account.current_balance, Decimal("-150.00"))
+
+    def test_current_balance_includes_historical_transactions_with_archived_links(self):
+        self.create_transaction(amount=Decimal("50.00"))
+        self.create_transaction(
+            transaction_type=TransactionType.EXPENSE,
+            category=self.expense_category,
+            amount=Decimal("10.00"),
+        )
+        Account.objects.filter(pk=self.account.pk).update(is_archived=True)
+        Category.objects.filter(pk=self.expense_category.pk).update(is_archived=True)
+
+        self.assertEqual(self.account.current_balance, Decimal("140.00"))
+
+    def test_current_balance_excludes_transactions_on_other_accounts(self):
+        self.create_transaction(amount=Decimal("50.00"))
+        self.create_transaction(
+            account=self.other_account,
+            amount=Decimal("999.99"),
+        )
+
+        self.assertEqual(self.account.current_balance, Decimal("150.00"))
+        self.assertEqual(self.other_account.current_balance, Decimal("1499.99"))
+
+    def test_current_balance_excludes_malformed_cross_user_transaction(self):
+        self.create_transaction(amount=Decimal("50.00"))
+        self.create_transaction(
+            user=self.other_user,
+            amount=Decimal("999.99"),
+        )
+
+        self.assertEqual(self.account.current_balance, Decimal("150.00"))
+
+    def test_current_balance_supports_large_derived_total(self):
+        self.create_transaction(amount=Decimal("9999999999.99"))
+        self.create_transaction(amount=Decimal("9999999999.99"))
+
+        self.assertEqual(self.account.current_balance, Decimal("20000000099.98"))
+        self.assertEqual(format(self.account.current_balance, ".2f"), "20000000099.98")
+
+    def test_current_balance_fallback_uses_single_owner_scoped_query(self):
+        self.create_transaction(amount=Decimal("50.00"))
+        self.create_transaction(
+            transaction_type=TransactionType.EXPENSE,
+            category=self.expense_category,
+            amount=Decimal("10.00"),
+        )
+        account = Account.objects.get(pk=self.account.pk)
+
+        with self.assertNumQueries(1):
+            balance = account.current_balance
+
+        self.assertEqual(balance, Decimal("140.00"))
+
+
 class AccountCollectionAPITests(APITestCase):
     @classmethod
     def setUpTestData(cls):
@@ -231,6 +356,7 @@ class AccountCollectionAPITests(APITestCase):
                     "name": "Everyday Checking",
                     "account_type": "checking",
                     "opening_balance": "100.00",
+                    "current_balance": "100.00",
                     "is_archived": False,
                     "created_at": self.format_datetime(account.created_at),
                     "updated_at": self.format_datetime(account.updated_at),
@@ -303,6 +429,7 @@ class AccountCollectionAPITests(APITestCase):
                 "name": "Travel Rewards",
                 "account_type": "credit_card",
                 "opening_balance": "-123.45",
+                "current_balance": "-123.45",
                 "is_archived": False,
                 "created_at": self.format_datetime(account.created_at),
                 "updated_at": self.format_datetime(account.updated_at),
@@ -556,6 +683,7 @@ class AccountDetailAPITests(APITestCase):
                 "name": "Everyday Checking",
                 "account_type": "checking",
                 "opening_balance": "100.00",
+                "current_balance": "100.00",
                 "is_archived": False,
                 "created_at": format_datetime(account.created_at),
                 "updated_at": format_datetime(account.updated_at),
@@ -585,6 +713,7 @@ class AccountDetailAPITests(APITestCase):
                 "name": "Renamed",
                 "account_type": "checking",
                 "opening_balance": "100.00",
+                "current_balance": "100.00",
                 "is_archived": False,
                 "created_at": format_datetime(account.created_at),
                 "updated_at": format_datetime(account.updated_at),
@@ -682,6 +811,7 @@ class AccountDetailAPITests(APITestCase):
         self.assertEqual(account.opening_balance, Decimal("-250.50"))
         self.assertEqual(response.data["account_type"], "credit_card")
         self.assertEqual(response.data["opening_balance"], "-250.50")
+        self.assertEqual(response.data["current_balance"], "-250.50")
 
     def test_patch_cannot_change_read_only_or_ownership_fields(self):
         account = self.create_account()
@@ -843,3 +973,314 @@ class AccountDetailAPITests(APITestCase):
 
         self.assertEqual(self.client.options(url).status_code, status.HTTP_200_OK)
         self.assertEqual(self.client.head(url).status_code, status.HTTP_200_OK)
+
+
+class AccountBalanceAPITests(APITestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = get_user_model().objects.create_user(
+            email="account-balance-api-owner@example.com",
+            password="TestOnlyPassword123!",
+        )
+        cls.other_user = get_user_model().objects.create_user(
+            email="account-balance-api-other@example.com",
+            password="TestOnlyPassword123!",
+        )
+        cls.account = Account.objects.create(
+            user=cls.user,
+            name="Everyday Checking",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("100.00"),
+        )
+        cls.income_category = Category.objects.create(
+            user=cls.user,
+            name="Salary",
+            category_type=CategoryType.INCOME,
+        )
+        cls.expense_category = Category.objects.create(
+            user=cls.user,
+            name="Groceries",
+            category_type=CategoryType.EXPENSE,
+        )
+        cls.other_income_category = Category.objects.create(
+            user=cls.other_user,
+            name="Their Salary",
+            category_type=CategoryType.INCOME,
+        )
+
+    def create_transaction(self, **overrides):
+        values = {
+            "user": self.user,
+            "account": self.account,
+            "category": self.income_category,
+            "transaction_type": TransactionType.INCOME,
+            "amount": Decimal("25.50"),
+            "date": date(2026, 9, 1),
+        }
+        values.update(overrides)
+        return Transaction.objects.create(**values)
+
+    def test_create_response_current_balance_equals_opening_balance(self):
+        self.client.force_login(self.user)
+
+        response = self.client.post(
+            reverse("account-list"),
+            {
+                "name": "New Cash",
+                "account_type": "cash",
+                "opening_balance": "50.00",
+                "current_balance": "9999999999.99",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["current_balance"], "50.00")
+        account = Account.objects.exclude(pk=self.account.pk).get()
+        self.assertEqual(account.current_balance, Decimal("50.00"))
+
+    def test_patch_ignores_spoofed_current_balance(self):
+        self.create_transaction(
+            transaction_type=TransactionType.EXPENSE,
+            category=self.expense_category,
+            amount=Decimal("10.00"),
+        )
+        self.client.force_login(self.user)
+
+        response = self.client.patch(
+            reverse("account-detail", args=[self.account.pk]),
+            {"current_balance": "123456.78", "name": "Renamed"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["current_balance"], "90.00")
+        self.account.refresh_from_db()
+        self.assertEqual(self.account.name, "Renamed")
+        self.assertEqual(Transaction.objects.count(), 1)
+
+    def test_patch_changing_opening_balance_recomputes_current_balance(self):
+        self.create_transaction(
+            transaction_type=TransactionType.EXPENSE,
+            category=self.expense_category,
+            amount=Decimal("10.00"),
+        )
+        self.create_transaction(amount=Decimal("50.00"))
+        self.client.force_login(self.user)
+
+        response = self.client.patch(
+            reverse("account-detail", args=[self.account.pk]),
+            {"opening_balance": "200.00"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["current_balance"], "240.00")
+        self.account.refresh_from_db()
+        self.assertEqual(self.account.opening_balance, Decimal("200.00"))
+        self.assertEqual(Transaction.objects.count(), 2)
+
+    def test_detail_returns_large_derived_current_balance_exactly(self):
+        self.create_transaction(amount=Decimal("9999999999.99"))
+        self.create_transaction(amount=Decimal("9999999999.99"))
+        self.client.force_login(self.user)
+
+        response = self.client.get(reverse("account-detail", args=[self.account.pk]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["current_balance"], "20000000099.98")
+
+    def test_detail_excludes_malformed_cross_user_transaction_from_balance(self):
+        Transaction.objects.create(
+            user=self.other_user,
+            account=self.account,
+            category=self.other_income_category,
+            transaction_type=TransactionType.INCOME,
+            amount=Decimal("999.99"),
+            date=date(2026, 9, 1),
+        )
+        self.client.force_login(self.user)
+
+        response = self.client.get(reverse("account-detail", args=[self.account.pk]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["current_balance"], "100.00")
+
+    def test_detail_includes_historical_transaction_after_links_archived(self):
+        self.create_transaction(
+            transaction_type=TransactionType.EXPENSE,
+            category=self.expense_category,
+            amount=Decimal("10.00"),
+        )
+        Account.objects.filter(pk=self.account.pk).update(is_archived=True)
+        Category.objects.filter(pk=self.expense_category.pk).update(is_archived=True)
+        self.client.force_login(self.user)
+
+        response = self.client.get(reverse("account-detail", args=[self.account.pk]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["current_balance"], "90.00")
+
+
+class AccountLedgerIntegrationTests(APITestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = get_user_model().objects.create_user(
+            email="account-ledger-owner@example.com",
+            password="TestOnlyPassword123!",
+        )
+        cls.account = Account.objects.create(
+            user=cls.user,
+            name="Checking",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("100.00"),
+        )
+        cls.other_account = Account.objects.create(
+            user=cls.user,
+            name="Savings",
+            account_type=AccountType.SAVINGS,
+            opening_balance=Decimal("500.00"),
+        )
+        cls.income_category = Category.objects.create(
+            user=cls.user,
+            name="Salary",
+            category_type=CategoryType.INCOME,
+        )
+        cls.expense_category = Category.objects.create(
+            user=cls.user,
+            name="Groceries",
+            category_type=CategoryType.EXPENSE,
+        )
+        cls.transaction_url = reverse("transaction-list")
+
+    def post_transaction(self, **overrides):
+        payload = {
+            "account": self.account.id,
+            "category": self.expense_category.id,
+            "transaction_type": "expense",
+            "amount": "10.00",
+            "date": "2026-09-01",
+        }
+        payload.update(overrides)
+        return self.client.post(self.transaction_url, payload, format="json")
+
+    def account_balance(self, account):
+        response = self.client.get(reverse("account-detail", args=[account.pk]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        return response.data["current_balance"]
+
+    def test_creating_transaction_updates_account_current_balance(self):
+        self.client.force_login(self.user)
+
+        expense = self.post_transaction()
+        self.assertEqual(expense.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(self.account_balance(self.account), "90.00")
+
+        income = self.post_transaction(
+            category=self.income_category.id,
+            transaction_type="income",
+            amount="50.00",
+        )
+        self.assertEqual(income.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(self.account_balance(self.account), "140.00")
+
+    def test_patching_transaction_amount_updates_current_balance(self):
+        self.client.force_login(self.user)
+        created = self.post_transaction()
+        transaction_url = reverse("transaction-detail", args=[created.data["id"]])
+
+        response = self.client.patch(
+            transaction_url,
+            {"amount": "25.00"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.account_balance(self.account), "75.00")
+
+    def test_patching_transaction_to_another_account_updates_both_balances(self):
+        self.client.force_login(self.user)
+        created = self.post_transaction()
+        transaction_url = reverse("transaction-detail", args=[created.data["id"]])
+
+        response = self.client.patch(
+            transaction_url,
+            {"account": self.other_account.id},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.account_balance(self.account), "100.00")
+        self.assertEqual(self.account_balance(self.other_account), "490.00")
+
+    def test_deleting_transaction_removes_its_balance_effect(self):
+        self.client.force_login(self.user)
+        created = self.post_transaction()
+        transaction_url = reverse("transaction-detail", args=[created.data["id"]])
+
+        self.assertEqual(self.account_balance(self.account), "90.00")
+
+        response = self.client.delete(transaction_url)
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(self.account_balance(self.account), "100.00")
+
+
+class AccountBalanceQueryCountTests(APITestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = get_user_model().objects.create_user(
+            email="account-balance-query-owner@example.com",
+            password="TestOnlyPassword123!",
+        )
+        cls.income_category = Category.objects.create(
+            user=cls.user,
+            name="Salary",
+            category_type=CategoryType.INCOME,
+        )
+        cls.expense_category = Category.objects.create(
+            user=cls.user,
+            name="Groceries",
+            category_type=CategoryType.EXPENSE,
+        )
+        cls.accounts = [
+            Account.objects.create(
+                user=cls.user,
+                name=f"Account {index}",
+                account_type=AccountType.CHECKING,
+                opening_balance=Decimal("100.00"),
+            )
+            for index in range(3)
+        ]
+        for account in cls.accounts:
+            Transaction.objects.create(
+                user=cls.user,
+                account=account,
+                category=cls.income_category,
+                transaction_type=TransactionType.INCOME,
+                amount=Decimal("50.00"),
+                date=date(2026, 9, 1),
+            )
+            Transaction.objects.create(
+                user=cls.user,
+                account=account,
+                category=cls.expense_category,
+                transaction_type=TransactionType.EXPENSE,
+                amount=Decimal("10.00"),
+                date=date(2026, 9, 2),
+            )
+
+    def test_list_does_not_run_per_account_balance_aggregates(self):
+        self.client.force_login(self.user)
+
+        # Session lookup + user lookup + one annotated accounts query: no
+        # per-account aggregate is issued regardless of account count.
+        with self.assertNumQueries(3):
+            response = self.client.get(reverse("account-list"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 3)
+        self.assertEqual(
+            {item["current_balance"] for item in response.data},
+            {"140.00"},
+        )

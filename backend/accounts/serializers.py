@@ -9,6 +9,7 @@ class AccountSerializer(serializers.ModelSerializer):
         decimal_places=2,
         coerce_to_string=True,
     )
+    current_balance = serializers.SerializerMethodField()
 
     class Meta:
         model = Account
@@ -17,8 +18,18 @@ class AccountSerializer(serializers.ModelSerializer):
             "name",
             "account_type",
             "opening_balance",
+            "current_balance",
             "is_archived",
             "created_at",
             "updated_at",
         )
-        read_only_fields = ("id", "is_archived", "created_at", "updated_at")
+        read_only_fields = (
+            "id",
+            "current_balance",
+            "is_archived",
+            "created_at",
+            "updated_at",
+        )
+
+    def get_current_balance(self, account):
+        return format(account.current_balance, ".2f")
