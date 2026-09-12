@@ -4,6 +4,7 @@ import { AppShell } from './AppShell'
 import { GuestRoute, ProtectedRoute } from './routes/guards'
 import { LoginScreen } from './screens/LoginScreen'
 import { NotFoundScreen } from './screens/NotFoundScreen'
+import { AccountsScreen } from './screens/AccountsScreen'
 import { DashboardScreen } from './screens/DashboardScreen'
 import { RegisterScreen } from './screens/RegisterScreen'
 
@@ -34,6 +35,14 @@ function App() {
               element={
                 <ProtectedRoute>
                   <DashboardScreen />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/accounts"
+              element={
+                <ProtectedRoute>
+                  <AccountsScreen />
                 </ProtectedRoute>
               }
             />

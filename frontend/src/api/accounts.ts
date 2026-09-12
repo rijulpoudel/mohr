@@ -1,0 +1,137 @@
+import { isDecimalString } from '../format/money'
+import { apiFetch } from './client'
+import { ApiError } from './types'
+
+const MALFORMED_RESPONSE_MESSAGE = 'Unexpected server response.'
+
+export type AccountType = 'checking' | 'savings' | 'cash' | 'credit_card'
+
+export interface Account {
+  id: number
+  name: string
+  account_type: AccountType
+  opening_balance: string
+  current_balance: string
+  is_archived: boolean
+  created_at: string
+  updated_at: string
+}
+
+const ACCOUNT_KEYS = [
+  'id',
+  'name',
+  'account_type',
+  'opening_balance',
+  'current_balance',
+  'is_archived',
+  'created_at',
+  'updated_at',
+] as const
+
+const ACCOUNT_TYPES: ReadonlySet<string> = new Set([
+  'checking',
+  'savings',
+  'cash',
+  'credit_card',
+])
+
+const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/
+const TIMESTAMP_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function hasExactKeys(
+  record: Record<string, unknown>,
+  keys: readonly string[],
+): boolean {
+  const present = Object.keys(record)
+  if (present.length !== keys.length) return false
+  return keys.every((key) => Object.prototype.hasOwnProperty.call(record, key))
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+}
+
+function isCalendarDate(value: unknown): value is string {
+  if (typeof value !== 'string' || !DATE_PATTERN.test(value)) return false
+  const parsed = new Date(`${value}T00:00:00.000Z`)
+  return !isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value
+}
+
+function isTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string' || !TIMESTAMP_PATTERN.test(value)) return false
+  if (!isCalendarDate(value.slice(0, 10))) return false
+  return !isNaN(new Date(value).getTime())
+}
+
+function parseAccount(value: unknown): Account | null {
+  if (!isRecord(value) || !hasExactKeys(value, ACCOUNT_KEYS)) return null
+  const {
+    id,
+    name,
+    account_type,
+    opening_balance,
+    current_balance,
+    is_archived,
+    created_at,
+    updated_at,
+  } = value
+  if (!isPositiveInteger(id)) return null
+  if (typeof name !== 'string' || name.length === 0 || name.length > 100) {
+    return null
+  }
+  if (name.trim().length === 0) return null
+  if (typeof account_type !== 'string' || !ACCOUNT_TYPES.has(account_type)) {
+    return null
+  }
+  if (!isDecimalString(opening_balance)) return null
+  if (!isDecimalString(current_balance)) return null
+  if (typeof is_archived !== 'boolean') return null
+  if (!isTimestamp(created_at) || !isTimestamp(updated_at)) return null
+  return {
+    id,
+    name,
+    account_type: account_type as AccountType,
+    opening_balance,
+    current_balance,
+    is_archived,
+    created_at,
+    updated_at,
+  }
+}
+
+export function parseAccounts(payload: unknown, status: number): Account[] {
+  const malformed = () =>
+    new ApiError(MALFORMED_RESPONSE_MESSAGE, status, null, {})
+  if (!Array.isArray(payload)) throw malformed()
+  const accounts: Account[] = []
+  for (const item of payload) {
+    const account = parseAccount(item)
+    if (account === null) throw malformed()
+    accounts.push(account)
+  }
+  return accounts
+}
+
+let inFlightAccounts: Promise<Account[]> | null = null
+
+function requestAccounts(): Promise<Account[]> {
+  return apiFetch('/api/accounts/', {}, parseAccounts)
+}
+
+export function fetchAccounts(): Promise<Account[]> {
+  if (inFlightAccounts === null) {
+    inFlightAccounts = requestAccounts().finally(() => {
+      inFlightAccounts = null
+    })
+  }
+  return inFlightAccounts
+}
+
+export function resetAccountsRequest(): void {
+  inFlightAccounts = null
+}

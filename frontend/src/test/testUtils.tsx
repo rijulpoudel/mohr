@@ -2,6 +2,7 @@ import { StrictMode } from 'react'
 import { cleanup, render } from '@testing-library/react'
 import { afterEach, beforeEach, vi } from 'vitest'
 import { resetRestoreRequest } from '../api/auth'
+import { resetAccountsRequest } from '../api/accounts'
 import { resetDashboardRequest } from '../api/dashboard'
 import App from '../App'
 
@@ -77,6 +78,7 @@ export function renderApp(path = '/') {
 beforeEach(() => {
   resetRestoreRequest()
   resetDashboardRequest()
+  resetAccountsRequest()
   clearCookies()
   localStorage.clear()
   sessionStorage.clear()
