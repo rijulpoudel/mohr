@@ -984,6 +984,57 @@ class BudgetCalculationTests(APITestCase):
 
         self.assertEqual(item["spent"], "25.00")
 
+    def test_budget_calculation_follows_transaction_category_reassignment(self):
+        budget_a = self.create_budget()
+        budget_b = self.create_budget(
+            category=self.second_expense_category,
+            month=date(2026, 9, 1),
+        )
+        transaction_obj = self.create_transaction(
+            amount=Decimal("25.50"),
+            date=date(2026, 9, 10),
+        )
+        self.client.force_login(self.user)
+
+        response = self.client.get(reverse("budget-list"))
+        items = {item["id"]: item for item in response.data}
+        self.assertEqual(items[budget_a.id]["spent"], "25.50")
+        self.assertEqual(items[budget_a.id]["remaining"], "474.50")
+        self.assertEqual(items[budget_b.id]["spent"], "0.00")
+        self.assertEqual(items[budget_b.id]["remaining"], "500.00")
+
+        moved = self.client.patch(
+            reverse("transaction-detail", args=[transaction_obj.pk]),
+            {"category": self.second_expense_category.id},
+            format="json",
+        )
+        self.assertEqual(moved.status_code, status.HTTP_200_OK)
+
+        response = self.client.get(reverse("budget-list"))
+        items = {item["id"]: item for item in response.data}
+        self.assertEqual(items[budget_a.id]["spent"], "0.00")
+        self.assertEqual(items[budget_a.id]["remaining"], "500.00")
+        self.assertEqual(items[budget_b.id]["spent"], "25.50")
+        self.assertEqual(items[budget_b.id]["remaining"], "474.50")
+
+    def test_budget_calculation_survives_account_archive(self):
+        budget = self.create_budget()
+        self.create_transaction(
+            amount=Decimal("25.50"),
+            date=date(2026, 9, 10),
+        )
+        self.client.force_login(self.user)
+
+        archived = self.client.delete(reverse("account-detail", args=[self.account.pk]))
+        self.assertEqual(archived.status_code, status.HTTP_204_NO_CONTENT)
+        self.account.refresh_from_db()
+        self.assertTrue(self.account.is_archived)
+
+        item = self.fetch_budget(budget)
+
+        self.assertEqual(item["spent"], "25.50")
+        self.assertEqual(item["remaining"], "474.50")
+
     def test_calculation_tracks_transaction_create_update_move_and_delete(self):
         budget = self.create_budget()
 
