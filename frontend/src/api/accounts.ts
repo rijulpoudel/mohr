@@ -140,12 +140,34 @@ export function fetchAccounts(): Promise<Account[]> {
   return inFlightAccounts
 }
 
-function parseAccountResponse(payload: unknown, status: number): Account {
-  const account = parseAccount(payload)
-  if (account === null) {
-    throw new ApiError(MALFORMED_RESPONSE_MESSAGE, status, null, {})
+function parseAccountWithStatus(
+  expectedStatus: number,
+): (payload: unknown, status: number) => Account {
+  return (payload, status) => {
+    if (status !== expectedStatus) {
+      throw new ApiError(MALFORMED_RESPONSE_MESSAGE, status, null, {})
+    }
+    const account = parseAccount(payload)
+    if (account === null) {
+      throw new ApiError(MALFORMED_RESPONSE_MESSAGE, status, null, {})
+    }
+    return account
   }
-  return account
+}
+
+function parseUpdatedAccount(
+  accountId: number,
+): (payload: unknown, status: number) => Account {
+  return (payload, status) => {
+    if (status !== 200) {
+      throw new ApiError(MALFORMED_RESPONSE_MESSAGE, status, null, {})
+    }
+    const account = parseAccount(payload)
+    if (account === null || account.id !== accountId) {
+      throw new ApiError(MALFORMED_RESPONSE_MESSAGE, status, null, {})
+    }
+    return account
+  }
 }
 
 function rejectUnexpectedSuccess(_payload: unknown, status: number): never {
@@ -172,7 +194,7 @@ export async function createAccount(
   return apiFetch(
     '/api/accounts/',
     { method: 'POST', headers: { 'X-CSRFToken': token }, body },
-    parseAccountResponse,
+    parseAccountWithStatus(201),
   )
 }
 
@@ -195,7 +217,7 @@ export async function updateAccount(
       headers: { 'X-CSRFToken': token },
       body: JSON.stringify(body),
     },
-    parseAccountResponse,
+    parseUpdatedAccount(accountId),
   )
 }
 

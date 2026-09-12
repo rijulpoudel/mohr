@@ -364,6 +364,32 @@ function authenticatedCreateHandler(
   }
 }
 
+function authenticatedMutationHandler(
+  accounts: (url: string, init?: RequestInit) => Response | Promise<Response>,
+) {
+  return (url: string, init?: RequestInit) => {
+    if (url === '/api/auth/me/') {
+      return jsonResponse({ id: 1, email: 'student@example.com' })
+    }
+    if (url === '/api/dashboard/summary/') {
+      return jsonResponse({
+        total_balance: '100.00',
+        current_month_income: '0.00',
+        current_month_expenses: '0.00',
+        total_budgeted: '0.00',
+        remaining_budget: '0.00',
+        recent_transactions: [],
+      })
+    }
+    if (url === '/api/auth/csrf/') {
+      setCsrfCookie()
+      return jsonResponse({ detail: 'CSRF cookie set.' })
+    }
+    if (url.startsWith('/api/accounts/')) return accounts(url, init)
+    return jsonResponse({}, 404)
+  }
+}
+
 async function fillCreateForm(
   user: ReturnType<typeof userEvent.setup>,
   name = 'Travel Fund',
@@ -970,5 +996,611 @@ describe('account creation lifecycle', () => {
 
     expect(screen.queryByText('Late Account')).not.toBeInTheDocument()
     expect(calls(mock, '/api/accounts/', 'POST')).toHaveLength(1)
+  })
+})
+
+function editAccounts() {
+  return [
+    accountFixture({
+      id: 7,
+      name: 'Everyday Checking',
+      account_type: 'checking',
+      opening_balance: '100.00',
+      current_balance: '100.00',
+      is_archived: false,
+    }),
+    accountFixture({
+      id: 8,
+      name: 'Old Card',
+      account_type: 'credit_card',
+      opening_balance: '-50.00',
+      current_balance: '-75.50',
+      is_archived: true,
+    }),
+    accountFixture({
+      id: 9,
+      name: 'Cash Jar',
+      account_type: 'cash',
+      opening_balance: '0.00',
+      current_balance: '0.00',
+      is_archived: false,
+    }),
+  ]
+}
+
+function accountItem(name: string): HTMLElement {
+  const item = screen
+    .getAllByRole('listitem')
+    .find((node) => node.textContent?.includes(name))
+  if (item === undefined) throw new Error(`No list item for ${name}`)
+  return item
+}
+
+async function openEditForm(
+  user: ReturnType<typeof userEvent.setup>,
+  accountName: string,
+) {
+  const item = accountItem(accountName)
+  await user.click(within(item).getByRole('button', { name: `Edit ${accountName}` }))
+  return screen.getByRole('form', { name: 'Edit account' })
+}
+
+async function setEditFields(
+  user: ReturnType<typeof userEvent.setup>,
+  editor: HTMLElement,
+  name: string,
+  opening: string,
+  accountType = 'savings',
+) {
+  const nameInput = within(editor).getByLabelText('Name')
+  await user.clear(nameInput)
+  await user.type(nameInput, name)
+  await user.selectOptions(within(editor).getByLabelText('Account type'), accountType)
+  const openingInput = within(editor).getByLabelText('Opening balance')
+  await user.clear(openingInput)
+  await user.type(openingInput, opening)
+}
+
+describe('account editing', () => {
+  it('shows an Edit button on every row and prefills the editor from exact server strings', async () => {
+    const mock = installFetchMock(
+      authenticatedHandler(() => jsonResponse(editAccounts())),
+    )
+    renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    for (const name of ['Everyday Checking', 'Old Card', 'Cash Jar']) {
+      expect(
+        within(accountItem(name)).getByRole('button', { name: `Edit ${name}` }),
+      ).toBeInTheDocument()
+    }
+
+    const user = userEvent.setup()
+    const editor = await openEditForm(user, 'Everyday Checking')
+
+    const nameInput = within(editor).getByLabelText('Name')
+    expect(nameInput).toHaveValue('Everyday Checking')
+    expect(nameInput).toHaveAttribute('type', 'text')
+    const typeSelect = within(editor).getByLabelText('Account type')
+    expect(typeSelect).toHaveValue('checking')
+    const openingInput = within(editor).getByLabelText('Opening balance')
+    expect(openingInput).toHaveValue('100.00')
+    expect(openingInput).toHaveAttribute('type', 'text')
+    expect(openingInput).toHaveAttribute('inputmode', 'decimal')
+    expect(openingInput).not.toHaveAttribute('type', 'number')
+    expect(
+      within(editor).getByRole('button', { name: 'Save' }),
+    ).toBeInTheDocument()
+    expect(
+      within(editor).getByRole('button', { name: 'Cancel' }),
+    ).toBeInTheDocument()
+    expect(screen.getAllByRole('listitem')).toHaveLength(3)
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(0)
+    expect(calls(mock, '/api/accounts/7/', 'PATCH')).toHaveLength(0)
+  })
+
+  it('cancel closes the editor without mutation and restores the row', async () => {
+    const mock = installFetchMock(
+      authenticatedHandler(() => jsonResponse(editAccounts())),
+    )
+    renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    const user = userEvent.setup()
+    const editor = await openEditForm(user, 'Everyday Checking')
+    const nameInput = within(editor).getByLabelText('Name')
+    await user.clear(nameInput)
+    await user.type(nameInput, 'Changed Name')
+    await user.click(within(editor).getByRole('button', { name: 'Cancel' }))
+
+    expect(
+      screen.queryByRole('form', { name: 'Edit account' }),
+    ).not.toBeInTheDocument()
+    const restored = accountItem('Everyday Checking')
+    expect(within(restored).getByText('Everyday Checking')).toBeInTheDocument()
+    expect(within(restored).getAllByText('$100.00')).toHaveLength(2)
+    expect(within(restored).getByText('Active')).toBeInTheDocument()
+    expect(screen.queryByText('Account updated.')).not.toBeInTheDocument()
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(0)
+    expect(calls(mock, '/api/accounts/7/', 'PATCH')).toHaveLength(0)
+  })
+
+  it('switching edit targets resets the editor to that account', async () => {
+    installFetchMock(
+      authenticatedHandler(() => jsonResponse(editAccounts())),
+    )
+    renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    const user = userEvent.setup()
+    const editor = await openEditForm(user, 'Everyday Checking')
+    await user.clear(within(editor).getByLabelText('Name'))
+    await user.type(within(editor).getByLabelText('Name'), 'Discarded Change')
+
+    const switched = await openEditForm(user, 'Old Card')
+    expect(within(switched).getByLabelText('Name')).toHaveValue('Old Card')
+    expect(within(switched).getByLabelText('Account type')).toHaveValue(
+      'credit_card',
+    )
+    expect(within(switched).getByLabelText('Opening balance')).toHaveValue(
+      '-50.00',
+    )
+    expect(screen.getAllByRole('form', { name: 'Edit account' })).toHaveLength(1)
+  })
+
+  it('saves all three fields via exact CSRF-bootstrapped PATCH and announces update', async () => {
+    const mock = installFetchMock(
+      authenticatedMutationHandler((_url, init) => {
+        if ((init?.method ?? 'GET') === 'GET') return jsonResponse(editAccounts())
+        return jsonResponse(
+          accountFixture({
+            id: 7,
+            name: 'Renamed',
+            account_type: 'savings',
+            opening_balance: '-1234.56',
+            current_balance: '1250.00',
+          }),
+          200,
+        )
+      }),
+    )
+    renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    const user = userEvent.setup()
+    const editor = await openEditForm(user, 'Everyday Checking')
+    await setEditFields(user, editor, 'Renamed', '-1234.56')
+    await user.click(within(editor).getByRole('button', { name: 'Save' }))
+
+    expect(await screen.findByText('Account updated.')).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Account updated.')
+    expect(requestLog(mock)).toEqual([
+      'GET /api/auth/me/',
+      'GET /api/accounts/',
+      'GET /api/auth/csrf/',
+      'PATCH /api/accounts/7/',
+    ])
+    const patches = calls(mock, '/api/accounts/7/', 'PATCH')
+    expect(patches).toHaveLength(1)
+    const [input, init] = patches[0]
+    expect(String(input)).toBe('/api/accounts/7/')
+    expect(init?.method).toBe('PATCH')
+    const headers = init?.headers as Headers
+    expect(headers.get('Content-Type')).toBe('application/json')
+    expect(headers.get('X-CSRFToken')).toBe(CSRF_TOKEN)
+    expect(JSON.parse(String(init?.body))).toEqual({
+      name: 'Renamed',
+      account_type: 'savings',
+      opening_balance: '-1234.56',
+    })
+
+    expect(
+      screen.queryByRole('form', { name: 'Edit account' }),
+    ).not.toBeInTheDocument()
+    const items = screen.getAllByRole('listitem')
+    expect(items).toHaveLength(3)
+    expect(within(items[0]).getByText('Renamed')).toBeInTheDocument()
+    expect(within(items[0]).getByText('-$1,234.56')).toBeInTheDocument()
+    expect(within(items[0]).getByText('$1,250.00')).toBeInTheDocument()
+    expect(screen.queryByText('7')).not.toBeInTheDocument()
+    expect(calls(mock, '/api/accounts/', 'GET')).toHaveLength(1)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  it('replaces the edited account at its original position and keeps archived state', async () => {
+    const mock = installFetchMock(
+      authenticatedMutationHandler((_url, init) => {
+        if ((init?.method ?? 'GET') === 'GET') return jsonResponse(editAccounts())
+        return jsonResponse(
+          accountFixture({
+            id: 8,
+            name: 'Old Card Renamed',
+            account_type: 'credit_card',
+            opening_balance: '-50.00',
+            current_balance: '-75.50',
+            is_archived: true,
+          }),
+          200,
+        )
+      }),
+    )
+    renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    const user = userEvent.setup()
+    const editor = await openEditForm(user, 'Old Card')
+    const nameInput = within(editor).getByLabelText('Name')
+    await user.clear(nameInput)
+    await user.type(nameInput, 'Old Card Renamed')
+    await user.click(within(editor).getByRole('button', { name: 'Save' }))
+
+    await screen.findByText('Old Card Renamed')
+    const items = screen.getAllByRole('listitem')
+    expect(items).toHaveLength(3)
+    expect(within(items[0]).getByText('Everyday Checking')).toBeInTheDocument()
+    expect(within(items[1]).getByText('Old Card Renamed')).toBeInTheDocument()
+    expect(within(items[2]).getByText('Cash Jar')).toBeInTheDocument()
+    expect(within(items[1]).getByText('Archived')).toBeInTheDocument()
+    expect(within(items[1]).getByText('Credit card')).toBeInTheDocument()
+    expect(calls(mock, '/api/accounts/', 'GET')).toHaveLength(1)
+    expect(calls(mock, '/api/accounts/8/', 'PATCH')).toHaveLength(1)
+  })
+
+  it.each([
+    ['a blank name', '   ', 'Enter a name for this account.', 'name'],
+    [
+      'a 101-character name',
+      'x'.repeat(101),
+      'Name must be 100 characters or fewer.',
+      'name',
+    ],
+    [
+      'an opening balance with one decimal',
+      '12.3',
+      'Enter an amount with exactly 2 decimals and at most 10 integer digits.',
+      'opening',
+    ],
+    [
+      'an opening balance with 11 integer digits',
+      '12345678901.12',
+      'Enter an amount with exactly 2 decimals and at most 10 integer digits.',
+      'opening',
+    ],
+    [
+      'a non-numeric opening balance',
+      'abc',
+      'Enter an amount with exactly 2 decimals and at most 10 integer digits.',
+      'opening',
+    ],
+  ])('rejects %s before any network call', async (_label, badValue, message, field) => {
+    const mock = installFetchMock(
+      authenticatedMutationHandler((_url, init) => {
+        if ((init?.method ?? 'GET') === 'GET') return jsonResponse(editAccounts())
+        return jsonResponse(accountFixture(), 200)
+      }),
+    )
+    renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    const user = userEvent.setup()
+    const editor = await openEditForm(user, 'Everyday Checking')
+    const input =
+      field === 'name'
+        ? within(editor).getByLabelText('Name')
+        : within(editor).getByLabelText('Opening balance')
+    await user.clear(input)
+    await user.type(input, badValue)
+    await user.click(within(editor).getByRole('button', { name: 'Save' }))
+
+    expect(await screen.findByText(message)).toBeInTheDocument()
+    expect(input).toHaveAttribute('aria-invalid', 'true')
+    expect(input).toHaveAttribute(
+      'aria-describedby',
+      field === 'name' ? 'edit-account-name-error' : 'edit-account-opening-error',
+    )
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Please check the highlighted fields.',
+    )
+    expect(input).toHaveValue(badValue)
+    expect(
+      screen.getByRole('form', { name: 'Edit account' }),
+    ).toBeInTheDocument()
+    expect(within(accountItem('Cash Jar')).getByText('Cash Jar')).toBeInTheDocument()
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(0)
+    expect(calls(mock, '/api/accounts/7/', 'PATCH')).toHaveLength(0)
+  })
+
+  it('renders backend known-field errors inline and preserves values and list', async () => {
+    const mock = installFetchMock(
+      authenticatedMutationHandler((_url, init) => {
+        if ((init?.method ?? 'GET') === 'GET') return jsonResponse(editAccounts())
+        return jsonResponse(
+          {
+            name: ['This field is required.'],
+            opening_balance: [
+              'Ensure that there are no more than 10 digits before the decimal point.',
+            ],
+          },
+          400,
+        )
+      }),
+    )
+    renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    const user = userEvent.setup()
+    const editor = await openEditForm(user, 'Everyday Checking')
+    const nameInput = within(editor).getByLabelText('Name')
+    await user.clear(nameInput)
+    await user.type(nameInput, 'Renamed')
+    await user.click(within(editor).getByRole('button', { name: 'Save' }))
+
+    expect(
+      await screen.findByText('This field is required.'),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        'Ensure that there are no more than 10 digits before the decimal point.',
+      ),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Please check the highlighted fields.',
+    )
+    expect(nameInput).toHaveValue('Renamed')
+    expect(
+      screen.getByRole('form', { name: 'Edit account' }),
+    ).toBeInTheDocument()
+    expect(within(accountItem('Cash Jar')).getByText('Cash Jar')).toBeInTheDocument()
+    expect(calls(mock, '/api/accounts/7/', 'PATCH')).toHaveLength(1)
+  })
+
+  it('shows a safe alert for backend non-field errors', async () => {
+    const mock = installFetchMock(
+      authenticatedMutationHandler((_url, init) => {
+        if ((init?.method ?? 'GET') === 'GET') return jsonResponse(editAccounts())
+        return jsonResponse({ non_field_errors: ['Unable to update account.'] }, 400)
+      }),
+    )
+    renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    const user = userEvent.setup()
+    const editor = await openEditForm(user, 'Everyday Checking')
+    await setEditFields(user, editor, 'Renamed', '-1234.56')
+    await user.click(within(editor).getByRole('button', { name: 'Save' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Unable to update account.',
+    )
+    expect(within(editor).getByLabelText('Name')).toHaveValue('Renamed')
+    expect(within(editor).getByLabelText('Opening balance')).toHaveValue('-1234.56')
+    expect(calls(mock, '/api/accounts/7/', 'PATCH')).toHaveLength(1)
+  })
+
+  it('shows a generic safe alert for unknown backend error keys only', async () => {
+    installFetchMock(
+      authenticatedMutationHandler((_url, init) => {
+        if ((init?.method ?? 'GET') === 'GET') return jsonResponse(editAccounts())
+        return jsonResponse({ server_note: ['unexpected'] }, 400)
+      }),
+    )
+    renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    const user = userEvent.setup()
+    const editor = await openEditForm(user, 'Everyday Checking')
+    await setEditFields(user, editor, 'Renamed', '-1234.56')
+    await user.click(within(editor).getByRole('button', { name: 'Save' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Something went wrong. Please try again.',
+    )
+    expect(screen.queryByText('unexpected')).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('form', { name: 'Edit account' }),
+    ).toBeInTheDocument()
+  })
+
+  const editFailureCases: Array<[string, () => Response, string]> = [
+    [
+      'a network failure',
+      () => {
+        throw new TypeError('Failed to fetch')
+      },
+      'Could not reach the server.',
+    ],
+    [
+      'a 403 response',
+      () => jsonResponse({ detail: 'Forbidden.' }, 403),
+      'Forbidden.',
+    ],
+    [
+      'a 404 response',
+      () =>
+        jsonResponse(
+          { detail: 'No Account matches the given query.' },
+          404,
+        ),
+      'No Account matches the given query.',
+    ],
+    [
+      'a 500 response',
+      () => new Response(null, { status: 500 }),
+      'Something went wrong. Please try again.',
+    ],
+    [
+      'a malformed 200 response',
+      () => jsonResponse({}, 200),
+      'Unexpected server response.',
+    ],
+  ]
+
+  it.each(editFailureCases)(
+    'keeps the editor values and list on %s',
+    async (_label, respond, message) => {
+      const mock = installFetchMock(
+        authenticatedMutationHandler((_url, init) => {
+          if ((init?.method ?? 'GET') === 'GET') return jsonResponse(editAccounts())
+          return respond()
+        }),
+      )
+      renderApp('/accounts')
+      await screen.findByText('Everyday Checking')
+
+      const user = userEvent.setup()
+      const editor = await openEditForm(user, 'Everyday Checking')
+      await setEditFields(user, editor, 'Renamed', '-1234.56')
+      await user.click(within(editor).getByRole('button', { name: 'Save' }))
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(message)
+      expect(within(editor).getByLabelText('Name')).toHaveValue('Renamed')
+      expect(within(editor).getByLabelText('Opening balance')).toHaveValue('-1234.56')
+      expect(within(accountItem('Cash Jar')).getByText('Cash Jar')).toBeInTheDocument()
+      expect(screen.queryByText('Account updated.')).not.toBeInTheDocument()
+      expect(
+        within(editor).getByRole('button', { name: 'Save' }),
+      ).not.toBeDisabled()
+      expect(calls(mock, '/api/accounts/7/', 'PATCH')).toHaveLength(1)
+    },
+  )
+
+  it('disables controls while pending and makes duplicate saves a single request', async () => {
+    const pending = deferred<Response>()
+    const mock = installFetchMock(
+      authenticatedMutationHandler((_url, init) => {
+        if ((init?.method ?? 'GET') === 'GET') return jsonResponse(editAccounts())
+        return pending.promise
+      }),
+    )
+    renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    const user = userEvent.setup()
+    const editor = await openEditForm(user, 'Everyday Checking')
+    await setEditFields(user, editor, 'Renamed', '-1234.56')
+    const saveButton = within(editor).getByRole('button', { name: 'Save' })
+    await user.click(saveButton)
+
+    const pendingButton = await screen.findByRole('button', {
+      name: 'Saving account…',
+    })
+    expect(pendingButton).toBeDisabled()
+    expect(within(editor).getByLabelText('Name')).toBeDisabled()
+    expect(within(editor).getByLabelText('Account type')).toBeDisabled()
+    expect(within(editor).getByLabelText('Opening balance')).toBeDisabled()
+    expect(within(editor).getByRole('button', { name: 'Cancel' })).toBeDisabled()
+
+    await user.click(pendingButton)
+    expect(calls(mock, '/api/accounts/7/', 'PATCH')).toHaveLength(1)
+
+    await act(async () => {
+      pending.resolve(
+        jsonResponse(
+          accountFixture({
+            id: 7,
+            name: 'Renamed',
+            account_type: 'savings',
+            opening_balance: '-1234.56',
+            current_balance: '-1234.56',
+          }),
+          200,
+        ),
+      )
+    })
+    expect(await screen.findByText('Account updated.')).toBeInTheDocument()
+    expect(
+      screen.queryByRole('form', { name: 'Edit account' }),
+    ).not.toBeInTheDocument()
+    expect(calls(mock, '/api/accounts/7/', 'PATCH')).toHaveLength(1)
+  })
+
+  it('clears session and redirects to login on a 401 PATCH without logout or storage', async () => {
+    const mock = installFetchMock(
+      authenticatedMutationHandler((_url, init) => {
+        if ((init?.method ?? 'GET') === 'GET') return jsonResponse(editAccounts())
+        return jsonResponse(
+          { detail: 'Authentication credentials were not provided.' },
+          401,
+        )
+      }),
+    )
+    renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    const user = userEvent.setup()
+    const editor = await openEditForm(user, 'Everyday Checking')
+    await setEditFields(user, editor, 'Renamed', '-1234.56')
+    await user.click(within(editor).getByRole('button', { name: 'Save' }))
+
+    expect(await screen.findByLabelText('Email')).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/login')
+    expect(
+      requestLog(mock).some((entry) => entry.includes('/api/auth/logout/')),
+    ).toBe(false)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  it('clears session and redirects to login on a 401 CSRF bootstrap', async () => {
+    const mock = installFetchMock((url, init) => {
+      if (url === '/api/auth/me/') {
+        return jsonResponse({ id: 1, email: 'student@example.com' })
+      }
+      if (url === '/api/auth/csrf/') {
+        return jsonResponse(
+          { detail: 'Authentication credentials were not provided.' },
+          401,
+        )
+      }
+      if (url === '/api/accounts/' && (init?.method ?? 'GET') === 'GET') {
+        return jsonResponse(editAccounts())
+      }
+      return jsonResponse({}, 404)
+    })
+    renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    const user = userEvent.setup()
+    const editor = await openEditForm(user, 'Everyday Checking')
+    await setEditFields(user, editor, 'Renamed', '-1234.56')
+    await user.click(within(editor).getByRole('button', { name: 'Save' }))
+
+    expect(await screen.findByLabelText('Email')).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/login')
+    expect(calls(mock, '/api/accounts/7/', 'PATCH')).toHaveLength(0)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  it('ignores a PATCH response that settles after unmount', async () => {
+    const pending = deferred<Response>()
+    const mock = installFetchMock(
+      authenticatedMutationHandler((_url, init) => {
+        if ((init?.method ?? 'GET') === 'GET') return jsonResponse(editAccounts())
+        return pending.promise
+      }),
+    )
+    const view = renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    const user = userEvent.setup()
+    const editor = await openEditForm(user, 'Everyday Checking')
+    await setEditFields(user, editor, 'Renamed', '-1234.56')
+    await user.click(within(editor).getByRole('button', { name: 'Save' }))
+    await screen.findByRole('button', { name: 'Saving account…' })
+
+    view.unmount()
+    await act(async () => {
+      pending.resolve(
+        jsonResponse(
+          accountFixture({ id: 7, name: 'Renamed', current_balance: '1.00' }),
+          200,
+        ),
+      )
+    })
+
+    expect(screen.queryByText('Renamed')).not.toBeInTheDocument()
+    expect(calls(mock, '/api/accounts/7/', 'PATCH')).toHaveLength(1)
   })
 })

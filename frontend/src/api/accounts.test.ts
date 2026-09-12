@@ -163,6 +163,21 @@ describe('createAccount', () => {
     expect(calls(mock, '/api/accounts/', 'POST')).toHaveLength(1)
   })
 
+  it('rejects a 200 response even with a valid Account payload', async () => {
+    const mock = installFetchMock(
+      createHandler(() => jsonResponse(accountFixture({ id: 7 }), 200)),
+    )
+
+    const error = await rejection(createAccount('X', 'checking', '0.00'))
+    expect(error).toBeInstanceOf(ApiError)
+    if (error instanceof ApiError) {
+      expect(error.status).toBe(200)
+      expect(error.message).toBe('Unexpected server response.')
+      expect(error.fieldErrors).toEqual({})
+    }
+    expect(calls(mock, '/api/accounts/', 'POST')).toHaveLength(1)
+  })
+
   it('aborts before POST when no CSRF cookie is present', async () => {
     const mock = installFetchMock((url) => {
       if (url === '/api/auth/csrf/') return jsonResponse(CSRF_RESPONSE)
@@ -383,6 +398,46 @@ describe('updateAccount', () => {
       expect(error.message).toBe('Invalid account id.')
     }
     expect(requestLog(mock)).toEqual([])
+  })
+
+  it('rejects a 201 response even with a valid matching Account payload', async () => {
+    const mock = installFetchMock(
+      mutationHandler((url) => {
+        if (url === '/api/accounts/7/') {
+          return jsonResponse(accountFixture({ id: 7, name: 'Intruder' }), 201)
+        }
+        return jsonResponse({}, 404)
+      }),
+    )
+
+    const error = await rejection(updateAccount(7, { name: 'Intruder' }))
+    expect(error).toBeInstanceOf(ApiError)
+    if (error instanceof ApiError) {
+      expect(error.status).toBe(201)
+      expect(error.message).toBe('Unexpected server response.')
+      expect(error.fieldErrors).toEqual({})
+    }
+    expect(calls(mock, '/api/accounts/7/', 'PATCH')).toHaveLength(1)
+  })
+
+  it('rejects a 200 response whose id does not match the requested account id', async () => {
+    const mock = installFetchMock(
+      mutationHandler((url) => {
+        if (url === '/api/accounts/7/') {
+          return jsonResponse(accountFixture({ id: 8, name: 'Intruder' }), 200)
+        }
+        return jsonResponse({}, 404)
+      }),
+    )
+
+    const error = await rejection(updateAccount(7, { name: 'Intruder' }))
+    expect(error).toBeInstanceOf(ApiError)
+    if (error instanceof ApiError) {
+      expect(error.status).toBe(200)
+      expect(error.message).toBe('Unexpected server response.')
+      expect(error.fieldErrors).toEqual({})
+    }
+    expect(calls(mock, '/api/accounts/7/', 'PATCH')).toHaveLength(1)
   })
 
   it('rejects a malformed 200 response safely', async () => {
