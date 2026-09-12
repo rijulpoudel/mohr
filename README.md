@@ -227,6 +227,53 @@ The collection accepts the optional filters `account`, `category`, `transaction_
 
 Every endpoint requires an authenticated session, and unauthenticated requests return `401` before method dispatch. Authenticated clients may use only the methods listed above; unsupported methods return `405`. `POST`, `PATCH`, and `DELETE` additionally require the CSRF token from `/api/auth/csrf/`, sent as the `X-CSRFToken` header, and a failed CSRF check returns `403`.
 
+## Monthly Budgets API
+
+Budgets routes live under `/api/budgets/`. Every request must come from an authenticated session, and ownership always comes from that session, never from client input. An object ID never grants access: requesting another user's budget returns `404`, the same as a missing ID, so the response never reveals whether another user owns that ID.
+
+Every budget response uses exactly this public shape:
+
+```json
+{
+  "id": 1,
+  "category": 1,
+  "month": "2026-09-01",
+  "budgeted": "500.00",
+  "spent": "25.50",
+  "remaining": "474.50",
+  "created_at": "2026-09-11T14:52:48.008850Z",
+  "updated_at": "2026-09-11T14:52:48.008850Z"
+}
+```
+
+`category` is a category ID. `month` uses strict `YYYY-MM-DD` format and must be the first day of the month. `budgeted` is always a JSON string with exactly two decimal places, so money values never lose precision. It is a strictly positive decimal with a maximum of 12 digits in total and 2 decimal places. The internal storage name `amount` is never exposed.
+
+`spent` and `remaining` are read-only JSON strings with exactly two decimal places, calculated live and never stored. `spent` sums the authenticated user's expense transactions matching the budget category and the same calendar year and month. `remaining` is `budgeted` minus `spent` and can be negative when spending exceeds the budget. Transaction creates, updates, moves, and deletes appear in the next budget response automatically.
+
+| Method | Endpoint | Purpose | Success |
+| --- | --- | --- | --- |
+| `GET` | `/api/budgets/` | List the authenticated user's budgets | `200` with a JSON array |
+| `POST` | `/api/budgets/` | Create a budget owned by the authenticated user | `201` with the budget |
+| `GET` | `/api/budgets/<id>/` | Retrieve one owned budget | `200` with the budget |
+| `PATCH` | `/api/budgets/<id>/` | Partially update an owned budget | `200` with the budget |
+| `DELETE` | `/api/budgets/<id>/` | Permanently delete an owned budget | `204` with no body |
+
+Only `category`, `month`, and `budgeted` are writable. `id`, the owner, the internal `amount` alias, `spent`, `remaining`, `created_at`, and `updated_at` are server-controlled, and the owner is never returned. `PATCH` changes only the fields included in the request and leaves omitted fields unchanged. There is no full `PUT` update.
+
+`category` IDs are owner-scoped: a foreign ID and a missing ID return the same field-level `400`, so the response never reveals whether another user owns that relation. New budgets require the authenticated user's own active expense category. The user's own income category and archived category are rejected. The owner is always derived from the session.
+
+Only one budget exists per user, category, and month. A duplicate returns a controlled `400` under `non_field_errors`.
+
+`PATCH` validates the effective final category and month after applying the partial change, so changing either field alone or both together can collide with an existing budget. Explicitly assigning an archived category, including resubmitting the budget's own archived category, is rejected. Edits that omit `category` remain allowed on an existing historical budget whose category was later archived. `PATCH` responses refetch `spent` and `remaining` so the returned calculations reflect the update.
+
+Detail budget lookups are owner-scoped: a foreign budget ID and a missing budget ID both return a generic `404`.
+
+`DELETE` permanently removes only the budget row and returns an empty `204`, leaving the user, category, and transactions unchanged. A repeated delete returns `404`. This differs from account and category archive behavior, which preserve the row.
+
+The collection returns a plain JSON array with no pagination. It is ordered by newest `month` first, with deterministic ties, and includes historical budgets whose category was later archived.
+
+Every endpoint requires an authenticated session, and unauthenticated requests return `401` before method dispatch. Authenticated clients may use only the methods listed above; unsupported methods return `405`. `POST`, `PATCH`, and `DELETE` additionally require the CSRF token from `/api/auth/csrf/`, sent as the `X-CSRFToken` header, and a failed CSRF check returns `403`.
+
 ## Repository history
 
 Mohr began as an Express, TypeScript, and Prisma prototype. That work remains preserved in Git history and the `express-prototype-v0.1` tag for reference. The production direction is now Django REST Framework.
