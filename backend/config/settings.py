@@ -47,6 +47,7 @@ INSTALLED_APPS = [
     "categories.apps.CategoriesConfig",
     "transactions.apps.TransactionsConfig",
     "budgets.apps.BudgetsConfig",
+    "dashboard.apps.DashboardConfig",
 ]
 
 AUTH_USER_MODEL = "users.User"

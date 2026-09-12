@@ -1,23 +1,10 @@
-from decimal import Decimal
-
 from django.db import IntegrityError, transaction
-from django.db.models import (
-    DecimalField,
-    ExpressionWrapper,
-    F,
-    OuterRef,
-    Subquery,
-    Sum,
-    Value,
-)
-from django.db.models.functions import Coalesce, ExtractMonth, ExtractYear
 from rest_framework import mixins, serializers, status, viewsets
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from budgets.models import MonthlyBudget
+from budgets.selectors import budgets_with_spending
 from budgets.serializers import DUPLICATE_BUDGET_MESSAGE, BudgetSerializer
-from transactions.models import Transaction, TransactionType
 
 DUPLICATE_BUDGET_CONSTRAINT_NAME = "budgets_user_category_month_unique"
 
@@ -53,30 +40,7 @@ class BudgetViewSet(
         # query count instead of an N+1 spent/remaining lookup. The
         # aggregate output fields are wider than the stored 12-digit amount
         # because SUM across many transactions can exceed 12 digits.
-        spent = Coalesce(
-            Subquery(
-                Transaction.objects.filter(
-                    user=OuterRef("user"),
-                    category=OuterRef("category"),
-                    transaction_type=TransactionType.EXPENSE,
-                    date__year=ExtractYear(OuterRef("month")),
-                    date__month=ExtractMonth(OuterRef("month")),
-                )
-                .values("user")
-                .annotate(total=Sum("amount"))
-                .values("total"),
-                output_field=DecimalField(max_digits=30, decimal_places=2),
-            ),
-            Value(Decimal("0.00")),
-            output_field=DecimalField(max_digits=30, decimal_places=2),
-        )
-        return MonthlyBudget.objects.filter(user=self.request.user).annotate(
-            spent=spent,
-            remaining=ExpressionWrapper(
-                F("amount") - F("spent"),
-                output_field=DecimalField(max_digits=30, decimal_places=2),
-            ),
-        )
+        return budgets_with_spending(self.request.user)
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
