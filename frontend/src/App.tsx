@@ -5,6 +5,7 @@ import { GuestRoute, ProtectedRoute } from './routes/guards'
 import { LoginScreen } from './screens/LoginScreen'
 import { NotFoundScreen } from './screens/NotFoundScreen'
 import { AccountsScreen } from './screens/AccountsScreen'
+import { CategoriesScreen } from './screens/CategoriesScreen'
 import { DashboardScreen } from './screens/DashboardScreen'
 import { RegisterScreen } from './screens/RegisterScreen'
 
@@ -43,6 +44,14 @@ function App() {
               element={
                 <ProtectedRoute>
                   <AccountsScreen />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/categories"
+              element={
+                <ProtectedRoute>
+                  <CategoriesScreen />
                 </ProtectedRoute>
               }
             />
