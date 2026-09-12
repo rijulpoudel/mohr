@@ -1019,3 +1019,670 @@ class BudgetCalculationTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(many.captured_queries), len(few.captured_queries))
+
+
+class BudgetDetailAPITests(APITestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = get_user_model().objects.create_user(
+            email="budget-detail-owner@example.com",
+            password="TestOnlyPassword123!",
+        )
+        cls.other_user = get_user_model().objects.create_user(
+            email="budget-detail-other@example.com",
+            password="TestOnlyPassword123!",
+        )
+        cls.account = Account.objects.create(
+            user=cls.user,
+            name="Everyday Checking",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("100.00"),
+        )
+        cls.income_category = Category.objects.create(
+            user=cls.user,
+            name="Salary",
+            category_type=CategoryType.INCOME,
+        )
+        cls.expense_category = Category.objects.create(
+            user=cls.user,
+            name="Groceries",
+            category_type=CategoryType.EXPENSE,
+        )
+        cls.second_expense_category = Category.objects.create(
+            user=cls.user,
+            name="Dining Out",
+            category_type=CategoryType.EXPENSE,
+        )
+        cls.other_expense_category = Category.objects.create(
+            user=cls.other_user,
+            name="Their Groceries",
+            category_type=CategoryType.EXPENSE,
+        )
+        cls.budget = MonthlyBudget.objects.create(
+            user=cls.user,
+            category=cls.expense_category,
+            month=date(2026, 9, 1),
+            amount=Decimal("500.00"),
+        )
+
+    def create_budget(self, **overrides):
+        values = {
+            "user": self.user,
+            "category": self.expense_category,
+            "month": date(2026, 10, 1),
+            "amount": Decimal("300.00"),
+        }
+        values.update(overrides)
+        return MonthlyBudget.objects.create(**values)
+
+    def create_transaction(self, **overrides):
+        values = {
+            "user": self.user,
+            "account": self.account,
+            "category": self.expense_category,
+            "transaction_type": TransactionType.EXPENSE,
+            "amount": Decimal("10.00"),
+            "date": date(2026, 9, 15),
+        }
+        values.update(overrides)
+        return Transaction.objects.create(**values)
+
+    def detail_url(self, budget):
+        return reverse("budget-detail", args=[budget.pk])
+
+    def patch_budget(self, budget, payload):
+        return self.client.patch(
+            self.detail_url(budget),
+            payload,
+            format="json",
+        )
+
+    def snapshot(self, budget):
+        return {
+            "id": budget.id,
+            "user": budget.user,
+            "category": budget.category,
+            "month": budget.month,
+            "amount": budget.amount,
+            "created_at": budget.created_at,
+            "updated_at": budget.updated_at,
+        }
+
+    def test_budget_detail_route_maps_to_api_budgets_pk(self):
+        self.assertEqual(
+            reverse("budget-detail", args=[self.budget.pk]),
+            f"/api/budgets/{self.budget.pk}/",
+        )
+
+    def test_detail_returns_exact_representation(self):
+        self.client.force_login(self.user)
+
+        response = self.client.get(self.detail_url(self.budget))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            list(response.data.keys()),
+            [
+                "id",
+                "category",
+                "month",
+                "budgeted",
+                "spent",
+                "remaining",
+                "created_at",
+                "updated_at",
+            ],
+        )
+        self.assertEqual(
+            response.data,
+            {
+                "id": self.budget.id,
+                "category": self.expense_category.id,
+                "month": "2026-09-01",
+                "budgeted": "500.00",
+                "spent": "0.00",
+                "remaining": "500.00",
+                "created_at": format_datetime(self.budget.created_at),
+                "updated_at": format_datetime(self.budget.updated_at),
+            },
+        )
+
+    def test_detail_calculates_live_spent_and_remaining(self):
+        self.create_transaction(amount=Decimal("25.50"), date=date(2026, 9, 10))
+        self.client.force_login(self.user)
+
+        response = self.client.get(self.detail_url(self.budget))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["spent"], "25.50")
+        self.assertEqual(response.data["remaining"], "474.50")
+
+    def test_detail_returns_archived_historical_budget(self):
+        self.create_transaction(amount=Decimal("75.25"))
+        Category.objects.filter(pk=self.expense_category.pk).update(is_archived=True)
+        self.client.force_login(self.user)
+
+        response = self.client.get(self.detail_url(self.budget))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["id"], self.budget.id)
+        self.assertEqual(response.data["spent"], "75.25")
+
+    def test_detail_foreign_and_missing_ids_are_indistinguishable(self):
+        other_budget = MonthlyBudget.objects.create(
+            user=self.other_user,
+            category=self.other_expense_category,
+            month=date(2026, 9, 1),
+            amount=Decimal("100.00"),
+        )
+        self.client.force_login(self.user)
+
+        foreign = self.client.get(self.detail_url(other_budget))
+        missing = self.client.get(self.detail_url(MonthlyBudget(pk=999999)))
+
+        self.assertEqual(foreign.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(missing.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(foreign.json(), missing.json())
+        self.assertTrue(MonthlyBudget.objects.filter(pk=other_budget.pk).exists())
+
+    def test_detail_requires_authentication(self):
+        response = self.client.get(self.detail_url(self.budget))
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(
+            response.data,
+            {"detail": "Authentication credentials were not provided."},
+        )
+
+    def test_patch_updates_budgeted_alone(self):
+        before = self.snapshot(self.budget)
+        self.client.force_login(self.user)
+
+        response = self.patch_budget(self.budget, {"budgeted": "750.00"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.budget.refresh_from_db()
+        self.assertEqual(self.budget.amount, Decimal("750.00"))
+        self.assertEqual(self.budget.category, self.expense_category)
+        self.assertEqual(self.budget.month, date(2026, 9, 1))
+        self.assertEqual(self.budget.user, self.user)
+        self.assertEqual(self.budget.created_at, before["created_at"])
+        self.assertGreater(self.budget.updated_at, before["updated_at"])
+        self.assertEqual(response.data["budgeted"], "750.00")
+        self.assertEqual(response.data["spent"], "0.00")
+        self.assertEqual(response.data["remaining"], "750.00")
+
+    def test_patch_updates_month_alone(self):
+        self.client.force_login(self.user)
+
+        response = self.patch_budget(self.budget, {"month": "2026-10-01"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.budget.refresh_from_db()
+        self.assertEqual(self.budget.month, date(2026, 10, 1))
+        self.assertEqual(self.budget.amount, Decimal("500.00"))
+        self.assertEqual(response.data["month"], "2026-10-01")
+
+    def test_patch_updates_category_alone(self):
+        self.client.force_login(self.user)
+
+        response = self.patch_budget(
+            self.budget,
+            {"category": self.second_expense_category.id},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.budget.refresh_from_db()
+        self.assertEqual(self.budget.category, self.second_expense_category)
+        self.assertEqual(response.data["category"], self.second_expense_category.id)
+
+    def test_patch_updates_all_writable_fields_combined(self):
+        self.client.force_login(self.user)
+
+        response = self.patch_budget(
+            self.budget,
+            {
+                "category": self.second_expense_category.id,
+                "month": "2026-11-01",
+                "budgeted": "100.00",
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.budget.refresh_from_db()
+        self.assertEqual(self.budget.category, self.second_expense_category)
+        self.assertEqual(self.budget.month, date(2026, 11, 1))
+        self.assertEqual(self.budget.amount, Decimal("100.00"))
+        self.assertEqual(response.data["category"], self.second_expense_category.id)
+        self.assertEqual(response.data["month"], "2026-11-01")
+        self.assertEqual(response.data["budgeted"], "100.00")
+
+    def test_patch_recalculates_after_budgeted_category_and_month_changes(self):
+        self.create_transaction(
+            amount=Decimal("25.50"),
+            date=date(2026, 9, 10),
+        )
+        self.create_transaction(
+            category=self.second_expense_category,
+            amount=Decimal("10.00"),
+            date=date(2026, 10, 5),
+        )
+        self.client.force_login(self.user)
+
+        baseline = self.client.get(self.detail_url(self.budget))
+        self.assertEqual(baseline.data["spent"], "25.50")
+
+        moved = self.patch_budget(self.budget, {"month": "2026-10-01"})
+        self.assertEqual(moved.status_code, status.HTTP_200_OK)
+        self.assertEqual(moved.data["spent"], "0.00")
+        self.assertEqual(moved.data["remaining"], "500.00")
+
+        recategorized = self.patch_budget(
+            self.budget,
+            {"category": self.second_expense_category.id},
+        )
+        self.assertEqual(recategorized.status_code, status.HTTP_200_OK)
+        self.assertEqual(recategorized.data["spent"], "10.00")
+        self.assertEqual(recategorized.data["remaining"], "490.00")
+
+        rebudgeted = self.patch_budget(self.budget, {"budgeted": "100.00"})
+        self.assertEqual(rebudgeted.status_code, status.HTTP_200_OK)
+        self.assertEqual(rebudgeted.data["spent"], "10.00")
+        self.assertEqual(rebudgeted.data["remaining"], "90.00")
+
+    def test_patch_omitted_fields_remain_unchanged(self):
+        before = self.snapshot(self.budget)
+        self.client.force_login(self.user)
+
+        response = self.patch_budget(self.budget, {"budgeted": "600.00"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.budget.refresh_from_db()
+        self.assertEqual(self.budget.amount, Decimal("600.00"))
+        self.assertEqual(self.budget.category, before["category"])
+        self.assertEqual(self.budget.month, before["month"])
+        self.assertEqual(self.budget.user, before["user"])
+        self.assertEqual(self.budget.created_at, before["created_at"])
+
+    def test_patch_rejects_archived_category_resubmission(self):
+        Category.objects.filter(pk=self.expense_category.pk).update(is_archived=True)
+        self.client.force_login(self.user)
+
+        response = self.patch_budget(
+            self.budget,
+            {"category": self.expense_category.id},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("category", response.data)
+        self.budget.refresh_from_db()
+        self.assertEqual(self.budget.category, self.expense_category)
+
+    def test_patch_other_fields_work_when_category_archived(self):
+        Category.objects.filter(pk=self.expense_category.pk).update(is_archived=True)
+        self.client.force_login(self.user)
+
+        budgeted = self.patch_budget(self.budget, {"budgeted": "600.00"})
+        self.assertEqual(budgeted.status_code, status.HTTP_200_OK)
+
+        month = self.patch_budget(self.budget, {"month": "2026-10-01"})
+        self.assertEqual(month.status_code, status.HTTP_200_OK)
+
+        self.budget.refresh_from_db()
+        self.assertEqual(self.budget.amount, Decimal("600.00"))
+        self.assertEqual(self.budget.month, date(2026, 10, 1))
+
+    def test_patch_rejects_foreign_and_missing_category_ids_indistinguishable(self):
+        self.client.force_login(self.user)
+
+        foreign = self.patch_budget(
+            self.budget,
+            {"category": self.other_expense_category.id},
+        )
+        missing = self.patch_budget(self.budget, {"category": 999999})
+
+        self.assertEqual(foreign.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(missing.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(foreign.json(), missing.json())
+        self.assertIn("category", foreign.json())
+        self.budget.refresh_from_db()
+        self.assertEqual(self.budget.category, self.expense_category)
+
+    def test_patch_rejects_income_category(self):
+        self.client.force_login(self.user)
+
+        response = self.patch_budget(
+            self.budget,
+            {"category": self.income_category.id},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("category", response.data)
+        self.budget.refresh_from_db()
+        self.assertEqual(self.budget.category, self.expense_category)
+
+    def test_patch_rejects_malformed_null_and_blank_category_without_mutation(self):
+        before = self.snapshot(self.budget)
+        self.client.force_login(self.user)
+
+        for value in (None, "", "not-a-number", 0, -1):
+            with self.subTest(category=value):
+                response = self.patch_budget(self.budget, {"category": value})
+
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn("category", response.data)
+
+        self.budget.refresh_from_db()
+        self.assertEqual(self.budget.category, before["category"])
+        self.assertEqual(self.budget.month, before["month"])
+        self.assertEqual(self.budget.amount, before["amount"])
+        self.assertEqual(self.budget.user, before["user"])
+        self.assertEqual(self.budget.created_at, before["created_at"])
+        self.assertEqual(self.budget.updated_at, before["updated_at"])
+
+    def test_patch_rejects_malformed_null_and_blank_month(self):
+        self.client.force_login(self.user)
+
+        for value in ("2026-13-01", "not-a-date", None, ""):
+            with self.subTest(month=value):
+                response = self.patch_budget(self.budget, {"month": value})
+
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn("month", response.data)
+
+        self.budget.refresh_from_db()
+        self.assertEqual(self.budget.month, date(2026, 9, 1))
+
+    def test_patch_rejects_non_first_day_month(self):
+        self.client.force_login(self.user)
+
+        response = self.patch_budget(self.budget, {"month": "2026-09-15"})
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("month", response.data)
+        self.budget.refresh_from_db()
+        self.assertEqual(self.budget.month, date(2026, 9, 1))
+
+    def test_patch_rejects_invalid_budgeted_values(self):
+        self.client.force_login(self.user)
+
+        for value in (
+            "0.00",
+            "-1.00",
+            "10.123",
+            "12345678901.00",
+            "not-a-number",
+            "",
+            None,
+        ):
+            with self.subTest(budgeted=value):
+                response = self.patch_budget(self.budget, {"budgeted": value})
+
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn("budgeted", response.data)
+
+        self.budget.refresh_from_db()
+        self.assertEqual(self.budget.amount, Decimal("500.00"))
+
+    def test_patch_duplicate_checks_use_effective_final_combination(self):
+        self.create_budget(
+            category=self.second_expense_category,
+            month=date(2026, 9, 1),
+        )
+        self.create_budget(month=date(2026, 11, 1))
+        self.create_budget(
+            category=self.second_expense_category,
+            month=date(2026, 10, 1),
+        )
+        self.client.force_login(self.user)
+
+        category_only = self.patch_budget(
+            self.budget,
+            {"category": self.second_expense_category.id},
+        )
+        self.assertEqual(category_only.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("non_field_errors", category_only.data)
+
+        month_only = self.patch_budget(self.budget, {"month": "2026-11-01"})
+        self.assertEqual(month_only.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("non_field_errors", month_only.data)
+
+        # Month 2026-10 alone is free; only the combined final state
+        # (category B + 2026-10) collides with an existing budget.
+        free_month = self.patch_budget(self.budget, {"month": "2026-10-01"})
+        self.assertEqual(free_month.status_code, status.HTTP_200_OK)
+
+        combined = self.patch_budget(
+            self.budget,
+            {
+                "category": self.second_expense_category.id,
+                "month": "2026-10-01",
+            },
+        )
+        self.assertEqual(combined.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("non_field_errors", combined.data)
+
+        noop = self.patch_budget(self.budget, {"month": "2026-09-01"})
+        self.assertEqual(noop.status_code, status.HTTP_200_OK)
+
+        self.budget.refresh_from_db()
+        self.assertEqual(self.budget.category, self.expense_category)
+        self.assertEqual(self.budget.month, date(2026, 9, 1))
+        self.assertEqual(self.budget.amount, Decimal("500.00"))
+
+    def test_patch_duplicate_race_hits_constraint(self):
+        self.create_budget(
+            category=self.second_expense_category,
+            month=date(2026, 9, 1),
+        )
+        self.client.force_login(self.user)
+
+        with mock.patch.object(QuerySet, "exists", return_value=False):
+            response = self.patch_budget(
+                self.budget,
+                {"category": self.second_expense_category.id},
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data,
+            {"non_field_errors": [DUPLICATE_BUDGET_MESSAGE]},
+        )
+        self.budget.refresh_from_db()
+        self.assertEqual(self.budget.category, self.expense_category)
+
+    def test_patch_reraises_unidentifiable_integrity_error(self):
+        self.client.force_login(self.user)
+
+        with mock.patch.object(
+            BudgetViewSet,
+            "perform_update",
+            side_effect=IntegrityError("simulated unrelated integrity failure"),
+        ):
+            with self.assertRaises(IntegrityError):
+                self.patch_budget(self.budget, {"budgeted": "600.00"})
+
+        self.budget.refresh_from_db()
+        self.assertEqual(self.budget.amount, Decimal("500.00"))
+
+    def test_patch_ignores_spoofed_system_and_calculation_fields(self):
+        before = self.snapshot(self.budget)
+        self.client.force_login(self.user)
+
+        response = self.patch_budget(
+            self.budget,
+            {
+                "user": self.other_user.id,
+                "id": 999,
+                "amount": "999.00",
+                "spent": "999.99",
+                "remaining": "999.99",
+                "created_at": "2000-01-01T00:00:00Z",
+                "updated_at": "2000-01-01T00:00:00Z",
+                "budgeted": "600.00",
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.budget.refresh_from_db()
+        self.assertEqual(self.budget.id, before["id"])
+        self.assertEqual(self.budget.user, before["user"])
+        self.assertEqual(self.budget.amount, Decimal("600.00"))
+        self.assertEqual(self.budget.created_at, before["created_at"])
+        self.assertNotEqual(self.budget.updated_at.year, 2000)
+        self.assertNotIn("user", response.data)
+        self.assertNotIn("amount", response.data)
+        self.assertEqual(response.data["spent"], "0.00")
+        self.assertEqual(response.data["remaining"], "600.00")
+
+    def test_patch_requires_authentication(self):
+        response = self.patch_budget(self.budget, {"budgeted": "600.00"})
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(
+            response.data,
+            {"detail": "Authentication credentials were not provided."},
+        )
+        self.budget.refresh_from_db()
+        self.assertEqual(self.budget.amount, Decimal("500.00"))
+
+    def test_patch_requires_csrf_token(self):
+        csrf_client = APIClient(enforce_csrf_checks=True)
+        csrf_client.force_login(self.user)
+
+        response = csrf_client.patch(
+            self.detail_url(self.budget),
+            {"budgeted": "600.00"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response["Content-Type"], "application/json")
+        self.assertEqual(response.json(), {"detail": "CSRF verification failed."})
+        self.budget.refresh_from_db()
+        self.assertEqual(self.budget.amount, Decimal("500.00"))
+
+    def test_patch_foreign_and_missing_ids_404_without_side_effects(self):
+        other_budget = MonthlyBudget.objects.create(
+            user=self.other_user,
+            category=self.other_expense_category,
+            month=date(2026, 9, 1),
+            amount=Decimal("100.00"),
+        )
+        before = self.snapshot(other_budget)
+        self.client.force_login(self.user)
+
+        foreign = self.patch_budget(other_budget, {"budgeted": "999.00"})
+        missing = self.patch_budget(MonthlyBudget(pk=999999), {"budgeted": "999.00"})
+
+        self.assertEqual(foreign.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(missing.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(foreign.json(), missing.json())
+        other_budget.refresh_from_db()
+        self.assertEqual(self.snapshot(other_budget), before)
+
+    def test_delete_returns_204_and_removes_only_budget(self):
+        transaction_obj = self.create_transaction(amount=Decimal("25.50"))
+        self.client.force_login(self.user)
+
+        response = self.client.delete(self.detail_url(self.budget))
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(response.content, b"")
+        self.assertFalse(MonthlyBudget.objects.filter(pk=self.budget.pk).exists())
+        self.assertTrue(Category.objects.filter(pk=self.expense_category.pk).exists())
+        self.assertTrue(get_user_model().objects.filter(pk=self.user.pk).exists())
+        self.assertTrue(Transaction.objects.filter(pk=transaction_obj.pk).exists())
+
+    def test_delete_repeated_returns_404(self):
+        self.client.force_login(self.user)
+
+        first = self.client.delete(self.detail_url(self.budget))
+        second = self.client.delete(self.detail_url(self.budget))
+
+        self.assertEqual(first.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(second.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_delete_foreign_and_missing_ids_404_no_mutation(self):
+        other_budget = MonthlyBudget.objects.create(
+            user=self.other_user,
+            category=self.other_expense_category,
+            month=date(2026, 9, 1),
+            amount=Decimal("100.00"),
+        )
+        self.client.force_login(self.user)
+
+        foreign = self.client.delete(self.detail_url(other_budget))
+        missing = self.client.delete(self.detail_url(MonthlyBudget(pk=999999)))
+
+        self.assertEqual(foreign.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(missing.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(foreign.json(), missing.json())
+        self.assertTrue(MonthlyBudget.objects.filter(pk=other_budget.pk).exists())
+
+    def test_delete_requires_authentication(self):
+        response = self.client.delete(self.detail_url(self.budget))
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(
+            response.data,
+            {"detail": "Authentication credentials were not provided."},
+        )
+        self.assertTrue(MonthlyBudget.objects.filter(pk=self.budget.pk).exists())
+
+    def test_delete_requires_csrf_token(self):
+        csrf_client = APIClient(enforce_csrf_checks=True)
+        csrf_client.force_login(self.user)
+
+        response = csrf_client.delete(self.detail_url(self.budget))
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response["Content-Type"], "application/json")
+        self.assertEqual(response.json(), {"detail": "CSRF verification failed."})
+        self.assertTrue(MonthlyBudget.objects.filter(pk=self.budget.pk).exists())
+
+    def test_detail_rejects_put_and_post(self):
+        self.client.force_login(self.user)
+
+        put = self.client.put(
+            self.detail_url(self.budget),
+            {
+                "category": self.expense_category.id,
+                "month": "2026-09-01",
+                "budgeted": "600.00",
+            },
+            format="json",
+        )
+        post = self.client.post(
+            self.detail_url(self.budget),
+            {"budgeted": "600.00"},
+            format="json",
+        )
+
+        self.assertEqual(put.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        self.assertEqual(post.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        self.budget.refresh_from_db()
+        self.assertEqual(self.budget.amount, Decimal("500.00"))
+
+    def test_detail_supports_head_and_options(self):
+        self.client.force_login(self.user)
+
+        response = self.client.options(self.detail_url(self.budget))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        response = self.client.head(self.detail_url(self.budget))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_detail_query_parameters_do_not_alter_lookup_or_calculation(self):
+        self.create_transaction(amount=Decimal("25.50"), date=date(2026, 9, 10))
+        self.client.force_login(self.user)
+
+        plain = self.client.get(self.detail_url(self.budget))
+        with_params = self.client.get(
+            self.detail_url(self.budget) + "?foo=bar&month=2026-01-01&category=999"
+        )
+
+        self.assertEqual(plain.status_code, status.HTTP_200_OK)
+        self.assertEqual(with_params.status_code, status.HTTP_200_OK)
+        self.assertEqual(plain.data, with_params.data)
+        self.assertEqual(with_params.data["spent"], "25.50")

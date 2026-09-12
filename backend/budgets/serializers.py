@@ -64,15 +64,21 @@ class BudgetSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"category": [EXPENSE_CATEGORY_MESSAGE]})
         if month is not None and month.day != 1:
             raise serializers.ValidationError({"month": [NON_FIRST_DAY_MONTH_MESSAGE]})
+        # Duplicates are judged on the effective final combination after a
+        # partial update, excluding the instance being updated.
+        effective_category = category or getattr(self.instance, "category", None)
+        effective_month = month or getattr(self.instance, "month", None)
         user = self.context["request"].user
-        if (
-            category is not None
-            and month is not None
-            and MonthlyBudget.objects.filter(
-                user=user, category=category, month=month
-            ).exists()
-        ):
-            raise serializers.ValidationError(
-                {"non_field_errors": [DUPLICATE_BUDGET_MESSAGE]}
+        if effective_category is not None and effective_month is not None:
+            existing = MonthlyBudget.objects.filter(
+                user=user,
+                category=effective_category,
+                month=effective_month,
             )
+            if self.instance is not None:
+                existing = existing.exclude(pk=self.instance.pk)
+            if existing.exists():
+                raise serializers.ValidationError(
+                    {"non_field_errors": [DUPLICATE_BUDGET_MESSAGE]}
+                )
         return attrs

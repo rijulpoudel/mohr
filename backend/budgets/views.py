@@ -39,11 +39,14 @@ def _is_duplicate_budget_constraint(error):
 class BudgetViewSet(
     mixins.ListModelMixin,
     mixins.CreateModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.UpdateModelMixin,
+    mixins.DestroyModelMixin,
     viewsets.GenericViewSet,
 ):
     permission_classes = [IsAuthenticated]
     serializer_class = BudgetSerializer
-    http_method_names = ["get", "post", "head", "options"]
+    http_method_names = ["get", "post", "patch", "delete", "head", "options"]
 
     def get_queryset(self):
         # One aggregate subquery per budget keeps the list at a constant
@@ -100,3 +103,26 @@ class BudgetViewSet(
             status=status.HTTP_201_CREATED,
             headers=self.get_success_headers(data),
         )
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop("partial", False)
+        instance = self.get_object()
+        serializer = self.get_serializer(
+            instance,
+            data=request.data,
+            partial=partial,
+        )
+        serializer.is_valid(raise_exception=True)
+        try:
+            with transaction.atomic():
+                self.perform_update(serializer)
+        except IntegrityError as exc:
+            if not _is_duplicate_budget_constraint(exc):
+                raise
+            raise serializers.ValidationError(
+                {"non_field_errors": [DUPLICATE_BUDGET_MESSAGE]}
+            )
+        # Refetch through the annotated owner-scoped queryset so spent and
+        # remaining reflect the update instead of stale pre-update values.
+        refreshed = self.get_queryset().get(pk=instance.pk)
+        return Response(self.get_serializer(refreshed).data)
