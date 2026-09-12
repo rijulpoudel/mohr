@@ -52,15 +52,19 @@ class TransactionSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         account = attrs.get("account")
         category = attrs.get("category")
-        transaction_type = attrs.get("transaction_type")
+        transaction_type = attrs.get(
+            "transaction_type",
+            getattr(self.instance, "transaction_type", None),
+        )
         if account is not None and account.is_archived:
             raise serializers.ValidationError({"account": [ARCHIVED_ACCOUNT_MESSAGE]})
         if category is not None and category.is_archived:
             raise serializers.ValidationError({"category": [ARCHIVED_CATEGORY_MESSAGE]})
+        effective_category = category or getattr(self.instance, "category", None)
         if (
-            category is not None
+            effective_category is not None
             and transaction_type is not None
-            and category.category_type != transaction_type
+            and effective_category.category_type != transaction_type
         ):
             raise serializers.ValidationError(
                 {"category": [CATEGORY_TYPE_MISMATCH_MESSAGE]}

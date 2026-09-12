@@ -916,3 +916,745 @@ class TransactionCollectionAPITests(APITestCase):
 
         response = self.client.head(reverse("transaction-list"))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+
+class TransactionDetailAPITests(APITestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = get_user_model().objects.create_user(
+            email="transaction-detail-owner@example.com",
+            password="TestOnlyPassword123!",
+        )
+        cls.other_user = get_user_model().objects.create_user(
+            email="transaction-detail-other@example.com",
+            password="TestOnlyPassword123!",
+        )
+        cls.account = Account.objects.create(
+            user=cls.user,
+            name="Everyday Checking",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("100.00"),
+        )
+        cls.second_account = Account.objects.create(
+            user=cls.user,
+            name="Travel Savings",
+            account_type=AccountType.SAVINGS,
+            opening_balance=Decimal("500.00"),
+        )
+        cls.category = Category.objects.create(
+            user=cls.user,
+            name="Salary",
+            category_type=CategoryType.INCOME,
+        )
+        cls.expense_category = Category.objects.create(
+            user=cls.user,
+            name="Groceries",
+            category_type=CategoryType.EXPENSE,
+        )
+        cls.other_account = Account.objects.create(
+            user=cls.other_user,
+            name="Their Checking",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("100.00"),
+        )
+        cls.other_category = Category.objects.create(
+            user=cls.other_user,
+            name="Their Salary",
+            category_type=CategoryType.INCOME,
+        )
+        cls.other_expense_category = Category.objects.create(
+            user=cls.other_user,
+            name="Their Groceries",
+            category_type=CategoryType.EXPENSE,
+        )
+
+    def create_transaction(self, **overrides):
+        values = {
+            "user": self.user,
+            "account": self.account,
+            "category": self.category,
+            "transaction_type": TransactionType.INCOME,
+            "amount": Decimal("25.50"),
+            "date": date(2026, 9, 1),
+        }
+        values.update(overrides)
+        return Transaction.objects.create(**values)
+
+    def detail_url(self, transaction):
+        return reverse("transaction-detail", args=[transaction.pk])
+
+    @staticmethod
+    def snapshot(transaction):
+        return {
+            "id": transaction.id,
+            "user": transaction.user,
+            "account": transaction.account,
+            "category": transaction.category,
+            "transaction_type": transaction.transaction_type,
+            "amount": transaction.amount,
+            "date": transaction.date,
+            "note": transaction.note,
+            "created_at": transaction.created_at,
+            "updated_at": transaction.updated_at,
+        }
+
+    def test_detail_returns_exact_transaction_shape(self):
+        transaction = self.create_transaction()
+        self.client.force_login(self.user)
+
+        response = self.client.get(self.detail_url(transaction))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data,
+            {
+                "id": transaction.id,
+                "account": self.account.id,
+                "category": self.category.id,
+                "transaction_type": "income",
+                "amount": "25.50",
+                "date": "2026-09-01",
+                "note": "",
+                "created_at": format_datetime(transaction.created_at),
+                "updated_at": format_datetime(transaction.updated_at),
+            },
+        )
+
+    def test_detail_returns_historical_transaction_after_relations_archived(self):
+        transaction = self.create_transaction(
+            transaction_type=TransactionType.EXPENSE,
+            category=self.expense_category,
+            amount=Decimal("10.00"),
+        )
+        Account.objects.filter(pk=self.account.pk).update(is_archived=True)
+        Category.objects.filter(pk=self.expense_category.pk).update(is_archived=True)
+        self.client.force_login(self.user)
+
+        response = self.client.get(self.detail_url(transaction))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["id"], transaction.id)
+
+    def test_detail_returns_404_for_another_users_transaction(self):
+        other_transaction = self.create_transaction(
+            user=self.other_user,
+            account=self.other_account,
+            category=self.other_category,
+        )
+        self.client.force_login(self.user)
+
+        response = self.client.get(self.detail_url(other_transaction))
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertTrue(Transaction.objects.filter(pk=other_transaction.pk).exists())
+
+    def test_detail_returns_404_for_missing_id(self):
+        self.client.force_login(self.user)
+
+        response = self.client.get(reverse("transaction-detail", args=[999999]))
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_cross_user_and_missing_ids_are_indistinguishable(self):
+        other_transaction = self.create_transaction(
+            user=self.other_user,
+            account=self.other_account,
+            category=self.other_category,
+        )
+        self.client.force_login(self.user)
+
+        cross_user = self.client.get(self.detail_url(other_transaction))
+        missing = self.client.get(reverse("transaction-detail", args=[999999]))
+
+        self.assertEqual(cross_user.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(missing.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(cross_user.json(), missing.json())
+
+    def test_detail_requires_authentication(self):
+        transaction = self.create_transaction()
+
+        response = self.client.get(self.detail_url(transaction))
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(
+            response.data,
+            {"detail": "Authentication credentials were not provided."},
+        )
+
+    def patch_transaction(self, transaction, payload):
+        return self.client.patch(
+            self.detail_url(transaction),
+            payload,
+            format="json",
+        )
+
+    def test_patch_partially_updates_note_only_and_keeps_other_fields(self):
+        transaction = self.create_transaction()
+        before = self.snapshot(transaction)
+        self.client.force_login(self.user)
+
+        response = self.patch_transaction(transaction, {"note": "  Updated note  "})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        transaction.refresh_from_db()
+        self.assertEqual(transaction.note, "Updated note")
+        after = self.snapshot(transaction)
+        for field in (
+            "id",
+            "user",
+            "account",
+            "category",
+            "transaction_type",
+            "amount",
+            "date",
+            "created_at",
+        ):
+            self.assertEqual(after[field], before[field])
+        self.assertEqual(
+            response.data,
+            {
+                "id": transaction.id,
+                "account": self.account.id,
+                "category": self.category.id,
+                "transaction_type": "income",
+                "amount": "25.50",
+                "date": "2026-09-01",
+                "note": "Updated note",
+                "created_at": format_datetime(transaction.created_at),
+                "updated_at": format_datetime(transaction.updated_at),
+            },
+        )
+
+    def test_patch_updates_all_writable_fields_compatibly(self):
+        transaction = self.create_transaction()
+        self.client.force_login(self.user)
+
+        response = self.patch_transaction(
+            transaction,
+            {
+                "account": self.second_account.id,
+                "category": self.expense_category.id,
+                "transaction_type": "expense",
+                "amount": "99.99",
+                "date": "2026-10-01",
+                "note": "Full rewrite",
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        transaction.refresh_from_db()
+        self.assertEqual(transaction.account, self.second_account)
+        self.assertEqual(transaction.category, self.expense_category)
+        self.assertEqual(transaction.transaction_type, "expense")
+        self.assertEqual(transaction.amount, Decimal("99.99"))
+        self.assertEqual(transaction.date, date(2026, 10, 1))
+        self.assertEqual(transaction.note, "Full rewrite")
+        self.assertEqual(transaction.user, self.user)
+        self.assertEqual(response.data["account"], self.second_account.id)
+        self.assertEqual(response.data["transaction_type"], "expense")
+        self.assertEqual(response.data["amount"], "99.99")
+
+    def test_patch_ignores_spoofed_owner_id_and_timestamps(self):
+        transaction = self.create_transaction()
+        transaction_id = transaction.id
+        created_at = transaction.created_at
+        self.client.force_login(self.user)
+
+        response = self.patch_transaction(
+            transaction,
+            {
+                "user": self.other_user.id,
+                "id": transaction_id + 1,
+                "created_at": "2000-01-01T00:00:00Z",
+                "updated_at": "2000-01-01T00:00:00Z",
+                "note": "Spoofed fields ignored",
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        transaction.refresh_from_db()
+        self.assertEqual(transaction.id, transaction_id)
+        self.assertEqual(transaction.user, self.user)
+        self.assertEqual(transaction.created_at, created_at)
+        self.assertNotEqual(transaction.updated_at.year, 2000)
+        self.assertEqual(transaction.note, "Spoofed fields ignored")
+        self.assertNotIn("user", response.data)
+        self.assertEqual(response.data["id"], transaction_id)
+
+    def test_patch_returns_404_for_another_users_transaction_without_side_effects(self):
+        other_transaction = self.create_transaction(
+            user=self.other_user,
+            account=self.other_account,
+            category=self.other_category,
+        )
+        before = self.snapshot(other_transaction)
+        self.client.force_login(self.user)
+
+        response = self.patch_transaction(other_transaction, {"note": "Spoofed"})
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        other_transaction.refresh_from_db()
+        self.assertEqual(self.snapshot(other_transaction), before)
+
+    def test_patch_returns_404_for_missing_id_without_side_effects(self):
+        self.client.force_login(self.user)
+
+        response = self.client.patch(
+            reverse("transaction-detail", args=[999999]),
+            {"note": "Spoofed"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(Transaction.objects.count(), 0)
+
+    def test_patch_foreign_and_missing_ids_are_indistinguishable(self):
+        other_transaction = self.create_transaction(
+            user=self.other_user,
+            account=self.other_account,
+            category=self.other_category,
+        )
+        before = self.snapshot(other_transaction)
+        self.client.force_login(self.user)
+
+        foreign = self.patch_transaction(other_transaction, {"note": "Spoofed"})
+        missing = self.client.patch(
+            reverse("transaction-detail", args=[999999]),
+            {"note": "Spoofed"},
+            format="json",
+        )
+
+        self.assertEqual(foreign.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(missing.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(foreign.json(), missing.json())
+        other_transaction.refresh_from_db()
+        self.assertEqual(self.snapshot(other_transaction), before)
+
+    def test_patch_rejects_invalid_amount_without_mutation(self):
+        transaction = self.create_transaction()
+        before = self.snapshot(transaction)
+        self.client.force_login(self.user)
+
+        for amount in (
+            "0.00",
+            "-1.00",
+            "not-a-number",
+            "10.123",
+            "12345678901.00",
+            "",
+        ):
+            with self.subTest(amount=amount):
+                response = self.patch_transaction(transaction, {"amount": amount})
+
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn("amount", response.data)
+
+        transaction.refresh_from_db()
+        self.assertEqual(self.snapshot(transaction), before)
+
+    def test_patch_rejects_invalid_date_without_mutation(self):
+        transaction = self.create_transaction()
+        before = self.snapshot(transaction)
+        self.client.force_login(self.user)
+
+        for value in ("2026-13-01", "not-a-date", ""):
+            with self.subTest(date=value):
+                response = self.patch_transaction(transaction, {"date": value})
+
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn("date", response.data)
+
+        transaction.refresh_from_db()
+        self.assertEqual(self.snapshot(transaction), before)
+
+    def test_patch_rejects_invalid_transaction_type_without_mutation(self):
+        transaction = self.create_transaction()
+        before = self.snapshot(transaction)
+        self.client.force_login(self.user)
+
+        for value in ("transfer", "INCOME", ""):
+            with self.subTest(transaction_type=value):
+                response = self.patch_transaction(
+                    transaction, {"transaction_type": value}
+                )
+
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn("transaction_type", response.data)
+
+        transaction.refresh_from_db()
+        self.assertEqual(self.snapshot(transaction), before)
+
+    def test_patch_rejects_null_and_blank_relation_ids_without_mutation(self):
+        transaction = self.create_transaction()
+        before = self.snapshot(transaction)
+        self.client.force_login(self.user)
+
+        for field, value in (
+            ("account", None),
+            ("category", None),
+            ("account", ""),
+            ("category", ""),
+        ):
+            with self.subTest(field=field, value=value):
+                response = self.patch_transaction(transaction, {field: value})
+
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn(field, response.data)
+
+        transaction.refresh_from_db()
+        self.assertEqual(self.snapshot(transaction), before)
+
+    def test_patch_rejects_null_note_without_mutation(self):
+        transaction = self.create_transaction()
+        before = self.snapshot(transaction)
+        self.client.force_login(self.user)
+
+        response = self.patch_transaction(transaction, {"note": None})
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("note", response.data)
+        transaction.refresh_from_db()
+        self.assertEqual(self.snapshot(transaction), before)
+
+    def test_patch_rejects_null_amount_date_and_type_without_mutation(self):
+        transaction = self.create_transaction()
+        before = self.snapshot(transaction)
+        self.client.force_login(self.user)
+
+        for field in ("amount", "date", "transaction_type"):
+            with self.subTest(field=field):
+                response = self.patch_transaction(transaction, {field: None})
+
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn(field, response.data)
+
+        transaction.refresh_from_db()
+        self.assertEqual(self.snapshot(transaction), before)
+
+    def test_patch_note_whitespace_only_becomes_empty(self):
+        transaction = self.create_transaction(note="Original note")
+        self.client.force_login(self.user)
+
+        response = self.patch_transaction(transaction, {"note": "   "})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        transaction.refresh_from_db()
+        self.assertEqual(transaction.note, "")
+        self.assertEqual(response.data["note"], "")
+
+    def test_patch_changing_only_transaction_type_to_mismatch_existing_category(self):
+        transaction = self.create_transaction()
+        before = self.snapshot(transaction)
+        self.client.force_login(self.user)
+
+        response = self.patch_transaction(transaction, {"transaction_type": "expense"})
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("category", response.data)
+        transaction.refresh_from_db()
+        self.assertEqual(self.snapshot(transaction), before)
+
+    def test_patch_changing_only_category_to_mismatch_existing_type(self):
+        transaction = self.create_transaction()
+        before = self.snapshot(transaction)
+        self.client.force_login(self.user)
+
+        response = self.patch_transaction(
+            transaction, {"category": self.expense_category.id}
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("category", response.data)
+        transaction.refresh_from_db()
+        self.assertEqual(self.snapshot(transaction), before)
+
+    def test_patch_compatible_category_and_type_change_together_succeeds(self):
+        transaction = self.create_transaction()
+        self.client.force_login(self.user)
+
+        response = self.patch_transaction(
+            transaction,
+            {
+                "category": self.expense_category.id,
+                "transaction_type": "expense",
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        transaction.refresh_from_db()
+        self.assertEqual(transaction.category, self.expense_category)
+        self.assertEqual(transaction.transaction_type, "expense")
+
+    def test_patch_rejects_explicit_archived_account_without_mutation(self):
+        archived = Account.objects.create(
+            user=self.user,
+            name="Old Card",
+            account_type=AccountType.CREDIT_CARD,
+            opening_balance=Decimal("0.00"),
+            is_archived=True,
+        )
+        transaction = self.create_transaction()
+        before = self.snapshot(transaction)
+        self.client.force_login(self.user)
+
+        response = self.patch_transaction(transaction, {"account": archived.id})
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("account", response.data)
+        transaction.refresh_from_db()
+        self.assertEqual(self.snapshot(transaction), before)
+
+    def test_patch_rejects_explicit_archived_category_without_mutation(self):
+        archived = Category.objects.create(
+            user=self.user,
+            name="Old Rent",
+            category_type=CategoryType.EXPENSE,
+            is_archived=True,
+        )
+        transaction = self.create_transaction()
+        before = self.snapshot(transaction)
+        self.client.force_login(self.user)
+
+        response = self.patch_transaction(
+            transaction,
+            {"category": archived.id, "transaction_type": "expense"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("category", response.data)
+        transaction.refresh_from_db()
+        self.assertEqual(self.snapshot(transaction), before)
+
+    def test_patch_allows_unrelated_update_on_historical_archived_relations(self):
+        transaction = self.create_transaction(
+            transaction_type=TransactionType.EXPENSE,
+            category=self.expense_category,
+            amount=Decimal("10.00"),
+        )
+        Account.objects.filter(pk=self.account.pk).update(is_archived=True)
+        Category.objects.filter(pk=self.expense_category.pk).update(is_archived=True)
+        self.client.force_login(self.user)
+
+        response = self.patch_transaction(
+            transaction,
+            {"note": "Still editable", "date": "2026-09-05", "amount": "15.00"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        transaction.refresh_from_db()
+        self.assertEqual(transaction.note, "Still editable")
+        self.assertEqual(transaction.date, date(2026, 9, 5))
+        self.assertEqual(transaction.amount, Decimal("15.00"))
+        self.assertEqual(transaction.account, self.account)
+        self.assertEqual(transaction.category, self.expense_category)
+
+    def test_delete_returns_204_empty_and_removes_only_the_transaction_row(self):
+        transaction = self.create_transaction(
+            transaction_type=TransactionType.EXPENSE,
+            category=self.expense_category,
+        )
+        account_id = self.account.id
+        category_id = self.expense_category.id
+        self.client.force_login(self.user)
+
+        response = self.client.delete(self.detail_url(transaction))
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(response.content, b"")
+        self.assertFalse(Transaction.objects.filter(pk=transaction.pk).exists())
+        self.assertTrue(Account.objects.filter(pk=account_id).exists())
+        self.assertTrue(Category.objects.filter(pk=category_id).exists())
+
+    def test_delete_is_not_repeatable_second_delete_returns_404(self):
+        transaction = self.create_transaction()
+        self.client.force_login(self.user)
+
+        first = self.client.delete(self.detail_url(transaction))
+        second = self.client.delete(self.detail_url(transaction))
+
+        self.assertEqual(first.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(second.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(
+            second.json(), {"detail": "No Transaction matches the given query."}
+        )
+        self.assertFalse(Transaction.objects.exists())
+
+    def test_delete_returns_404_for_another_users_transaction_without_side_effects(
+        self,
+    ):
+        other_transaction = self.create_transaction(
+            user=self.other_user,
+            account=self.other_account,
+            category=self.other_category,
+        )
+        before = self.snapshot(other_transaction)
+        self.client.force_login(self.user)
+
+        response = self.client.delete(self.detail_url(other_transaction))
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        other_transaction.refresh_from_db()
+        self.assertEqual(self.snapshot(other_transaction), before)
+
+    def test_delete_returns_404_for_missing_id(self):
+        self.client.force_login(self.user)
+
+        response = self.client.delete(reverse("transaction-detail", args=[999999]))
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(Transaction.objects.count(), 0)
+
+    def test_delete_foreign_and_missing_ids_are_indistinguishable(self):
+        other_transaction = self.create_transaction(
+            user=self.other_user,
+            account=self.other_account,
+            category=self.other_category,
+        )
+        before = self.snapshot(other_transaction)
+        self.client.force_login(self.user)
+
+        foreign = self.client.delete(self.detail_url(other_transaction))
+        missing = self.client.delete(reverse("transaction-detail", args=[999999]))
+
+        self.assertEqual(foreign.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(missing.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(foreign.json(), missing.json())
+        other_transaction.refresh_from_db()
+        self.assertEqual(self.snapshot(other_transaction), before)
+
+    def test_detail_requires_authentication_for_get_patch_delete(self):
+        transaction = self.create_transaction()
+        url = self.detail_url(transaction)
+
+        for method, payload in (
+            ("get", None),
+            ("patch", {"note": "Spoofed"}),
+            ("delete", None),
+        ):
+            with self.subTest(method=method):
+                kwargs = {"format": "json"} if payload is not None else {}
+                response = getattr(self.client, method)(url, payload or {}, **kwargs)
+
+                self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+                self.assertEqual(
+                    response.data,
+                    {"detail": "Authentication credentials were not provided."},
+                )
+
+        transaction.refresh_from_db()
+        self.assertEqual(transaction.note, "")
+        self.assertTrue(Transaction.objects.filter(pk=transaction.pk).exists())
+
+    def test_patch_requires_csrf_token_without_mutation(self):
+        transaction = self.create_transaction()
+        before = self.snapshot(transaction)
+        csrf_client = APIClient(enforce_csrf_checks=True)
+        csrf_client.force_login(self.user)
+
+        response = csrf_client.patch(
+            self.detail_url(transaction),
+            {"note": "Blocked"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response["Content-Type"], "application/json")
+        self.assertEqual(response.json(), {"detail": "CSRF verification failed."})
+        transaction.refresh_from_db()
+        self.assertEqual(self.snapshot(transaction), before)
+
+    def test_csrf_token_allows_patch(self):
+        transaction = self.create_transaction()
+        csrf_client = APIClient(enforce_csrf_checks=True)
+        csrf_client.force_login(self.user)
+        csrf_token = csrf_client.get(reverse("auth-csrf")).cookies["csrftoken"].value
+
+        response = csrf_client.patch(
+            self.detail_url(transaction),
+            {"note": "Allowed"},
+            format="json",
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        transaction.refresh_from_db()
+        self.assertEqual(transaction.note, "Allowed")
+
+    def test_delete_requires_csrf_token_without_side_effects(self):
+        transaction = self.create_transaction()
+        csrf_client = APIClient(enforce_csrf_checks=True)
+        csrf_client.force_login(self.user)
+
+        response = csrf_client.delete(self.detail_url(transaction))
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response["Content-Type"], "application/json")
+        self.assertEqual(response.json(), {"detail": "CSRF verification failed."})
+        self.assertTrue(Transaction.objects.filter(pk=transaction.pk).exists())
+
+    def test_csrf_token_allows_delete(self):
+        transaction = self.create_transaction()
+        csrf_client = APIClient(enforce_csrf_checks=True)
+        csrf_client.force_login(self.user)
+        csrf_token = csrf_client.get(reverse("auth-csrf")).cookies["csrftoken"].value
+
+        response = csrf_client.delete(
+            self.detail_url(transaction),
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Transaction.objects.filter(pk=transaction.pk).exists())
+
+    def test_detail_rejects_post_and_put_without_mutation(self):
+        transaction = self.create_transaction()
+        before = self.snapshot(transaction)
+        self.client.force_login(self.user)
+        url = self.detail_url(transaction)
+
+        for method in ("post", "put"):
+            with self.subTest(method=method):
+                response = getattr(self.client, method)(
+                    url,
+                    {"note": "Ignored"},
+                    format="json",
+                )
+                self.assertEqual(
+                    response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED
+                )
+
+        transaction.refresh_from_db()
+        self.assertEqual(self.snapshot(transaction), before)
+
+    def test_detail_supports_options_and_head(self):
+        transaction = self.create_transaction()
+        self.client.force_login(self.user)
+        url = self.detail_url(transaction)
+
+        self.assertEqual(self.client.options(url).status_code, status.HTTP_200_OK)
+        self.assertEqual(self.client.head(url).status_code, status.HTTP_200_OK)
+
+    def test_patch_relation_ids_other_user_and_missing_are_indistinguishable(self):
+        transaction = self.create_transaction()
+        before = self.snapshot(transaction)
+        self.client.force_login(self.user)
+
+        cross_user = self.patch_transaction(
+            transaction,
+            {"account": self.other_account.id},
+        )
+        missing = self.patch_transaction(transaction, {"account": 999999})
+        cross_user_category = self.patch_transaction(
+            transaction,
+            {"category": self.other_category.id},
+        )
+        missing_category = self.patch_transaction(transaction, {"category": 999999})
+
+        for response in (cross_user, missing, cross_user_category, missing_category):
+            self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(cross_user.json(), missing.json())
+        self.assertEqual(cross_user_category.json(), missing_category.json())
+        self.assertIn("account", cross_user.json())
+        self.assertIn("category", cross_user_category.json())
+        transaction.refresh_from_db()
+        self.assertEqual(self.snapshot(transaction), before)
