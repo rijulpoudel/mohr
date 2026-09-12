@@ -31,6 +31,16 @@ describe('login', () => {
       if (url === '/api/auth/login/') {
         return jsonResponse({ id: 3, email: 'me@example.com' })
       }
+      if (url === '/api/dashboard/summary/') {
+        return jsonResponse({
+          total_balance: '0.00',
+          current_month_income: '0.00',
+          current_month_expenses: '0.00',
+          total_budgeted: '0.00',
+          remaining_budget: '0.00',
+          recent_transactions: [],
+        })
+      }
       return jsonResponse({}, 404)
     })
     await user.type(screen.getByLabelText('Email'), 'me@example.com')
@@ -39,11 +49,12 @@ describe('login', () => {
     expect(await screen.findByText('Signed in as me@example.com')).toBeInTheDocument()
     expect(window.location.pathname).toBe('/')
 
-    expect(mock.mock.calls).toHaveLength(3)
+    expect(mock.mock.calls).toHaveLength(4)
     expect(requestLog(mock)).toEqual([
       'GET /api/auth/me/',
       'GET /api/auth/csrf/',
       'POST /api/auth/login/',
+      'GET /api/dashboard/summary/',
     ])
 
     const csrfInit = mock.mock.calls[1][1]
@@ -142,6 +153,16 @@ describe('login', () => {
           return jsonResponse({ detail: 'Invalid email or password.' }, 401)
         }
         return jsonResponse({ id: 9, email: 'ok@example.com' })
+      }
+      if (url === '/api/dashboard/summary/') {
+        return jsonResponse({
+          total_balance: '0.00',
+          current_month_income: '0.00',
+          current_month_expenses: '0.00',
+          total_budgeted: '0.00',
+          remaining_budget: '0.00',
+          recent_transactions: [],
+        })
       }
       return jsonResponse({}, 404)
     })
