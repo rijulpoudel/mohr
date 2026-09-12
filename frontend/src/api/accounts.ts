@@ -4,6 +4,7 @@ import { apiFetch } from './client'
 import { ApiError } from './types'
 
 const MALFORMED_RESPONSE_MESSAGE = 'Unexpected server response.'
+const INVALID_ACCOUNT_ID_MESSAGE = 'Invalid account id.'
 
 export type AccountType = 'checking' | 'savings' | 'cash' | 'credit_card'
 
@@ -16,6 +17,12 @@ export interface Account {
   is_archived: boolean
   created_at: string
   updated_at: string
+}
+
+export interface AccountPatch {
+  name?: string
+  account_type?: AccountType
+  opening_balance?: string
 }
 
 const ACCOUNT_KEYS = [
@@ -133,12 +140,22 @@ export function fetchAccounts(): Promise<Account[]> {
   return inFlightAccounts
 }
 
-function parseCreatedAccount(payload: unknown, status: number): Account {
+function parseAccountResponse(payload: unknown, status: number): Account {
   const account = parseAccount(payload)
   if (account === null) {
     throw new ApiError(MALFORMED_RESPONSE_MESSAGE, status, null, {})
   }
   return account
+}
+
+function rejectUnexpectedSuccess(_payload: unknown, status: number): never {
+  throw new ApiError(MALFORMED_RESPONSE_MESSAGE, status, null, {})
+}
+
+function assertValidAccountId(accountId: number): void {
+  if (!isPositiveInteger(accountId)) {
+    throw new ApiError(INVALID_ACCOUNT_ID_MESSAGE, null, null, {})
+  }
 }
 
 export async function createAccount(
@@ -155,7 +172,40 @@ export async function createAccount(
   return apiFetch(
     '/api/accounts/',
     { method: 'POST', headers: { 'X-CSRFToken': token }, body },
-    parseCreatedAccount,
+    parseAccountResponse,
+  )
+}
+
+export async function updateAccount(
+  accountId: number,
+  patch: AccountPatch,
+): Promise<Account> {
+  assertValidAccountId(accountId)
+  const body: Record<string, string> = {}
+  if (patch.name !== undefined) body.name = patch.name
+  if (patch.account_type !== undefined) body.account_type = patch.account_type
+  if (patch.opening_balance !== undefined) {
+    body.opening_balance = patch.opening_balance
+  }
+  const token = await getCsrfToken()
+  return apiFetch(
+    `/api/accounts/${accountId}/`,
+    {
+      method: 'PATCH',
+      headers: { 'X-CSRFToken': token },
+      body: JSON.stringify(body),
+    },
+    parseAccountResponse,
+  )
+}
+
+export async function archiveAccount(accountId: number): Promise<void> {
+  assertValidAccountId(accountId)
+  const token = await getCsrfToken()
+  await apiFetch(
+    `/api/accounts/${accountId}/`,
+    { method: 'DELETE', headers: { 'X-CSRFToken': token } },
+    rejectUnexpectedSuccess,
   )
 }
 
