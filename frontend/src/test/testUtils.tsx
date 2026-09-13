@@ -4,6 +4,9 @@ import { afterEach, beforeEach, vi } from 'vitest'
 import { resetRestoreRequest } from '../api/auth'
 import { resetAccountsRequest } from '../api/accounts'
 import { resetDashboardRequest } from '../api/dashboard'
+import { resetCategoriesRequest } from '../api/categories'
+import { resetTransactionsRequest } from '../api/transactions'
+import { resetBudgetsRequest } from '../api/budgets'
 import App from '../App'
 
 export const CSRF_TOKEN = 'test-csrf-token'
@@ -79,6 +82,9 @@ beforeEach(() => {
   resetRestoreRequest()
   resetDashboardRequest()
   resetAccountsRequest()
+  resetCategoriesRequest()
+  resetTransactionsRequest()
+  resetBudgetsRequest()
   clearCookies()
   localStorage.clear()
   sessionStorage.clear()

@@ -1,4 +1,4 @@
-import { act, screen } from '@testing-library/react'
+import { act, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import {
@@ -34,6 +34,20 @@ function transactionFixture(overrides: Record<string, unknown> = {}) {
     note: '',
     created_at: '2026-09-15T12:00:00.123456Z',
     updated_at: '2026-09-15T12:00:00.123456Z',
+    ...overrides,
+  }
+}
+
+function accountFixture(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 1,
+    name: 'Everyday Checking',
+    account_type: 'checking',
+    opening_balance: '100.00',
+    current_balance: '100.00',
+    is_archived: false,
+    created_at: '2026-09-11T14:52:48.008850Z',
+    updated_at: '2026-09-11T14:52:48.008850Z',
     ...overrides,
   }
 }
@@ -164,19 +178,50 @@ describe('dashboard summary', () => {
     expect(calls(mock, '/api/dashboard/summary/')).toHaveLength(1)
   })
 
-  it('ignores a dashboard response that settles after unmount', async () => {
+  it('ignores a late dashboard 401 after navigating away', async () => {
     const pending = deferred<Response>()
-    const mock = installFetchMock(authenticatedHandler(() => pending.promise))
-    const view = renderApp('/')
+    const mock = installFetchMock((url: string) => {
+      if (url === '/api/auth/me/') {
+        return jsonResponse({ id: 1, email: 'student@example.com' })
+      }
+      if (url === '/api/dashboard/summary/') return pending.promise
+      if (url === '/api/accounts/') return jsonResponse([accountFixture()])
+      return jsonResponse({}, 404)
+    })
+    renderApp('/')
 
     expect(await screen.findByText('Loading your dashboard…')).toBeInTheDocument()
-    view.unmount()
+
+    const user = userEvent.setup()
+    const nav = screen.getByRole('navigation', { name: 'Primary' })
+    await user.click(within(nav).getByRole('link', { name: 'Accounts' }))
+
+    expect(await screen.findByText('Everyday Checking')).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/accounts')
+
     await act(async () => {
-      pending.resolve(jsonResponse(summaryFixture({ total_balance: '9999.99' })))
+      pending.resolve(
+        jsonResponse(
+          { detail: 'Authentication credentials were not provided.' },
+          401,
+        ),
+      )
     })
 
-    expect(screen.queryByText('$9,999.99')).not.toBeInTheDocument()
+    expect(window.location.pathname).toBe('/accounts')
+    expect(screen.getByText('Everyday Checking')).toBeInTheDocument()
+    expect(
+      screen.getByRole('navigation', { name: 'Primary' }),
+    ).toBeInTheDocument()
+    expect(screen.queryByLabelText('Email')).not.toBeInTheDocument()
+    expect(
+      requestLog(mock).some((entry) => entry.includes('/api/auth/logout/')),
+    ).toBe(false)
+    expect(calls(mock, '/api/auth/logout/', 'POST')).toHaveLength(0)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
     expect(calls(mock, '/api/dashboard/summary/')).toHaveLength(1)
+    expect(calls(mock, '/api/accounts/')).toHaveLength(1)
   })
 })
 
