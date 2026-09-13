@@ -818,8 +818,10 @@ describe('transactions filters', () => {
     expect(
       await screen.findByText('Loading your transactions…'),
     ).toBeInTheDocument()
-    expect(calls(mock, '/api/accounts/')).toHaveLength(1)
-    expect(calls(mock, '/api/categories/')).toHaveLength(1)
+    await waitFor(() => {
+      expect(calls(mock, '/api/accounts/')).toHaveLength(1)
+      expect(calls(mock, '/api/categories/')).toHaveLength(1)
+    })
 
     const user = userEvent.setup()
     await user.selectOptions(
