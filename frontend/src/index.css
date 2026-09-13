@@ -58,6 +58,9 @@ a {
   inset-block-start: var(--space-3);
   inset-inline-start: var(--space-3);
   z-index: 10;
+  display: inline-flex;
+  min-height: 2.75rem;
+  align-items: center;
   padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-1);
   background: var(--color-accent);
@@ -83,6 +86,9 @@ a {
 }
 
 .brand a {
+  display: inline-flex;
+  min-height: 2.75rem;
+  align-items: center;
   color: var(--color-accent);
   text-decoration: none;
 }
