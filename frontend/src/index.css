@@ -114,6 +114,9 @@ a {
 }
 
 .site-nav a {
+  display: inline-flex;
+  min-height: 2.75rem;
+  align-items: center;
   color: var(--color-muted);
   text-decoration: none;
   font-size: 0.875rem;
@@ -137,7 +140,10 @@ a {
 }
 
 .btn {
-  display: inline-block;
+  display: inline-flex;
+  min-height: 2.75rem;
+  align-items: center;
+  justify-content: center;
   border: 0;
   border-radius: var(--radius-1);
   background: var(--color-accent);
@@ -155,6 +161,7 @@ a {
 }
 
 .btn-secondary {
+  min-height: 2.75rem;
   background: var(--color-surface);
   color: var(--color-text);
   border: 1px solid var(--color-border);
@@ -169,6 +176,7 @@ a {
 
 .input {
   width: 100%;
+  min-height: 2.75rem;
   padding: var(--space-2) var(--space-3);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-1);
@@ -179,6 +187,7 @@ a {
 
 .select {
   width: 100%;
+  min-height: 2.75rem;
   padding: var(--space-2) var(--space-3);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-1);
@@ -316,6 +325,7 @@ a {
 }
 
 .summary-item {
+  min-width: 0;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-1);
   background: var(--color-surface);
@@ -329,10 +339,12 @@ a {
 }
 
 .summary-item dd {
+  min-width: 0;
   margin: 0;
   font-size: 1.25rem;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
 }
 
 .recent {
@@ -368,13 +380,20 @@ a {
   gap: var(--space-3);
 }
 
+.transaction-main > * {
+  min-width: 0;
+}
+
 .transaction-type {
   font-size: 0.875rem;
 }
 
 .transaction-amount {
+  min-width: 0;
   font-variant-numeric: tabular-nums;
   font-weight: 600;
+  overflow-wrap: anywhere;
+  text-align: end;
 }
 
 .transaction-meta {
@@ -397,11 +416,13 @@ a {
 
 .transaction-edit-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-3);
 }
 
 .transaction-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-3);
   margin-block-start: var(--space-2);
 }
@@ -412,16 +433,28 @@ a {
 
 .transaction-delete-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-3);
   margin-block-start: var(--space-3);
 }
 
-.btn-edit {
-  margin-block-start: var(--space-2);
+.btn-edit,
+.btn-delete {
+  min-width: 2.75rem;
+  min-height: 2.75rem;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-1);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-size: 0.875rem;
+  cursor: pointer;
 }
 
-.btn-delete {
-  margin-block-start: var(--space-2);
+.btn-edit:hover:not(:disabled),
+.btn-delete:hover:not(:disabled) {
+  border-color: var(--color-accent);
 }
 
 .btn-edit:disabled,
@@ -432,6 +465,7 @@ a {
 }
 
 .btn-danger {
+  min-height: 2.75rem;
   background: transparent;
   border: 1px solid var(--color-accent);
   color: var(--color-accent);
@@ -484,6 +518,7 @@ a {
 }
 
 .account-balance {
+  min-width: 0;
   display: grid;
   gap: var(--space-1);
 }
@@ -494,9 +529,11 @@ a {
 }
 
 .account-balance dd {
+  min-width: 0;
   margin: 0;
   font-variant-numeric: tabular-nums;
   font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
 .account-actions {
@@ -676,6 +713,7 @@ a {
 }
 
 .budget-amount {
+  min-width: 0;
   display: grid;
   gap: var(--space-1);
 }
@@ -686,9 +724,11 @@ a {
 }
 
 .budget-amount dd {
+  min-width: 0;
   margin: 0;
   font-variant-numeric: tabular-nums;
   font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
 .budget-overspent {
@@ -699,6 +739,7 @@ a {
 
 .budget-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-3);
   margin-block-start: var(--space-2);
 }
@@ -709,11 +750,13 @@ a {
 
 .budget-edit-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-3);
 }
 
 .budget-delete-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-3);
   margin-block-start: var(--space-3);
 }
