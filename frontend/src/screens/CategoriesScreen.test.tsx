@@ -1,4 +1,4 @@
-import { act, fireEvent, screen, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it } from 'vitest'
 import { resetCategoriesRequest } from '../api/categories'
@@ -248,25 +248,64 @@ describe('categories list', () => {
     expect(calls(mock, '/api/categories/', 'GET')).toHaveLength(1)
   })
 
-  it('ignores a categories response that settles after unmount', async () => {
+  it('ignores a late list 401 after navigating to dashboard', async () => {
     const pending = deferred<Response>()
-    const mock = installFetchMock(
-      authenticatedCategoriesHandler((_url, init) => {
-        if ((init?.method ?? 'GET') === 'GET') return pending.promise
-        return jsonResponse({}, 404)
-      }),
-    )
-    const view = renderApp('/categories')
+    const mock = installFetchMock((url: string, init?: RequestInit) => {
+      if (url === '/api/auth/me/') {
+        return jsonResponse({ id: 1, email: 'student@example.com' })
+      }
+      if (url === '/api/dashboard/summary/') {
+        return jsonResponse({
+          total_balance: '1234.56',
+          current_month_income: '2000.00',
+          current_month_expenses: '765.44',
+          total_budgeted: '1500.00',
+          remaining_budget: '-100.10',
+          recent_transactions: [],
+        })
+      }
+      if (url === '/api/categories/' && (init?.method ?? 'GET') === 'GET') {
+        return pending.promise
+      }
+      return jsonResponse({}, 404)
+    })
+    renderApp('/categories')
+
     expect(
       await screen.findByText('Loading your categories…'),
     ).toBeInTheDocument()
-    view.unmount()
+    const user = userEvent.setup()
+    const nav = screen.getByRole('navigation', { name: 'Primary' })
+    await user.click(within(nav).getByRole('link', { name: 'Dashboard' }))
+
+    expect(await screen.findByText('$1,234.56')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Overview' })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/')
+
     await act(async () => {
-      pending.resolve(jsonResponse([categoryFixture({ name: 'Late Category' })]))
+      pending.resolve(
+        jsonResponse(
+          { detail: 'Authentication credentials were not provided.' },
+          401,
+        ),
+      )
     })
 
-    expect(screen.queryByText('Late Category')).not.toBeInTheDocument()
+    expect(window.location.pathname).toBe('/')
+    expect(screen.getByRole('heading', { name: 'Overview' })).toBeInTheDocument()
+    expect(screen.getByText('$1,234.56')).toBeInTheDocument()
+    expect(
+      screen.getByRole('navigation', { name: 'Primary' }),
+    ).toBeInTheDocument()
+    expect(screen.queryByLabelText('Email')).not.toBeInTheDocument()
+    expect(
+      requestLog(mock).some((entry) => entry.includes('/api/auth/logout/')),
+    ).toBe(false)
+    expect(calls(mock, '/api/auth/logout/', 'POST')).toHaveLength(0)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
     expect(calls(mock, '/api/categories/', 'GET')).toHaveLength(1)
+    expect(calls(mock, '/api/dashboard/summary/')).toHaveLength(1)
   })
 
   it('clears session and redirects to login on a 401 list without logout or storage', async () => {
@@ -589,34 +628,76 @@ describe('category creation form', () => {
     expect(sessionStorage.length).toBe(0)
   })
 
-  it('ignores a create response that settles after unmount', async () => {
-    const pending = deferred<Response>()
-    const mock = installFetchMock(
-      authenticatedCategoriesHandler((_url, init) => {
+  it('ignores a late create 401 after navigating to dashboard', async () => {
+    const pendingCreate = deferred<Response>()
+    const mock = installFetchMock((url: string, init?: RequestInit) => {
+      if (url === '/api/auth/me/') {
+        return jsonResponse({ id: 1, email: 'student@example.com' })
+      }
+      if (url === '/api/dashboard/summary/') {
+        return jsonResponse({
+          total_balance: '1234.56',
+          current_month_income: '2000.00',
+          current_month_expenses: '765.44',
+          total_budgeted: '1500.00',
+          remaining_budget: '-100.10',
+          recent_transactions: [],
+        })
+      }
+      if (url === '/api/auth/csrf/') {
+        setCsrfCookie()
+        return jsonResponse({ detail: 'CSRF cookie set.' })
+      }
+      if (url === '/api/categories/') {
         if ((init?.method ?? 'GET') === 'GET') return jsonResponse([])
-        return pending.promise
-      }),
-    )
-    const view = renderApp('/categories')
+        return pendingCreate.promise
+      }
+      return jsonResponse({}, 404)
+    })
+    renderApp('/categories')
     await screen.findByText(/No categories yet/)
 
     const user = userEvent.setup()
     await fillCreateForm(user)
     await user.click(screen.getByRole('button', { name: 'Create category' }))
     await screen.findByRole('button', { name: 'Creating category…' })
+    await waitFor(() =>
+      expect(calls(mock, '/api/categories/', 'POST')).toHaveLength(1),
+    )
 
-    view.unmount()
+    const nav = screen.getByRole('navigation', { name: 'Primary' })
+    await user.click(within(nav).getByRole('link', { name: 'Dashboard' }))
+
+    expect(await screen.findByText('$1,234.56')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Overview' })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/')
+
     await act(async () => {
-      pending.resolve(
+      pendingCreate.resolve(
         jsonResponse(
-          categoryFixture({ id: 9, name: 'Late Category', category_type: 'expense' }),
-          201,
+          { detail: 'Authentication credentials were not provided.' },
+          401,
         ),
       )
     })
 
-    expect(screen.queryByText('Late Category')).not.toBeInTheDocument()
+    expect(window.location.pathname).toBe('/')
+    expect(screen.getByRole('heading', { name: 'Overview' })).toBeInTheDocument()
+    expect(screen.getByText('$1,234.56')).toBeInTheDocument()
+    expect(
+      screen.getByRole('navigation', { name: 'Primary' }),
+    ).toBeInTheDocument()
+    expect(screen.queryByLabelText('Email')).not.toBeInTheDocument()
+    expect(
+      requestLog(mock).some((entry) => entry.includes('/api/auth/logout/')),
+    ).toBe(false)
+    expect(calls(mock, '/api/auth/logout/', 'POST')).toHaveLength(0)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+    expect(calls(mock, '/api/categories/', 'GET')).toHaveLength(1)
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(1)
     expect(calls(mock, '/api/categories/', 'POST')).toHaveLength(1)
+    expect(calls(mock, '/api/dashboard/summary/')).toHaveLength(1)
   })
 })
 
@@ -868,6 +949,83 @@ describe('category renaming', () => {
     expect(localStorage.length).toBe(0)
     expect(sessionStorage.length).toBe(0)
   })
+
+  it('ignores a late rename 401 after navigating to dashboard', async () => {
+    const pendingPatch = deferred<Response>()
+    const mock = installFetchMock((url: string, init?: RequestInit) => {
+      if (url === '/api/auth/me/') {
+        return jsonResponse({ id: 1, email: 'student@example.com' })
+      }
+      if (url === '/api/dashboard/summary/') {
+        return jsonResponse({
+          total_balance: '1234.56',
+          current_month_income: '2000.00',
+          current_month_expenses: '765.44',
+          total_budgeted: '1500.00',
+          remaining_budget: '-100.10',
+          recent_transactions: [],
+        })
+      }
+      if (url === '/api/auth/csrf/') {
+        setCsrfCookie()
+        return jsonResponse({ detail: 'CSRF cookie set.' })
+      }
+      if (url === '/api/categories/' && (init?.method ?? 'GET') === 'GET') {
+        return jsonResponse(groupedCategories())
+      }
+      if (url === '/api/categories/1/' && init?.method === 'PATCH') {
+        return pendingPatch.promise
+      }
+      return jsonResponse({}, 404)
+    })
+    renderApp('/categories')
+    await screen.findByRole('heading', { name: 'Active (3)' })
+
+    const user = userEvent.setup()
+    const editor = await openRenameEditor(user, 'Food')
+    const nameInput = within(editor).getByLabelText('Name')
+    await user.clear(nameInput)
+    await user.type(nameInput, 'Groceries')
+    await user.click(within(editor).getByRole('button', { name: 'Save' }))
+    await screen.findByRole('button', { name: 'Saving category…' })
+    await waitFor(() =>
+      expect(calls(mock, '/api/categories/1/', 'PATCH')).toHaveLength(1),
+    )
+
+    const nav = screen.getByRole('navigation', { name: 'Primary' })
+    await user.click(within(nav).getByRole('link', { name: 'Dashboard' }))
+
+    expect(await screen.findByText('$1,234.56')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Overview' })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/')
+
+    await act(async () => {
+      pendingPatch.resolve(
+        jsonResponse(
+          { detail: 'Authentication credentials were not provided.' },
+          401,
+        ),
+      )
+    })
+
+    expect(window.location.pathname).toBe('/')
+    expect(screen.getByRole('heading', { name: 'Overview' })).toBeInTheDocument()
+    expect(screen.getByText('$1,234.56')).toBeInTheDocument()
+    expect(
+      screen.getByRole('navigation', { name: 'Primary' }),
+    ).toBeInTheDocument()
+    expect(screen.queryByLabelText('Email')).not.toBeInTheDocument()
+    expect(
+      requestLog(mock).some((entry) => entry.includes('/api/auth/logout/')),
+    ).toBe(false)
+    expect(calls(mock, '/api/auth/logout/', 'POST')).toHaveLength(0)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+    expect(calls(mock, '/api/categories/', 'GET')).toHaveLength(1)
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(1)
+    expect(calls(mock, '/api/categories/1/', 'PATCH')).toHaveLength(1)
+    expect(calls(mock, '/api/dashboard/summary/')).toHaveLength(1)
+  })
 })
 
 describe('category archiving', () => {
@@ -1091,16 +1249,35 @@ describe('category archiving', () => {
     expect(sessionStorage.length).toBe(0)
   })
 
-  it('ignores an archive response that settles after unmount', async () => {
-    const pending = deferred<Response>()
-    const mock = installFetchMock(
-      authenticatedCategoriesHandler((_url, init) => {
-        if ((init?.method ?? 'GET') === 'GET') return jsonResponse(groupedCategories())
-        if ((init?.method ?? 'GET') === 'DELETE') return pending.promise
-        return jsonResponse({}, 404)
-      }),
-    )
-    const view = renderApp('/categories')
+  it('ignores a late archive 401 after navigating to dashboard', async () => {
+    const pendingDelete = deferred<Response>()
+    const mock = installFetchMock((url: string, init?: RequestInit) => {
+      if (url === '/api/auth/me/') {
+        return jsonResponse({ id: 1, email: 'student@example.com' })
+      }
+      if (url === '/api/dashboard/summary/') {
+        return jsonResponse({
+          total_balance: '1234.56',
+          current_month_income: '2000.00',
+          current_month_expenses: '765.44',
+          total_budgeted: '1500.00',
+          remaining_budget: '-100.10',
+          recent_transactions: [],
+        })
+      }
+      if (url === '/api/auth/csrf/') {
+        setCsrfCookie()
+        return jsonResponse({ detail: 'CSRF cookie set.' })
+      }
+      if (url === '/api/categories/' && (init?.method ?? 'GET') === 'GET') {
+        return jsonResponse(groupedCategories())
+      }
+      if (url === '/api/categories/1/' && init?.method === 'DELETE') {
+        return pendingDelete.promise
+      }
+      return jsonResponse({}, 404)
+    })
+    renderApp('/categories')
     await screen.findByRole('heading', { name: 'Active (3)' })
 
     const user = userEvent.setup()
@@ -1109,14 +1286,43 @@ describe('category archiving', () => {
       within(confirm).getByRole('button', { name: 'Confirm archive Food' }),
     )
     await screen.findByRole('status')
+    await waitFor(() =>
+      expect(calls(mock, '/api/categories/1/', 'DELETE')).toHaveLength(1),
+    )
 
-    view.unmount()
+    const nav = screen.getByRole('navigation', { name: 'Primary' })
+    await user.click(within(nav).getByRole('link', { name: 'Dashboard' }))
+
+    expect(await screen.findByText('$1,234.56')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Overview' })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/')
+
     await act(async () => {
-      pending.resolve(emptyResponse(204))
+      pendingDelete.resolve(
+        jsonResponse(
+          { detail: 'Authentication credentials were not provided.' },
+          401,
+        ),
+      )
     })
 
-    expect(screen.queryByText('Category archived.')).not.toBeInTheDocument()
+    expect(window.location.pathname).toBe('/')
+    expect(screen.getByRole('heading', { name: 'Overview' })).toBeInTheDocument()
+    expect(screen.getByText('$1,234.56')).toBeInTheDocument()
+    expect(
+      screen.getByRole('navigation', { name: 'Primary' }),
+    ).toBeInTheDocument()
+    expect(screen.queryByLabelText('Email')).not.toBeInTheDocument()
+    expect(
+      requestLog(mock).some((entry) => entry.includes('/api/auth/logout/')),
+    ).toBe(false)
+    expect(calls(mock, '/api/auth/logout/', 'POST')).toHaveLength(0)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+    expect(calls(mock, '/api/categories/', 'GET')).toHaveLength(1)
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(1)
     expect(calls(mock, '/api/categories/1/', 'DELETE')).toHaveLength(1)
+    expect(calls(mock, '/api/dashboard/summary/')).toHaveLength(1)
   })
 })
 

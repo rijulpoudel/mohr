@@ -100,11 +100,11 @@ function CreateCategoryForm({ onCreated }: { onCreated: (category: Category) => 
         setCreated(true)
       }
     } catch (caught) {
+      if (!mountedRef.current) return
       if (caught instanceof ApiError && caught.status === 401) {
         clearSession()
         return
       }
-      if (!mountedRef.current) return
       if (caught instanceof ApiError) {
         if (Object.keys(caught.fieldErrors).length > 0) {
           setFieldErrors(caught.fieldErrors)
@@ -259,11 +259,11 @@ function RenameCategoryForm({
         onUpdated(updated)
       }
     } catch (caught) {
+      if (!mountedRef.current) return
       if (caught instanceof ApiError && caught.status === 401) {
         clearSession()
         return
       }
-      if (!mountedRef.current) return
       if (caught instanceof ApiError) {
         if (Object.keys(caught.fieldErrors).length > 0) {
           setFieldErrors(caught.fieldErrors)
@@ -375,11 +375,11 @@ function ArchiveCategoryConfirm({
         onArchived(category.id)
       }
     } catch (caught) {
+      if (!mountedRef.current) return
       if (caught instanceof ApiError && caught.status === 401) {
         clearSession()
         return
       }
-      if (!mountedRef.current) return
       setErrorMessage(
         caught instanceof ApiError ? userMessage(caught) : GENERIC_ERROR_MESSAGE,
       )
