@@ -3,6 +3,7 @@ import { fetchAccounts, type Account } from '../api/accounts'
 import { fetchCategories, type Category } from '../api/categories'
 import {
   createTransaction,
+  deleteTransaction,
   fetchTransactions,
   resetTransactionsRequest,
   updateTransaction,
@@ -280,13 +281,17 @@ function TransactionItem({
   accountById,
   categoryById,
   editDisabled,
+  deleteDisabled,
   onEdit,
+  onDelete,
 }: {
   transaction: Transaction
   accountById: Map<number, Account>
   categoryById: Map<number, Category>
   editDisabled: boolean
+  deleteDisabled: boolean
   onEdit: () => void
+  onDelete: () => void
 }) {
   const accountName = accountById.get(transaction.account)?.name
   const categoryName = categoryById.get(transaction.category)?.name
@@ -308,15 +313,141 @@ function TransactionItem({
       {transaction.note !== '' && (
         <p className="transaction-note">{transaction.note}</p>
       )}
-      <button
-        type="button"
-        className="btn-edit"
-        aria-label={`Edit transaction ${transaction.id}`}
-        onClick={onEdit}
-        disabled={editDisabled}
+      <div className="transaction-actions">
+        <button
+          type="button"
+          className="btn-edit"
+          aria-label={`Edit transaction ${transaction.id}`}
+          onClick={onEdit}
+          disabled={editDisabled}
+        >
+          Edit
+        </button>
+        <button
+          type="button"
+          className="btn-delete"
+          aria-label={`Delete transaction ${transaction.id}`}
+          onClick={onDelete}
+          disabled={deleteDisabled}
+        >
+          Delete
+        </button>
+      </div>
+    </li>
+  )
+}
+
+function DeleteTransactionConfirm({
+  transaction,
+  accountName,
+  categoryName,
+  onCancel,
+  onDeleted,
+  onPendingChange,
+}: {
+  transaction: Transaction
+  accountName: string | undefined
+  categoryName: string | undefined
+  onCancel: () => void
+  onDeleted: (id: number) => void
+  onPendingChange: (pending: boolean) => void
+}) {
+  const { clearSession } = useAuth()
+  const [pending, setPending] = useState(false)
+  const [submitError, setSubmitError] = useState<string | null>(null)
+  const mountedRef = useRef(true)
+  const submittingRef = useRef(false)
+  const keepRef = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    mountedRef.current = true
+    keepRef.current?.focus()
+    return () => {
+      mountedRef.current = false
+      onPendingChange(false)
+    }
+  }, [onPendingChange])
+
+  async function handleConfirm() {
+    if (submittingRef.current) return
+    if (pending) return
+    setSubmitError(null)
+    submittingRef.current = true
+    setPending(true)
+    onPendingChange(true)
+    try {
+      await deleteTransaction(transaction.id)
+      if (mountedRef.current) {
+        onDeleted(transaction.id)
+      }
+    } catch (caught) {
+      if (!mountedRef.current) return
+      if (caught instanceof ApiError && caught.status === 401) {
+        clearSession()
+        return
+      }
+      if (caught instanceof ApiError) {
+        setSubmitError(userMessage(caught))
+        return
+      }
+      setSubmitError(GENERIC_ERROR_MESSAGE)
+    } finally {
+      if (mountedRef.current) {
+        submittingRef.current = false
+        setPending(false)
+        onPendingChange(false)
+      }
+    }
+  }
+
+  const permanenceId = `delete-permanence-${transaction.id}`
+
+  return (
+    <li className="transaction-item transaction-delete">
+      {pending && (
+        <p role="status" className="notice">
+          Deleting transaction…
+        </p>
+      )}
+      {submitError !== null && (
+        <div className="error-summary" role="alert">
+          {submitError}
+        </div>
+      )}
+      <div
+        role="group"
+        aria-label={`Delete transaction ${transaction.id} confirmation`}
       >
-        Edit
-      </button>
+        <div className="transaction-meta">
+          <time dateTime={transaction.date}>{transaction.date}</time>
+          <span>
+            {formatSignedMoney(transaction.amount, transaction.transaction_type)}
+          </span>
+          {accountName !== undefined && <span>{accountName}</span>}
+          {categoryName !== undefined && <span>{categoryName}</span>}
+        </div>
+        <p id={permanenceId}>Deleting is permanent and cannot be undone.</p>
+        <div className="transaction-delete-actions">
+          <button
+            type="button"
+            className="btn"
+            ref={keepRef}
+            onClick={onCancel}
+            disabled={pending}
+          >
+            Keep transaction
+          </button>
+          <button
+            type="button"
+            className="btn btn-danger"
+            onClick={handleConfirm}
+            disabled={pending}
+            aria-describedby={permanenceId}
+          >
+            Delete transaction
+          </button>
+        </div>
+      </div>
     </li>
   )
 }
@@ -1115,6 +1246,8 @@ export function TransactionsScreen() {
   const [editingId, setEditingId] = useState<number | null>(null)
   const [updateNotice, setUpdateNotice] = useState<string | null>(null)
   const [editPending, setEditPending] = useState(false)
+  const [deletingId, setDeletingId] = useState<number | null>(null)
+  const [deletePending, setDeletePending] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const metaPromiseRef = useRef<Promise<[Account[], Category[]]> | null>(null)
   const requestSeqRef = useRef(0)
@@ -1122,7 +1255,10 @@ export function TransactionsScreen() {
   const filtersRef = useRef<TransactionFilters>({})
   const editingIdRef = useRef<number | null>(null)
   const stateRef = useRef<TransactionsState>({ status: 'loading' })
-  type ReturnFocusTarget = { kind: 'edit'; id: number } | { kind: 'heading' }
+  type ReturnFocusTarget =
+    | { kind: 'edit'; id: number }
+    | { kind: 'delete'; id: number }
+    | { kind: 'heading' }
   const returnFocusRef = useRef<ReturnFocusTarget | null>(null)
   const headingRef = useRef<HTMLHeadingElement>(null)
   useEffect(() => {
@@ -1143,21 +1279,27 @@ export function TransactionsScreen() {
   }, [])
 
   useEffect(() => {
-    if (editingId === null && returnFocusRef.current !== null) {
+    if (
+      editingId === null &&
+      deletingId === null &&
+      returnFocusRef.current !== null
+    ) {
       const target = returnFocusRef.current
       returnFocusRef.current = null
       if (target.kind === 'heading') {
         headingRef.current?.focus()
         return
       }
-      const element = document.querySelector(
-        `[aria-label="Edit transaction ${target.id}"]`,
-      )
+      const label =
+        target.kind === 'edit'
+          ? `Edit transaction ${target.id}`
+          : `Delete transaction ${target.id}`
+      const element = document.querySelector(`[aria-label="${label}"]`)
       if (element instanceof HTMLElement) {
         element.focus()
       }
     }
-  }, [editingId])
+  }, [editingId, deletingId])
 
   useEffect(() => {
     let cancelled = false
@@ -1283,6 +1425,34 @@ export function TransactionsScreen() {
     setEditPending(pending)
   }, [])
 
+  const handleDeleteOpen = useCallback((id: number) => {
+    setDeletingId(id)
+  }, [])
+
+  const handleDeleteCancel = useCallback((id: number) => {
+    returnFocusRef.current = { kind: 'delete', id }
+    setDeletingId(null)
+    setDeletePending(false)
+  }, [])
+
+  const handleDeletePendingChange = useCallback((pending: boolean) => {
+    setDeletePending(pending)
+  }, [])
+
+  const handleDeleteDeleted = useCallback((id: number) => {
+    setState((current) => {
+      if (current.status !== 'ready') return current
+      return {
+        status: 'ready',
+        transactions: current.transactions.filter((item) => item.id !== id),
+      }
+    })
+    setDeletingId(null)
+    setDeletePending(false)
+    returnFocusRef.current = { kind: 'heading' }
+    setUpdateNotice('Transaction deleted.')
+  }, [])
+
   const handleEditUpdated = useCallback((updated: Transaction) => {
     const currentFilters = filtersRef.current
     const matches = transactionMatchesFilters(updated, currentFilters)
@@ -1315,7 +1485,14 @@ export function TransactionsScreen() {
   const categoryById = new Map(
     categories.map((category) => [category.id, category]),
   )
-  const filtersLocked = editPending || editingId !== null
+  const filtersLocked =
+    editPending || editingId !== null || deletePending || deletingId !== null
+  const rowLocked =
+    editPending ||
+    deletePending ||
+    refreshing ||
+    editingId !== null ||
+    deletingId !== null
 
   return (
     <div className="screen">
@@ -1326,17 +1503,24 @@ export function TransactionsScreen() {
         accounts={accounts}
         categories={categories}
         onCreated={handleTransactionCreated}
-        submitLocked={editPending || editingId !== null}
+        submitLocked={filtersLocked}
       />
       <section
         className="transaction-filters"
         aria-describedby={
-          editingId !== null ? 'transactions-filters-locked-hint' : undefined
+          editingId !== null || deletingId !== null
+            ? 'transactions-filters-locked-hint'
+            : undefined
         }
       >
         {editingId !== null && (
           <p id="transactions-filters-locked-hint" className="notice">
             Finish or cancel your edit to change filters.
+          </p>
+        )}
+        {editingId === null && deletingId !== null && (
+          <p id="transactions-filters-locked-hint" className="notice">
+            Finish or cancel your deletion to change filters.
           </p>
         )}
         <div className="form-field">
@@ -1469,18 +1653,26 @@ export function TransactionsScreen() {
                   onUpdated={handleEditUpdated}
                   onPendingChange={handleEditPendingChange}
                 />
+              ) : deletingId === transaction.id ? (
+                <DeleteTransactionConfirm
+                  key={transaction.id}
+                  transaction={transaction}
+                  accountName={accountById.get(transaction.account)?.name}
+                  categoryName={categoryById.get(transaction.category)?.name}
+                  onCancel={() => handleDeleteCancel(transaction.id)}
+                  onDeleted={handleDeleteDeleted}
+                  onPendingChange={handleDeletePendingChange}
+                />
               ) : (
                 <TransactionItem
                   key={transaction.id}
                   transaction={transaction}
                   accountById={accountById}
                   categoryById={categoryById}
-                  editDisabled={
-                    editPending ||
-                    refreshing ||
-                    (editingId !== null && editingId !== transaction.id)
-                  }
+                  editDisabled={rowLocked}
+                  deleteDisabled={rowLocked}
                   onEdit={() => handleEditOpen(transaction.id)}
+                  onDelete={() => handleDeleteOpen(transaction.id)}
                 />
               ),
             )}

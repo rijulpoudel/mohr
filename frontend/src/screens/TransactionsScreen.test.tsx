@@ -7,6 +7,7 @@ import {
   CSRF_TOKEN,
   calls,
   deferred,
+  emptyResponse,
   installFetchMock,
   jsonResponse,
   renderApp,
@@ -4771,5 +4772,681 @@ describe('transaction editing independent review defects', () => {
     const heading = screen.getByRole('heading', { name: 'Transactions' })
     expect(heading).toHaveFocus()
     expect(document.activeElement).not.toBe(document.body)
+  })
+})
+
+function authenticatedDeleteHandler(
+  options: {
+    accounts?: unknown[]
+    categories?: unknown[]
+    transactions?: (url: string, init?: RequestInit) => Response | Promise<Response>
+  } = {},
+) {
+  return (url: string, init?: RequestInit) => {
+    if (url === '/api/auth/me/') {
+      return jsonResponse({ id: 1, email: 'student@example.com' })
+    }
+    if (url === '/api/auth/csrf/') {
+      setCsrfCookie()
+      return jsonResponse({ detail: 'CSRF cookie set.' })
+    }
+    if (url === '/api/accounts/') {
+      return jsonResponse(options.accounts ?? defaultAccounts())
+    }
+    if (url === '/api/categories/') {
+      return jsonResponse(options.categories ?? defaultCategories())
+    }
+    if (url.startsWith('/api/transactions/')) {
+      if (options.transactions !== undefined) {
+        return options.transactions(url, init)
+      }
+      return jsonResponse([])
+    }
+    return jsonResponse({}, 404)
+  }
+}
+
+function deleteListHandler(
+  rows: unknown[],
+  deleteImpl?: (url: string, init?: RequestInit) => Response | Promise<Response>,
+) {
+  return authenticatedDeleteHandler({
+    transactions: (url, init) => {
+      if ((init?.method ?? 'GET') === 'DELETE') {
+        if (deleteImpl !== undefined) return deleteImpl(url, init)
+        return emptyResponse(204)
+      }
+      return jsonResponse(rows)
+    },
+  })
+}
+
+async function openDeleteFor(user: ReturnType<typeof userEvent.setup>, index = 0) {
+  const deletes = await screen.findAllByRole('button', { name: /^Delete transaction \d+/ })
+  await user.click(deletes[index])
+  return deletes
+}
+
+describe('transaction deletion', () => {
+  it('shows an accessible Delete control on every row including archived-linked rows', async () => {
+    installFetchMock(
+      authenticatedDeleteHandler({
+        accounts: [
+          accountFixture({ id: 1, name: 'Everyday Checking' }),
+          accountFixture({
+            id: 2,
+            name: 'Old Card',
+            account_type: 'credit_card',
+            is_archived: true,
+          }),
+        ],
+        categories: [
+          categoryFixture({ id: 1, name: 'Salary', category_type: 'income' }),
+          categoryFixture({ id: 2, name: 'Food', category_type: 'expense' }),
+          categoryFixture({
+            id: 3,
+            name: 'Old Hobby',
+            category_type: 'expense',
+            is_archived: true,
+          }),
+        ],
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'GET') {
+            return jsonResponse([
+              transactionFixture({
+                id: 7,
+                account: 2,
+                category: 3,
+                amount: '88.50',
+                date: '2026-08-15',
+                note: 'Vintage purchase',
+              }),
+            ])
+          }
+          return emptyResponse(204)
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Vintage purchase')
+
+    const deletes = await screen.findAllByRole('button', { name: /^Delete transaction \d+/ })
+    expect(deletes).toHaveLength(1)
+    expect(deletes[0]).toHaveAttribute('aria-label', 'Delete transaction 7')
+    expect(deletes[0]).toBeEnabled()
+  })
+
+  it('shows a Delete control on every row of a multi-row list', async () => {
+    installFetchMock(deleteListHandler(serverOrderedTransactions()))
+    renderApp('/transactions')
+    await screen.findByText('Monthly paycheck')
+
+    const deletes = await screen.findAllByRole('button', { name: /^Delete transaction \d+/ })
+    expect(deletes).toHaveLength(3)
+    expect(deletes[0]).toHaveAttribute('aria-label', 'Delete transaction 3')
+    expect(deletes[1]).toHaveAttribute('aria-label', 'Delete transaction 1')
+    expect(deletes[2]).toHaveAttribute('aria-label', 'Delete transaction 2')
+  })
+
+  it('opens a two-step confirmation naming date, signed amount, account and category and stating permanence without archiving language', async () => {
+    installFetchMock(deleteListHandler(serverOrderedTransactions()))
+    renderApp('/transactions')
+    await screen.findByText('Monthly paycheck')
+
+    const user = userEvent.setup()
+    await openDeleteFor(user, 0)
+
+    const confirm = await screen.findByRole('button', { name: 'Delete transaction' })
+    expect(confirm).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Keep transaction' })).toBeInTheDocument()
+    const dialog = confirm.closest('li') as HTMLElement
+    expect(within(dialog).getByText('2026-09-11')).toBeInTheDocument()
+    expect(within(dialog).getByText('+$2,500.00')).toBeInTheDocument()
+    expect(within(dialog).getByText('Savings')).toBeInTheDocument()
+    expect(within(dialog).getByText('Salary')).toBeInTheDocument()
+    expect(within(dialog).getByText(/permanent/i)).toBeInTheDocument()
+    expect(within(dialog).getByText(/cannot be undone/i)).toBeInTheDocument()
+    expect(within(dialog).queryByText(/archiv/i)).not.toBeInTheDocument()
+    expect(dialog.textContent).not.toMatch(/recover|restor/i)
+    expect(screen.getByRole('button', { name: 'Keep transaction' })).toHaveFocus()
+    expect(confirm).not.toHaveFocus()
+  })
+
+  it('cancel closes the confirmation, sends no request, and returns focus to the Delete button', async () => {
+    const mock = installFetchMock(deleteListHandler(serverOrderedTransactions()))
+    renderApp('/transactions')
+    await screen.findByText('Monthly paycheck')
+
+    const user = userEvent.setup()
+    await openDeleteFor(user, 1)
+    expect(await screen.findByRole('button', { name: 'Delete transaction' })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Keep transaction' }))
+
+    expect(screen.queryByRole('button', { name: 'Keep transaction' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Delete transaction' })).not.toBeInTheDocument()
+    expect(await screen.findByText('Monthly paycheck')).toBeInTheDocument()
+    expect(calls(mock, '/api/transactions/1/', 'DELETE')).toHaveLength(0)
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(0)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+    const deleteButton = await screen.findByRole('button', { name: 'Delete transaction 1' })
+    expect(deleteButton).toHaveFocus()
+  })
+
+  it('confirm sends exactly one DELETE to the transaction detail URL with CSRF', async () => {
+    const mock = installFetchMock(deleteListHandler(serverOrderedTransactions()))
+    renderApp('/transactions')
+    await screen.findByText('Monthly paycheck')
+
+    const user = userEvent.setup()
+    await openDeleteFor(user, 1)
+    await user.click(await screen.findByRole('button', { name: 'Delete transaction' }))
+
+    await waitFor(() =>
+      expect(calls(mock, '/api/transactions/1/', 'DELETE')).toHaveLength(1),
+    )
+    const [input, init] = calls(mock, '/api/transactions/1/', 'DELETE')[0]
+    expect(String(input)).toBe('/api/transactions/1/')
+    expect(init?.method).toBe('DELETE')
+    const headers = init?.headers as Headers
+    expect(headers.get('X-CSRFToken')).toBe(CSRF_TOKEN)
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(1)
+  })
+
+  it('pending announces Deleting transaction…, disables controls, and dedups same-tick double confirm', async () => {
+    const pending = deferred<Response>()
+    const mock = installFetchMock(
+      authenticatedDeleteHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'DELETE') return pending.promise
+          return jsonResponse(serverOrderedTransactions())
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Monthly paycheck')
+
+    const user = userEvent.setup()
+    await openDeleteFor(user, 1)
+    const confirm = await screen.findByRole('button', { name: 'Delete transaction' })
+    const form = confirm.closest('li') as HTMLElement
+    void form
+    await act(async () => {
+      fireEvent.click(confirm)
+      fireEvent.click(confirm)
+    })
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Deleting transaction…')
+    expect(screen.getByRole('button', { name: 'Delete transaction' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Keep transaction' })).toBeDisabled()
+    for (const button of screen.getAllByRole('button', { name: /^Edit transaction / })) {
+      expect(button).toBeDisabled()
+    }
+    for (const button of screen.getAllByRole('button', { name: /^Delete transaction \d+/ })) {
+      expect(button).toBeDisabled()
+    }
+    expect(calls(mock, '/api/transactions/1/', 'DELETE')).toHaveLength(1)
+
+    await act(async () => {
+      pending.resolve(emptyResponse(204))
+    })
+    expect(await screen.findByText('Transaction deleted.')).toBeInTheDocument()
+    expect(calls(mock, '/api/transactions/1/', 'DELETE')).toHaveLength(1)
+  })
+
+  it('success removes only that row in place with no refetch, keeps filters, and announces Transaction deleted.', async () => {
+    const rows = serverOrderedTransactions()
+    const incomeRows = rows.filter(
+      (row) => (row as { transaction_type: string }).transaction_type === 'income',
+    )
+    const mock = installFetchMock(
+      authenticatedDeleteHandler({
+        transactions: (url, init) => {
+          if ((init?.method ?? 'GET') === 'DELETE') return emptyResponse(204)
+          if (url === '/api/transactions/?transaction_type=income') {
+            return jsonResponse(incomeRows)
+          }
+          return jsonResponse(rows)
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Monthly paycheck')
+
+    const user = userEvent.setup()
+    await user.selectOptions(screen.getByLabelText('Transaction type'), 'income')
+    await waitFor(() =>
+      expect(calls(mock, '/api/transactions/?transaction_type=income')).toHaveLength(1),
+    )
+    const listsBefore = calls(mock, '/api/transactions/?transaction_type=income').length
+    const unfilteredBefore = calls(mock, '/api/transactions/').length
+    const accountsBefore = calls(mock, '/api/accounts/').length
+    const categoriesBefore = calls(mock, '/api/categories/').length
+
+    await openDeleteFor(user, 0)
+    await user.click(await screen.findByRole('button', { name: 'Delete transaction' }))
+
+    expect(await screen.findByText('Transaction deleted.')).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Transaction deleted.')
+    expect(
+      screen.getByText('No matches for these filters. Try clearing or changing a filter.'),
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/No transactions yet/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('listitem')).not.toBeInTheDocument()
+    expect(screen.queryByText('Monthly paycheck')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Transaction type')).toHaveValue('income')
+    expect(calls(mock, '/api/transactions/?transaction_type=income')).toHaveLength(
+      listsBefore,
+    )
+    expect(calls(mock, '/api/transactions/')).toHaveLength(unfilteredBefore)
+    expect(calls(mock, '/api/accounts/')).toHaveLength(accountsBefore)
+    expect(calls(mock, '/api/categories/')).toHaveLength(categoriesBefore)
+    expect(calls(mock, '/api/transactions/3/', 'DELETE')).toHaveLength(1)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  it('focus moves to the Transactions heading after successful deletion', async () => {
+    installFetchMock(deleteListHandler(serverOrderedTransactions()))
+    renderApp('/transactions')
+    await screen.findByText('Monthly paycheck')
+
+    const user = userEvent.setup()
+    await openDeleteFor(user, 0)
+    await user.click(await screen.findByRole('button', { name: 'Delete transaction' }))
+
+    expect(await screen.findByText('Transaction deleted.')).toBeInTheDocument()
+    const heading = screen.getByRole('heading', { name: 'Transactions' })
+    expect(heading).toHaveFocus()
+    expect(document.activeElement).not.toBe(document.body)
+  })
+
+  it('delete controls are disabled while an editor is open and edit controls are disabled while a confirmation is open', async () => {
+    installFetchMock(deleteListHandler(serverOrderedTransactions()))
+    renderApp('/transactions')
+    await screen.findByText('Monthly paycheck')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    for (const button of screen.getAllByRole('button', { name: /^Delete transaction \d+/ })) {
+      expect(button).toBeDisabled()
+    }
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(await screen.findByText('Monthly paycheck')).toBeInTheDocument()
+    for (const button of await screen.findAllByRole('button', { name: /^Delete transaction \d+/ })) {
+      expect(button).toBeEnabled()
+    }
+
+    await openDeleteFor(user, 0)
+    for (const button of screen.getAllByRole('button', { name: /^Edit transaction / })) {
+      expect(button).toBeDisabled()
+    }
+    const otherDeletes = screen.getAllByRole('button', { name: /^Delete transaction \d+/ })
+    for (const button of otherDeletes) {
+      expect(button).toBeDisabled()
+    }
+    await user.click(screen.getByRole('button', { name: 'Keep transaction' }))
+    for (const button of await screen.findAllByRole('button', { name: /^Edit transaction / })) {
+      expect(button).toBeEnabled()
+    }
+  })
+
+  it('filters are locked while a delete confirmation is open with the visible hint', async () => {
+    const mock = installFetchMock(deleteListHandler(serverOrderedTransactions()))
+    renderApp('/transactions')
+    await screen.findByText('Monthly paycheck')
+
+    const user = userEvent.setup()
+    await openDeleteFor(user, 0)
+
+    expect(screen.getByLabelText('Account')).toBeDisabled()
+    expect(screen.getByLabelText('Category')).toBeDisabled()
+    expect(screen.getByLabelText('Transaction type')).toBeDisabled()
+    expect(screen.getByLabelText('Start date')).toBeDisabled()
+    expect(screen.getByLabelText('End date')).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Create transaction' })).toBeDisabled()
+    expect(screen.getByText(/Finish or cancel your delet/i)).toBeInTheDocument()
+    expect(document.querySelector('.transaction-filters')).toHaveAttribute(
+      'aria-describedby',
+      'transactions-filters-locked-hint',
+    )
+    const listsBefore = transactionRequests(mock)
+    await user.selectOptions(screen.getByLabelText('Account'), '1')
+    expect(screen.getByLabelText('Account')).toHaveValue('')
+    expect(transactionRequests(mock)).toBe(listsBefore)
+
+    await user.click(screen.getByRole('button', { name: 'Keep transaction' }))
+    expect(await screen.findByRole('button', { name: 'Delete transaction 3' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Account')).toBeEnabled()
+  })
+
+  it.each([
+    ['forbidden', 403],
+    ['missing', 404],
+    ['server error', 500],
+  ])('preserves the confirmation and list with a safe alert on delete %s', async (_label, status) => {
+    const mock = installFetchMock(
+      authenticatedDeleteHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'DELETE') {
+            return jsonResponse({ detail: 'Delete failed.' }, status)
+          }
+          return jsonResponse(serverOrderedTransactions())
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Monthly paycheck')
+
+    const user = userEvent.setup()
+    await openDeleteFor(user, 1)
+    await user.click(await screen.findByRole('button', { name: 'Delete transaction' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Delete failed.')
+    expect(screen.getByRole('button', { name: 'Delete transaction' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Keep transaction' })).toBeEnabled()
+    expect(screen.getByText('Monthly paycheck')).toBeInTheDocument()
+    expect(screen.getAllByRole('listitem').length).toBeGreaterThan(0)
+    expect(calls(mock, '/api/transactions/1/', 'DELETE')).toHaveLength(1)
+    expect(screen.queryByText('Transaction deleted.')).not.toBeInTheDocument()
+  })
+
+  it('preserves the confirmation and list with a safe alert on delete network failure', async () => {
+    const mock = installFetchMock(
+      authenticatedDeleteHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'DELETE') throw new TypeError('Failed to fetch')
+          return jsonResponse(serverOrderedTransactions())
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Monthly paycheck')
+
+    const user = userEvent.setup()
+    await openDeleteFor(user, 1)
+    await user.click(await screen.findByRole('button', { name: 'Delete transaction' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not reach the server.')
+    expect(screen.getByRole('button', { name: 'Delete transaction' })).toBeEnabled()
+    expect(screen.getByText('Monthly paycheck')).toBeInTheDocument()
+    expect(calls(mock, '/api/transactions/1/', 'DELETE')).toHaveLength(1)
+  })
+
+  it('clears only in-memory session and returns to login on delete 401 without logout or storage', async () => {
+    const mock = installFetchMock(
+      authenticatedDeleteHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'DELETE') {
+            return jsonResponse(
+              { detail: 'Authentication credentials were not provided.' },
+              401,
+            )
+          }
+          return jsonResponse(serverOrderedTransactions())
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Monthly paycheck')
+
+    const user = userEvent.setup()
+    await openDeleteFor(user, 1)
+    await user.click(await screen.findByRole('button', { name: 'Delete transaction' }))
+
+    expect(await screen.findByLabelText('Email')).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/login')
+    expect(calls(mock, '/api/transactions/1/', 'DELETE')).toHaveLength(1)
+    expect(
+      mock.mock.calls.some(([input]) =>
+        String(input).includes('/api/auth/logout/'),
+      ),
+    ).toBe(false)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  // Once the transactions screen is gone, the absence of a parent callback is
+  // the only observable claim left for late success/error: the destination
+  // accounts screen must still render correctly with no error escaping.
+  it('late delete success after navigating away leaves the accounts screen intact with no escaped update', async () => {
+    const pending = deferred<Response>()
+    const mock = installFetchMock(
+      authenticatedDeleteHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'DELETE') return pending.promise
+          return jsonResponse(serverOrderedTransactions())
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Monthly paycheck')
+
+    const user = userEvent.setup()
+    await openDeleteFor(user, 1)
+    await user.click(await screen.findByRole('button', { name: 'Delete transaction' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Deleting transaction…')
+
+    const nav = await screen.findByRole('navigation', { name: 'Primary' })
+    await user.click(within(nav).getByRole('link', { name: 'Accounts' }))
+    expect(await screen.findByRole('heading', { name: 'Accounts' })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/accounts')
+    expect(screen.queryByRole('heading', { name: 'Transactions' })).not.toBeInTheDocument()
+
+    await act(async () => {
+      pending.resolve(emptyResponse(204))
+    })
+
+    expect(window.location.pathname).toBe('/accounts')
+    expect(await screen.findByRole('heading', { name: 'Accounts' })).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.queryByText('Transaction deleted.')).not.toBeInTheDocument()
+    expect(calls(mock, '/api/transactions/1/', 'DELETE')).toHaveLength(1)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  // Same observability note as above: with the screen gone, only the intact
+  // destination screen and the absence of an escaped error can be observed.
+  it('late delete error after navigating away leaves the accounts screen intact with no escaped alert', async () => {
+    const pending = deferred<Response>()
+    installFetchMock(
+      authenticatedDeleteHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'DELETE') return pending.promise
+          return jsonResponse(serverOrderedTransactions())
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Monthly paycheck')
+
+    const user = userEvent.setup()
+    await openDeleteFor(user, 1)
+    await user.click(await screen.findByRole('button', { name: 'Delete transaction' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Deleting transaction…')
+
+    const nav = await screen.findByRole('navigation', { name: 'Primary' })
+    await user.click(within(nav).getByRole('link', { name: 'Accounts' }))
+    expect(await screen.findByRole('heading', { name: 'Accounts' })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/accounts')
+
+    await act(async () => {
+      pending.resolve(jsonResponse({ detail: 'Server exploded.' }, 500))
+    })
+
+    expect(window.location.pathname).toBe('/accounts')
+    expect(await screen.findByRole('heading', { name: 'Accounts' })).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.queryByText('Transaction deleted.')).not.toBeInTheDocument()
+  })
+
+  it('late delete 401 after navigating away stays on accounts without logout or storage writes', async () => {
+    const pending = deferred<Response>()
+    const mock = installFetchMock(
+      authenticatedDeleteHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'DELETE') return pending.promise
+          return jsonResponse(serverOrderedTransactions())
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Monthly paycheck')
+
+    const user = userEvent.setup()
+    await openDeleteFor(user, 1)
+    await user.click(await screen.findByRole('button', { name: 'Delete transaction' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Deleting transaction…')
+
+    const nav = await screen.findByRole('navigation', { name: 'Primary' })
+    await user.click(within(nav).getByRole('link', { name: 'Accounts' }))
+    expect(await screen.findByRole('heading', { name: 'Accounts' })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/accounts')
+
+    await act(async () => {
+      pending.resolve(
+        jsonResponse(
+          { detail: 'Authentication credentials were not provided.' },
+          401,
+        ),
+      )
+    })
+
+    expect(window.location.pathname).toBe('/accounts')
+    expect(await screen.findByRole('heading', { name: 'Accounts' })).toBeInTheDocument()
+    expect(screen.queryByLabelText('Email')).not.toBeInTheDocument()
+    expect(
+      mock.mock.calls.some(([input]) =>
+        String(input).includes('/api/auth/logout/'),
+      ),
+    ).toBe(false)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  it('shows the filtered no-matches empty state after deleting the last matching row', async () => {
+    const row = transactionFixture({
+      id: 1,
+      account: 1,
+      category: 2,
+      transaction_type: 'expense',
+      amount: '12.50',
+      date: '2026-09-10',
+      note: 'Groceries',
+    })
+    const mock = installFetchMock(deleteListHandler([row]))
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await user.selectOptions(screen.getByLabelText('Transaction type'), 'expense')
+    await waitFor(() =>
+      expect(calls(mock, '/api/transactions/?transaction_type=expense')).toHaveLength(1),
+    )
+    expect(await screen.findByText('Groceries')).toBeInTheDocument()
+
+    await openDeleteFor(user, 0)
+    await user.click(await screen.findByRole('button', { name: 'Delete transaction' }))
+
+    expect(await screen.findByText('Transaction deleted.')).toBeInTheDocument()
+    expect(
+      screen.getByText('No matches for these filters. Try clearing or changing a filter.'),
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/No transactions yet/)).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Transaction type')).toHaveValue('expense')
+    expect(calls(mock, '/api/transactions/1/', 'DELETE')).toHaveLength(1)
+  })
+
+  it('shows the unfiltered empty state after deleting the last transaction', async () => {
+    const row = transactionFixture({
+      id: 1,
+      account: 1,
+      category: 2,
+      transaction_type: 'expense',
+      amount: '12.50',
+      date: '2026-09-10',
+      note: 'Groceries',
+    })
+    const mock = installFetchMock(deleteListHandler([row]))
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openDeleteFor(user, 0)
+    await user.click(await screen.findByRole('button', { name: 'Delete transaction' }))
+
+    expect(await screen.findByText('Transaction deleted.')).toBeInTheDocument()
+    expect(screen.getByText(/No transactions yet/)).toBeInTheDocument()
+    expect(screen.queryByRole('listitem')).not.toBeInTheDocument()
+    expect(calls(mock, '/api/transactions/1/', 'DELETE')).toHaveLength(1)
+  })
+})
+
+describe('transaction deletion confirmation safety', () => {
+  it('moves focus to the safe Keep action when the confirmation opens', async () => {
+    installFetchMock(deleteListHandler(serverOrderedTransactions()))
+    renderApp('/transactions')
+    await screen.findByText('Monthly paycheck')
+
+    const user = userEvent.setup()
+    await openDeleteFor(user, 0)
+
+    const keep = await screen.findByRole('button', { name: 'Keep transaction' })
+    expect(keep).toHaveFocus()
+    expect(
+      screen.getByRole('button', { name: 'Delete transaction' }),
+    ).not.toHaveFocus()
+  })
+
+  it('places the safe action before the destructive action in document order', async () => {
+    installFetchMock(deleteListHandler(serverOrderedTransactions()))
+    renderApp('/transactions')
+    await screen.findByText('Monthly paycheck')
+
+    const user = userEvent.setup()
+    await openDeleteFor(user, 0)
+
+    const keep = await screen.findByRole('button', { name: 'Keep transaction' })
+    const confirm = screen.getByRole('button', { name: 'Delete transaction' })
+    expect(
+      keep.compareDocumentPosition(confirm) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+  })
+
+  it('gives the destructive action the distinct destructive class while the safe action stays primary', async () => {
+    installFetchMock(deleteListHandler(serverOrderedTransactions()))
+    renderApp('/transactions')
+    await screen.findByText('Monthly paycheck')
+
+    const user = userEvent.setup()
+    await openDeleteFor(user, 0)
+
+    const keep = await screen.findByRole('button', { name: 'Keep transaction' })
+    const confirm = screen.getByRole('button', { name: 'Delete transaction' })
+    expect(confirm.classList.contains('btn-danger')).toBe(true)
+    expect(keep.classList.contains('btn')).toBe(true)
+    expect(keep.classList.contains('btn-danger')).toBe(false)
+  })
+
+  it('labels the confirmation as a group and links the permanence warning to the destructive action', async () => {
+    installFetchMock(deleteListHandler(serverOrderedTransactions()))
+    renderApp('/transactions')
+    await screen.findByText('Monthly paycheck')
+
+    const user = userEvent.setup()
+    await openDeleteFor(user, 0)
+
+    const confirm = await screen.findByRole('button', { name: 'Delete transaction' })
+    const group = await screen.findByRole('group', { name: /delete transaction 3/i })
+    expect(group).toContainElement(confirm)
+    expect(within(group).getByText(/permanent/i)).toBeInTheDocument()
+    const describedBy = confirm.getAttribute('aria-describedby') ?? ''
+    expect(describedBy).not.toBe('')
+    const warning = document.getElementById(describedBy)
+    expect(warning).not.toBeNull()
+    expect(warning).toHaveTextContent(/permanent/i)
+    expect(warning).toHaveTextContent(/cannot be undone/i)
   })
 })
