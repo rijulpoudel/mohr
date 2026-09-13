@@ -4,6 +4,9 @@ const CSRF_COOKIE_NAME = 'csrftoken'
 const NETWORK_ERROR_MESSAGE = 'Could not reach the server.'
 const GENERIC_ERROR_MESSAGE = 'Something went wrong. Please try again.'
 const MALFORMED_ERROR_MESSAGE = 'Unexpected server response.'
+const TIMEOUT_MS = 15_000
+const TIMEOUT_ERROR_MESSAGE =
+  'The server took too long to respond. Please try again.'
 
 export function readCsrfToken(cookieString: string): string | null {
   let token: string | null = null
@@ -56,6 +59,13 @@ async function parseBody(response: Response): Promise<unknown> {
   }
 }
 
+export function decodeNoContent(payload: unknown, status: number): undefined {
+  if (status !== 204 || payload !== null) {
+    throw new ApiError(MALFORMED_ERROR_MESSAGE, status, null, {})
+  }
+  return undefined
+}
+
 export async function apiFetch<T = unknown>(
   path: string,
   options: RequestInit = {},
@@ -67,34 +77,78 @@ export async function apiFetch<T = unknown>(
     requestHeaders.set('Content-Type', 'application/json')
   }
 
-  let response: Response
-  try {
-    response = await fetch(path, {
-      method,
-      credentials: 'include',
-      headers: requestHeaders,
-      body,
-    })
-  } catch {
-    throw new ApiError(NETWORK_ERROR_MESSAGE, null, null, {})
+  const controller = new AbortController()
+  const { signal } = options
+  let rejectCancellation: (error: ApiError) => void = () => {}
+  const cancellation = new Promise<never>((_resolve, reject) => {
+    rejectCancellation = reject
+  })
+  const forwardAbort = () => {
+    controller.abort()
+    rejectCancellation(new ApiError(NETWORK_ERROR_MESSAGE, null, null, {}))
   }
-
-  if (response.status === 204) return null as T
-
-  const responseBody = await parseBody(response)
-  if (response.ok) {
-    if (responseBody === null) {
-      throw new ApiError(MALFORMED_ERROR_MESSAGE, response.status, null, {})
+  if (signal != null) {
+    if (signal.aborted) {
+      forwardAbort()
+    } else {
+      signal.addEventListener('abort', forwardAbort, { once: true })
     }
-    return decode !== undefined
-      ? decode(responseBody, response.status)
-      : (responseBody as T)
   }
 
-  throw new ApiError(
-    GENERIC_ERROR_MESSAGE,
-    response.status,
-    toDetail(responseBody),
-    toFieldErrors(responseBody),
-  )
+  const request = (async (): Promise<T> => {
+    let response: Response
+    try {
+      response = await fetch(path, {
+        method,
+        credentials: 'include',
+        headers: requestHeaders,
+        body,
+        signal: controller.signal,
+      })
+    } catch {
+      throw new ApiError(NETWORK_ERROR_MESSAGE, null, null, {})
+    }
+
+    let responseBody: unknown
+    try {
+      responseBody = await parseBody(response)
+    } catch {
+      throw new ApiError(NETWORK_ERROR_MESSAGE, null, null, {})
+    }
+
+    if (response.ok) {
+      if (decode !== undefined) {
+        return decode(responseBody, response.status)
+      }
+      if (responseBody === null) {
+        if (response.status === 204) return undefined as T
+        throw new ApiError(MALFORMED_ERROR_MESSAGE, response.status, null, {})
+      }
+      return responseBody as T
+    }
+
+    throw new ApiError(
+      GENERIC_ERROR_MESSAGE,
+      response.status,
+      toDetail(responseBody),
+      toFieldErrors(responseBody),
+    )
+  })()
+
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort()
+      reject(new ApiError(TIMEOUT_ERROR_MESSAGE, null, null, {}))
+    }, TIMEOUT_MS)
+  })
+
+  try {
+    return await Promise.race([request, deadline, cancellation])
+  } finally {
+    clearTimeout(timer)
+    if (signal != null) {
+      signal.removeEventListener('abort', forwardAbort)
+    }
+  }
 }

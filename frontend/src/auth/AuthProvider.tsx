@@ -62,6 +62,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setStatus('unauthenticated')
   }, [])
 
+  const clearSession = useCallback(() => {
+    setUser(null)
+    setStatus('unauthenticated')
+  }, [])
+
   const value = useMemo<AuthContextValue>(
     () => ({
       status,
@@ -70,9 +75,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       login,
       register,
       logout,
+      clearSession,
       retryRestore,
     }),
-    [status, user, restoreError, login, register, logout, retryRestore],
+    [
+      status,
+      user,
+      restoreError,
+      login,
+      register,
+      logout,
+      clearSession,
+      retryRestore,
+    ],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

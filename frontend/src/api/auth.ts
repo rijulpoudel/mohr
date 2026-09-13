@@ -1,4 +1,4 @@
-import { apiFetch, readCsrfToken } from './client'
+import { apiFetch, decodeNoContent, readCsrfToken } from './client'
 import { ApiError, parseUser, type User } from './types'
 
 const MISSING_CSRF_MESSAGE = 'Missing CSRF token.'
@@ -63,8 +63,12 @@ export async function registerRequest(
 
 export async function logoutRequest(): Promise<void> {
   const token = await getCsrfToken()
-  await apiFetch('/api/auth/logout/', {
-    method: 'POST',
-    headers: { 'X-CSRFToken': token },
-  })
+  await apiFetch(
+    '/api/auth/logout/',
+    {
+      method: 'POST',
+      headers: { 'X-CSRFToken': token },
+    },
+    decodeNoContent,
+  )
 }
