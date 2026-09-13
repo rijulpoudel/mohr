@@ -5,7 +5,8 @@ export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
-      '/api': 'http://127.0.0.1:8000',
+      // Keep the browser Host so Django accepts the csrftoken origin during local dev.
+      '/api': { target: 'http://127.0.0.1:8000', changeOrigin: false },
     },
   },
   test: {
