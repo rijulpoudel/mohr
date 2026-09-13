@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import {
   createBudget,
+  deleteBudget,
   fetchBudgets,
   resetBudgetsRequest,
   updateBudget,
@@ -30,6 +31,8 @@ const NO_ACTIVE_CATEGORIES_MESSAGE =
   'Create an active expense category before adding budgets.'
 const EDIT_LOCKED_HINT =
   'Finish or cancel your edit before creating another budget.'
+const DELETE_LOCKED_HINT =
+  'Finish or cancel your deletion before creating another budget.'
 const REFRESH_AFTER_SAVE_MESSAGE =
   'Your budget change was saved, but the current budget list could not be refreshed. Try again.'
 
@@ -140,12 +143,16 @@ function BudgetItem({
   budget,
   categoryName,
   editDisabled,
+  deleteDisabled,
   onEdit,
+  onDelete,
 }: {
   budget: Budget
   categoryName: string | undefined
   editDisabled: boolean
+  deleteDisabled: boolean
   onEdit: () => void
+  onDelete: () => void
 }) {
   const overspent = isOverspent(budget.remaining)
   return (
@@ -185,6 +192,134 @@ function BudgetItem({
         >
           Edit
         </button>
+        <button
+          type="button"
+          className="btn-delete"
+          aria-label={`Delete budget ${budget.id}`}
+          onClick={onDelete}
+          disabled={deleteDisabled}
+        >
+          Delete
+        </button>
+      </div>
+    </li>
+  )
+}
+
+function DeleteBudgetConfirm({
+  budget,
+  categoryName,
+  onCancel,
+  onDeleted,
+  onPendingChange,
+}: {
+  budget: Budget
+  categoryName: string | undefined
+  onCancel: () => void
+  onDeleted: (id: number) => void
+  onPendingChange: (pending: boolean) => void
+}) {
+  const { clearSession } = useAuth()
+  const [pending, setPending] = useState(false)
+  const [submitError, setSubmitError] = useState<string | null>(null)
+  const mountedRef = useRef(true)
+  const submittingRef = useRef(false)
+  const keepRef = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    mountedRef.current = true
+    keepRef.current?.focus()
+    return () => {
+      mountedRef.current = false
+      onPendingChange(false)
+    }
+  }, [onPendingChange])
+
+  async function handleConfirm() {
+    if (submittingRef.current) return
+    if (pending) return
+    setSubmitError(null)
+    submittingRef.current = true
+    setPending(true)
+    onPendingChange(true)
+    try {
+      await deleteBudget(budget.id)
+      if (mountedRef.current) {
+        onDeleted(budget.id)
+      }
+    } catch (caught) {
+      if (!mountedRef.current) return
+      if (caught instanceof ApiError && caught.status === 401) {
+        clearSession()
+        return
+      }
+      if (caught instanceof ApiError) {
+        setSubmitError(userMessage(caught))
+        return
+      }
+      setSubmitError(GENERIC_ERROR_MESSAGE)
+    } finally {
+      if (mountedRef.current) {
+        submittingRef.current = false
+        setPending(false)
+        onPendingChange(false)
+      }
+    }
+  }
+
+  const permanenceId = `delete-budget-permanence-${budget.id}`
+
+  return (
+    <li className="budget-item budget-delete">
+      {pending && (
+        <p role="status" className="notice">
+          Deleting budget…
+        </p>
+      )}
+      {submitError !== null && (
+        <div className="error-summary" role="alert">
+          {submitError}
+        </div>
+      )}
+      <div role="group" aria-label={`Delete budget ${budget.id} confirmation`}>
+        <div className="budget-main">
+          <time dateTime={budget.month} className="budget-month">
+            {formatMonthLabel(budget.month)}
+          </time>
+          {categoryName !== undefined && (
+            <span className="budget-category">{categoryName}</span>
+          )}
+        </div>
+        <dl className="budget-amounts">
+          <div className="budget-amount">
+            <dt>Budgeted</dt>
+            <dd>{formatMoney(budget.budgeted)}</dd>
+          </div>
+        </dl>
+        <p id={permanenceId}>
+          Deleting is permanent and cannot be undone. It does not delete the
+          category or any transactions.
+        </p>
+        <div className="budget-delete-actions">
+          <button
+            type="button"
+            className="btn"
+            ref={keepRef}
+            onClick={onCancel}
+            disabled={pending}
+          >
+            Keep budget
+          </button>
+          <button
+            type="button"
+            className="btn btn-danger"
+            onClick={handleConfirm}
+            disabled={pending}
+            aria-describedby={permanenceId}
+          >
+            Delete budget
+          </button>
+        </div>
       </div>
     </li>
   )
@@ -458,14 +593,18 @@ function CreateBudgetForm({
   categories,
   created,
   submitLocked,
+  deleteLocked,
   onCreateStart,
   onCreated,
+  onPendingChange,
 }: {
   categories: Category[]
   created: boolean
   submitLocked: boolean
+  deleteLocked: boolean
   onCreateStart: () => void
   onCreated: () => void
+  onPendingChange: (pending: boolean) => void
 }) {
   const { clearSession } = useAuth()
   const [category, setCategory] = useState('')
@@ -481,8 +620,9 @@ function CreateBudgetForm({
     mountedRef.current = true
     return () => {
       mountedRef.current = false
+      onPendingChange(false)
     }
-  }, [])
+  }, [onPendingChange])
 
   function clearCreateFieldError(field: string): void {
     setFieldErrors((current) => {
@@ -519,6 +659,7 @@ function CreateBudgetForm({
     setFieldErrors(null)
     submittingRef.current = true
     setPending(true)
+    onPendingChange(true)
     try {
       await createBudget({
         category: Number(category),
@@ -560,6 +701,7 @@ function CreateBudgetForm({
       if (mountedRef.current) {
         submittingRef.current = false
         setPending(false)
+        onPendingChange(false)
       }
     }
   }
@@ -583,7 +725,7 @@ function CreateBudgetForm({
       <h3 id="budget-create-heading">Add budget</h3>
       {submitLocked && (
         <p id="budget-create-locked-hint" className="notice">
-          {EDIT_LOCKED_HINT}
+          {deleteLocked ? DELETE_LOCKED_HINT : EDIT_LOCKED_HINT}
         </p>
       )}
       {created && (
@@ -712,14 +854,21 @@ export function BudgetsScreen() {
   const [categories, setCategories] = useState<Category[]>([])
   const [createdNotice, setCreatedNotice] = useState(false)
   const [updateNotice, setUpdateNotice] = useState(false)
+  const [deletedNotice, setDeletedNotice] = useState(false)
   const [editingId, setEditingId] = useState<number | null>(null)
   const [editPending, setEditPending] = useState(false)
+  const [deletingId, setDeletingId] = useState<number | null>(null)
+  const [deletePending, setDeletePending] = useState(false)
+  const [createPending, setCreatePending] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const metaPromiseRef = useRef<Promise<Category[]> | null>(null)
   const requestSeqRef = useRef(0)
   const mutationSeqRef = useRef<number | null>(null)
   const stateRef = useRef<BudgetsState>({ status: 'loading' })
-  type ReturnFocusTarget = { kind: 'edit'; id: number } | { kind: 'heading' }
+  type ReturnFocusTarget =
+    | { kind: 'edit'; id: number }
+    | { kind: 'delete'; id: number }
+    | { kind: 'heading' }
   const returnFocusRef = useRef<ReturnFocusTarget | null>(null)
   const headingRef = useRef<HTMLHeadingElement>(null)
 
@@ -729,6 +878,7 @@ export function BudgetsScreen() {
 
   useEffect(() => {
     if (editingId !== null) return
+    if (deletingId !== null) return
     if (refreshing) return
     if (returnFocusRef.current === null) return
     const target = returnFocusRef.current
@@ -737,15 +887,17 @@ export function BudgetsScreen() {
       headingRef.current?.focus()
       return
     }
-    const element = document.querySelector(
-      `[aria-label="Edit budget ${target.id}"]`,
-    )
+    const label =
+      target.kind === 'edit'
+        ? `Edit budget ${target.id}`
+        : `Delete budget ${target.id}`
+    const element = document.querySelector(`[aria-label="${label}"]`)
     if (element instanceof HTMLElement) {
       element.focus()
     } else {
       headingRef.current?.focus()
     }
-  }, [editingId, refreshing, state])
+  }, [editingId, deletingId, refreshing, state])
 
   useEffect(() => {
     let cancelled = false
@@ -780,6 +932,7 @@ export function BudgetsScreen() {
         }
         setCreatedNotice(false)
         setUpdateNotice(false)
+        setDeletedNotice(false)
         if (error instanceof ApiError && error.status === 401) {
           if (mutationSeqRef.current === seq) {
             mutationSeqRef.current = null
@@ -810,6 +963,7 @@ export function BudgetsScreen() {
   const handleRetry = useCallback(() => {
     setCreatedNotice(false)
     setUpdateNotice(false)
+    setDeletedNotice(false)
     mutationSeqRef.current = null
     if (stateRef.current.status === 'ready') {
       setRefreshing(true)
@@ -822,11 +976,17 @@ export function BudgetsScreen() {
   const handleCreateStart = useCallback(() => {
     setCreatedNotice(false)
     setUpdateNotice(false)
+    setDeletedNotice(false)
+  }, [])
+
+  const handleCreatePendingChange = useCallback((pending: boolean) => {
+    setCreatePending(pending)
   }, [])
 
   const handleBudgetCreated = useCallback(() => {
     setCreatedNotice(true)
     setUpdateNotice(false)
+    setDeletedNotice(false)
     if (stateRef.current.status === 'ready') {
       setRefreshing(true)
     }
@@ -837,7 +997,9 @@ export function BudgetsScreen() {
   }, [])
 
   const handleEditOpen = useCallback((id: number) => {
+    setCreatedNotice(false)
     setUpdateNotice(false)
+    setDeletedNotice(false)
     setEditingId(id)
   }, [])
 
@@ -857,6 +1019,7 @@ export function BudgetsScreen() {
     returnFocusRef.current = { kind: 'edit', id: updated.id }
     setCreatedNotice(false)
     setUpdateNotice(true)
+    setDeletedNotice(false)
     if (stateRef.current.status === 'ready') {
       setRefreshing(true)
     }
@@ -866,10 +1029,49 @@ export function BudgetsScreen() {
     setAttempt((current) => current + 1)
   }, [])
 
+  const handleDeleteOpen = useCallback((id: number) => {
+    setCreatedNotice(false)
+    setUpdateNotice(false)
+    setDeletedNotice(false)
+    setDeletingId(id)
+  }, [])
+
+  const handleDeleteCancel = useCallback((id: number) => {
+    returnFocusRef.current = { kind: 'delete', id }
+    setDeletingId(null)
+    setDeletePending(false)
+  }, [])
+
+  const handleDeletePendingChange = useCallback((pending: boolean) => {
+    setDeletePending(pending)
+  }, [])
+
+  const handleDeleteDeleted = useCallback((id: number) => {
+    setState((current) => {
+      if (current.status !== 'ready') return current
+      return {
+        status: 'ready',
+        budgets: current.budgets.filter((item) => item.id !== id),
+      }
+    })
+    setDeletingId(null)
+    setDeletePending(false)
+    returnFocusRef.current = { kind: 'heading' }
+    setCreatedNotice(false)
+    setUpdateNotice(false)
+    setDeletedNotice(true)
+  }, [])
+
   const categoryById = new Map(
     categories.map((category) => [category.id, category]),
   )
-  const rowLocked = editPending || refreshing || editingId !== null
+  const rowLocked =
+    editPending ||
+    deletePending ||
+    createPending ||
+    refreshing ||
+    editingId !== null ||
+    deletingId !== null
 
   return (
     <div className="screen">
@@ -879,13 +1081,25 @@ export function BudgetsScreen() {
       <CreateBudgetForm
         categories={categories}
         created={createdNotice}
-        submitLocked={editingId !== null || editPending}
+        submitLocked={
+          editingId !== null ||
+          editPending ||
+          deletingId !== null ||
+          deletePending
+        }
+        deleteLocked={deletingId !== null || deletePending}
         onCreateStart={handleCreateStart}
         onCreated={handleBudgetCreated}
+        onPendingChange={handleCreatePendingChange}
       />
       {updateNotice && state.status !== 'error' && (
         <p role="status" className="notice">
           Budget updated.
+        </p>
+      )}
+      {deletedNotice && state.status !== 'error' && (
+        <p role="status" className="notice">
+          Budget deleted.
         </p>
       )}
       {state.status === 'loading' && <p role="status">Loading your budgets…</p>}
@@ -917,13 +1131,24 @@ export function BudgetsScreen() {
                   onUpdated={handleEditUpdated}
                   onPendingChange={handleEditPendingChange}
                 />
+              ) : deletingId === budget.id ? (
+                <DeleteBudgetConfirm
+                  key={budget.id}
+                  budget={budget}
+                  categoryName={categoryById.get(budget.category)?.name}
+                  onCancel={() => handleDeleteCancel(budget.id)}
+                  onDeleted={handleDeleteDeleted}
+                  onPendingChange={handleDeletePendingChange}
+                />
               ) : (
                 <BudgetItem
                   key={budget.id}
                   budget={budget}
                   categoryName={categoryById.get(budget.category)?.name}
                   editDisabled={rowLocked}
+                  deleteDisabled={rowLocked}
                   onEdit={() => handleEditOpen(budget.id)}
+                  onDelete={() => handleDeleteOpen(budget.id)}
                 />
               ),
             )}

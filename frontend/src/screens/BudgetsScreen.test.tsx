@@ -7,6 +7,7 @@ import {
   CSRF_TOKEN,
   calls,
   deferred,
+  emptyResponse,
   installFetchMock,
   jsonResponse,
   renderApp,
@@ -2255,5 +2256,856 @@ describe('budget edit success and refresh', () => {
     await waitFor(() =>
       expect(screen.getByRole('heading', { name: 'Budgets' })).toHaveFocus(),
     )
+  })
+})
+
+describe('budget permanent deletion', () => {
+  function deleteList() {
+    return [
+      budgetFixture({
+        id: 10,
+        category: 2,
+        month: '2026-09-01',
+        budgeted: '300.00',
+        spent: '125.50',
+        remaining: '174.50',
+      }),
+      budgetFixture({
+        id: 20,
+        category: 4,
+        month: '2026-08-01',
+        budgeted: '9999999999.99',
+        spent: '0.00',
+        remaining: '9999999999.99',
+      }),
+    ]
+  }
+
+  it('offers a Delete control on every row including archived-linked rows with zero network on open', async () => {
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler(() => jsonResponse(deleteList()), {
+        categories: categoriesWithArchived(),
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+
+    expect(
+      screen.getByRole('button', { name: 'Delete budget 10' }),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Delete budget 20' }),
+    ).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    expect(
+      await screen.findByRole('button', { name: 'Keep budget' }),
+    ).toBeInTheDocument()
+    expect(calls(mock, '/api/budgets/10/', 'DELETE')).toHaveLength(0)
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(0)
+  })
+
+  it('opens a two-step confirmation naming month, category, and budgeted with permanence and scope', async () => {
+    installFetchMock(
+      authenticatedBudgetsHandler(() => jsonResponse(deleteList()), {
+        categories: categoriesWithArchived(),
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+
+    const confirm = await screen.findByRole('button', {
+      name: 'Delete budget',
+    })
+    expect(confirm).toBeInTheDocument()
+    const group = await screen.findByRole('group', {
+      name: 'Delete budget 10 confirmation',
+    })
+    expect(group).toContainElement(confirm)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(within(group).getByText('September 2026')).toBeInTheDocument()
+    expect(within(group).getByText('Food')).toBeInTheDocument()
+    expect(within(group).getByText('$300.00')).toBeInTheDocument()
+    expect(within(group).getByText(/permanent/i)).toBeInTheDocument()
+    expect(within(group).getByText(/cannot be undone/i)).toBeInTheDocument()
+    const scopeText = (group.textContent ?? '').toLowerCase()
+    expect(scopeText).toMatch(/does not delete the category/)
+    expect(scopeText).toMatch(/transactions/)
+  })
+
+  it('names an archived-category row with its resolved archived name', async () => {
+    installFetchMock(
+      authenticatedBudgetsHandler(() => jsonResponse(deleteList()), {
+        categories: categoriesWithArchived(),
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('August 2026')
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Delete budget 20' }))
+
+    const group = await screen.findByRole('group', {
+      name: 'Delete budget 20 confirmation',
+    })
+    expect(within(group).getByText('August 2026')).toBeInTheDocument()
+    expect(within(group).getByText('Old Hobby')).toBeInTheDocument()
+    expect(within(group).getByText('$9,999,999,999.99')).toBeInTheDocument()
+  })
+
+  it('moves focus to safe Keep budget and keeps it before destructive Delete budget', async () => {
+    installFetchMock(
+      authenticatedBudgetsHandler(() => jsonResponse(deleteList()), {
+        categories: categoriesWithArchived(),
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+
+    const keep = await screen.findByRole('button', { name: 'Keep budget' })
+    const confirm = screen.getByRole('button', { name: 'Delete budget' })
+    expect(keep).toHaveFocus()
+    expect(confirm).not.toHaveFocus()
+    expect(
+      keep.compareDocumentPosition(confirm) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+  })
+
+  it('styles safe primary and destructive outline with permanence aria linkage', async () => {
+    installFetchMock(
+      authenticatedBudgetsHandler(() => jsonResponse(deleteList()), {
+        categories: categoriesWithArchived(),
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+
+    const keep = await screen.findByRole('button', { name: 'Keep budget' })
+    const confirm = screen.getByRole('button', { name: 'Delete budget' })
+    expect(keep.classList.contains('btn')).toBe(true)
+    expect(keep.classList.contains('btn-danger')).toBe(false)
+    expect(confirm.classList.contains('btn-danger')).toBe(true)
+    const describedBy = confirm.getAttribute('aria-describedby') ?? ''
+    expect(describedBy).not.toBe('')
+    const warning = document.getElementById(describedBy)
+    expect(warning).not.toBeNull()
+    expect(warning).toHaveTextContent(/permanent/i)
+    expect(warning).toHaveTextContent(/cannot be undone/i)
+  })
+
+  it('cancel sends no request and returns focus to that row Delete button', async () => {
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler(() => jsonResponse(deleteList()), {
+        categories: categoriesWithArchived(),
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    expect(
+      await screen.findByRole('button', { name: 'Keep budget' }),
+    ).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Keep budget' }))
+
+    expect(screen.queryByRole('button', { name: 'Keep budget' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Delete budget' })).not.toBeInTheDocument()
+    expect(await screen.findByText('September 2026')).toBeInTheDocument()
+    expect(calls(mock, '/api/budgets/10/', 'DELETE')).toHaveLength(0)
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(0)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+    expect(
+      screen.getByRole('button', { name: 'Delete budget 10' }),
+    ).toHaveFocus()
+  })
+
+  it('sends exactly one DELETE to the budget detail URL with CSRF ordering and header', async () => {
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'DELETE') {
+          return emptyResponse(204)
+        }
+        return jsonResponse(deleteList())
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await user.click(await screen.findByRole('button', { name: 'Delete budget' }))
+
+    await waitFor(() =>
+      expect(calls(mock, '/api/budgets/10/', 'DELETE')).toHaveLength(1),
+    )
+    const [input, init] = calls(mock, '/api/budgets/10/', 'DELETE')[0]
+    expect(String(input)).toBe('/api/budgets/10/')
+    expect(init?.method).toBe('DELETE')
+    const headers = init?.headers as Headers
+    expect(headers.get('X-CSRFToken')).toBe(CSRF_TOKEN)
+    const log = requestLog(mock)
+    expect(log.indexOf('GET /api/auth/csrf/')).toBeGreaterThanOrEqual(0)
+    expect(log.indexOf('GET /api/auth/csrf/')).toBeLessThan(
+      log.indexOf('DELETE /api/budgets/10/'),
+    )
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(1)
+  })
+
+  it('pending announces Deleting budget, disables confirm and cancel, and dedups same-tick double confirm', async () => {
+    const pending = deferred<Response>()
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'DELETE') {
+          return pending.promise
+        }
+        return jsonResponse(deleteList())
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    const confirm = await screen.findByRole('button', { name: 'Delete budget' })
+    await act(async () => {
+      fireEvent.click(confirm)
+      fireEvent.click(confirm)
+    })
+
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Deleting budget…',
+    )
+    expect(screen.getByRole('button', { name: 'Delete budget' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Keep budget' })).toBeDisabled()
+    expect(calls(mock, '/api/budgets/10/', 'DELETE')).toHaveLength(1)
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(1)
+
+    await act(async () => {
+      pending.resolve(emptyResponse(204))
+    })
+    expect(await screen.findByText('Budget deleted.')).toBeInTheDocument()
+    expect(calls(mock, '/api/budgets/10/', 'DELETE')).toHaveLength(1)
+  })
+
+  it('locks edits, other deletes, and create while a delete confirmation is open', async () => {
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler(() => jsonResponse(deleteList()), {
+        categories: categoriesWithArchived(),
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await screen.findByRole('button', { name: 'Keep budget' })
+
+    expect(screen.getByRole('button', { name: 'Edit budget 20' })).toBeDisabled()
+    expect(
+      screen.queryByRole('button', { name: 'Edit budget 10' }),
+    ).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Delete budget 20' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Create budget' })).toBeDisabled()
+    expect(
+      screen.getByText(/finish or cancel your deletion/i),
+    ).toBeInTheDocument()
+
+    const listsBefore = calls(mock, '/api/budgets/').length
+    const form = screen
+      .getByRole('button', { name: 'Create budget' })
+      .closest('form') as HTMLFormElement
+    await act(async () => {
+      fireEvent.submit(form)
+    })
+    expect(calls(mock, '/api/budgets/', 'POST')).toHaveLength(0)
+    expect(calls(mock, '/api/budgets/')).toHaveLength(listsBefore)
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(0)
+  })
+
+  it('disables every Delete control while an editor is open', async () => {
+    installFetchMock(
+      authenticatedBudgetsHandler(() => jsonResponse(deleteList()), {
+        categories: categoriesWithArchived(),
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+
+    expect(screen.getByRole('button', { name: 'Delete budget 20' })).toBeDisabled()
+    expect(
+      screen.queryByRole('button', { name: 'Delete budget 10' }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('disables all row actions while the authoritative refresh is pending', async () => {
+    const refreshGate = deferred<Response>()
+    let getCalls = 0
+    installFetchMock(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'PATCH') {
+          return jsonResponse(budgetFixture({ id: 10, month: '2026-10-01' }))
+        }
+        if (url === '/api/budgets/' && (init?.method ?? 'GET') === 'GET') {
+          getCalls += 1
+          if (getCalls === 1) return jsonResponse(deleteList())
+          return refreshGate.promise
+        }
+        return jsonResponse({}, 404)
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    fireEvent.change(screen.getByLabelText('Edit budget month'), {
+      target: { value: '2026-10' },
+    })
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByText('Updating budgets…')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Delete budget 10' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Delete budget 20' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Edit budget 10' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Edit budget 20' })).toBeDisabled()
+
+    await act(async () => {
+      refreshGate.resolve(jsonResponse(deleteList()))
+    })
+  })
+
+  it('success removes only the target in place with zero refetch, keeps server order, announces, and focuses heading', async () => {
+    const ordered = [
+      budgetFixture({
+        id: 30,
+        category: 3,
+        month: '2026-10-01',
+        budgeted: '150.00',
+        spent: '20.00',
+        remaining: '130.00',
+      }),
+      budgetFixture({
+        id: 10,
+        category: 2,
+        month: '2026-09-01',
+        budgeted: '300.00',
+        spent: '125.50',
+        remaining: '174.50',
+      }),
+      budgetFixture({
+        id: 20,
+        category: 4,
+        month: '2026-08-01',
+        budgeted: '9999999999.99',
+        spent: '0.00',
+        remaining: '9999999999.99',
+      }),
+    ]
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'DELETE') {
+          return emptyResponse(204)
+        }
+        return jsonResponse(ordered)
+      }, { categories: categoriesWithArchived() }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+    const listsBefore = calls(mock, '/api/budgets/').length
+    const categoriesBefore = calls(mock, '/api/categories/').length
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await user.click(await screen.findByRole('button', { name: 'Delete budget' }))
+
+    expect(await screen.findByText('Budget deleted.')).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Budget deleted.')
+    expect(screen.queryByText('September 2026')).not.toBeInTheDocument()
+    expect(screen.getByText('October 2026')).toBeInTheDocument()
+    expect(screen.getByText('August 2026')).toBeInTheDocument()
+    const items = await screen.findAllByRole('listitem')
+    expect(items).toHaveLength(2)
+    expect(within(items[0]).getByText('October 2026')).toBeInTheDocument()
+    expect(within(items[1]).getByText('August 2026')).toBeInTheDocument()
+    expect(calls(mock, '/api/budgets/')).toHaveLength(listsBefore)
+    expect(calls(mock, '/api/categories/')).toHaveLength(categoriesBefore)
+    expect(calls(mock, '/api/budgets/10/', 'DELETE')).toHaveLength(1)
+    expect(screen.getByRole('heading', { name: 'Budgets' })).toHaveFocus()
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  it('shows the empty state after deleting the last budget', async () => {
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'DELETE') {
+          return emptyResponse(204)
+        }
+        return jsonResponse([
+          budgetFixture({ id: 10, category: 2, month: '2026-09-01', budgeted: '300.00' }),
+        ])
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await user.click(await screen.findByRole('button', { name: 'Delete budget' }))
+
+    expect(await screen.findByText('Budget deleted.')).toBeInTheDocument()
+    expect(screen.getByText(/no budgets exist yet/i)).toBeInTheDocument()
+    expect(screen.queryByRole('listitem')).not.toBeInTheDocument()
+    expect(calls(mock, '/api/budgets/10/', 'DELETE')).toHaveLength(1)
+  })
+
+  it('clears a stale updated notice when opening a deletion', async () => {
+    let getCalls = 0
+    let resolveRefresh!: (value: Response) => void
+    const refreshGate = new Promise<Response>((resolve) => {
+      resolveRefresh = resolve
+    })
+    installFetchMock(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'PATCH') {
+          return jsonResponse(budgetFixture({ id: 10, month: '2026-10-01' }))
+        }
+        if (url === '/api/budgets/' && (init?.method ?? 'GET') === 'GET') {
+          getCalls += 1
+          if (getCalls === 1) return jsonResponse(deleteList())
+          if (getCalls === 2) return refreshGate
+          return jsonResponse(deleteList())
+        }
+        return jsonResponse({}, 404)
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    fireEvent.change(screen.getByLabelText('Edit budget month'), {
+      target: { value: '2026-10' },
+    })
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    expect(await screen.findByText('Budget updated.')).toBeInTheDocument()
+    await act(async () => {
+      resolveRefresh(jsonResponse(deleteList()))
+    })
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Delete budget 10' })).toBeEnabled(),
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    expect(await screen.findByRole('button', { name: 'Keep budget' })).toBeInTheDocument()
+    expect(screen.queryByText('Budget updated.')).not.toBeInTheDocument()
+  })
+
+  it.each([
+    ['forbidden', 403, { detail: 'No permission here.' }, 'No permission here.'],
+    ['missing', 404, { detail: 'Not found.' }, 'Not found.'],
+    ['server error', 500, { detail: 'Server exploded.' }, 'Server exploded.'],
+  ])('keeps confirmation and list with a safe alert on delete %s', async (_label, status, body, message) => {
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'DELETE') {
+          return jsonResponse(body, status)
+        }
+        return jsonResponse(deleteList())
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await user.click(await screen.findByRole('button', { name: 'Delete budget' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(message)
+    expect(screen.getByRole('button', { name: 'Delete budget' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Keep budget' })).toBeEnabled()
+    expect(screen.getByText('September 2026')).toBeInTheDocument()
+    expect(screen.getByText('August 2026')).toBeInTheDocument()
+    expect(calls(mock, '/api/budgets/10/', 'DELETE')).toHaveLength(1)
+    expect(screen.queryByText('Budget deleted.')).not.toBeInTheDocument()
+  })
+
+  it('keeps confirmation and list with a safe alert on delete network failure', async () => {
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'DELETE') {
+          throw new TypeError('Failed to fetch')
+        }
+        return jsonResponse(deleteList())
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await user.click(await screen.findByRole('button', { name: 'Delete budget' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Could not reach the server.',
+    )
+    expect(screen.getByRole('button', { name: 'Delete budget' })).toBeEnabled()
+    expect(screen.getByText('September 2026')).toBeInTheDocument()
+    expect(calls(mock, '/api/budgets/10/', 'DELETE')).toHaveLength(1)
+  })
+
+  it('clears only in-memory session and returns to login on delete 401 without logout or storage', async () => {
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'DELETE') {
+          return jsonResponse(
+            { detail: 'Authentication credentials were not provided.' },
+            401,
+          )
+        }
+        return jsonResponse(deleteList())
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await user.click(await screen.findByRole('button', { name: 'Delete budget' }))
+
+    expect(await screen.findByLabelText('Email')).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/login')
+    expect(calls(mock, '/api/budgets/10/', 'DELETE')).toHaveLength(1)
+    expect(
+      mock.mock.calls.some(([input]) =>
+        String(input).includes('/api/auth/logout/'),
+      ),
+    ).toBe(false)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  // With the budgets screen gone, only the intact destination screen and the
+  // absence of an escaped error can be honestly observed.
+  it('late delete success after navigating away leaves accounts intact with no escaped notice', async () => {
+    const pending = deferred<Response>()
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'DELETE') {
+          return pending.promise
+        }
+        return jsonResponse(deleteList())
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await user.click(await screen.findByRole('button', { name: 'Delete budget' }))
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Deleting budget…',
+    )
+
+    const nav = await screen.findByRole('navigation', { name: 'Primary' })
+    await user.click(within(nav).getByRole('link', { name: 'Accounts' }))
+    expect(await screen.findByRole('heading', { name: 'Accounts' })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/accounts')
+    expect(screen.queryByRole('heading', { name: 'Budgets' })).not.toBeInTheDocument()
+
+    await act(async () => {
+      pending.resolve(emptyResponse(204))
+    })
+
+    expect(window.location.pathname).toBe('/accounts')
+    expect(await screen.findByRole('heading', { name: 'Accounts' })).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.queryByText('Budget deleted.')).not.toBeInTheDocument()
+    expect(calls(mock, '/api/budgets/10/', 'DELETE')).toHaveLength(1)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  // Same observability note as above: with the screen gone, only the intact
+  // destination screen and the absence of an escaped error can be observed.
+  it('late delete error after navigating away leaves accounts intact with no escaped alert', async () => {
+    const pending = deferred<Response>()
+    installFetchMock(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'DELETE') {
+          return pending.promise
+        }
+        return jsonResponse(deleteList())
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await user.click(await screen.findByRole('button', { name: 'Delete budget' }))
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Deleting budget…',
+    )
+
+    const nav = await screen.findByRole('navigation', { name: 'Primary' })
+    await user.click(within(nav).getByRole('link', { name: 'Accounts' }))
+    expect(await screen.findByRole('heading', { name: 'Accounts' })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/accounts')
+
+    await act(async () => {
+      pending.resolve(jsonResponse({ detail: 'Server exploded.' }, 500))
+    })
+
+    expect(window.location.pathname).toBe('/accounts')
+    expect(await screen.findByRole('heading', { name: 'Accounts' })).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.queryByText('Budget deleted.')).not.toBeInTheDocument()
+  })
+
+  it('late delete 401 after navigating away stays on accounts without logout or storage writes', async () => {
+    const pending = deferred<Response>()
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'DELETE') {
+          return pending.promise
+        }
+        return jsonResponse(deleteList())
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await user.click(await screen.findByRole('button', { name: 'Delete budget' }))
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Deleting budget…',
+    )
+
+    const nav = await screen.findByRole('navigation', { name: 'Primary' })
+    await user.click(within(nav).getByRole('link', { name: 'Accounts' }))
+    expect(await screen.findByRole('heading', { name: 'Accounts' })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/accounts')
+
+    await act(async () => {
+      pending.resolve(
+        jsonResponse(
+          { detail: 'Authentication credentials were not provided.' },
+          401,
+        ),
+      )
+    })
+
+    expect(window.location.pathname).toBe('/accounts')
+    expect(await screen.findByRole('heading', { name: 'Accounts' })).toBeInTheDocument()
+    expect(screen.queryByLabelText('Email')).not.toBeInTheDocument()
+    expect(
+      mock.mock.calls.some(([input]) =>
+        String(input).includes('/api/auth/logout/'),
+      ),
+    ).toBe(false)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  it('disables every row action while a create POST is in flight and re-enables after the refresh settles', async () => {
+    const postGate = deferred<Response>()
+    const refreshGate = deferred<Response>()
+    const created = budgetFixture({
+      id: 11,
+      category: 2,
+      month: '2026-11-01',
+      budgeted: '50.00',
+      spent: '0.00',
+      remaining: '50.00',
+    })
+    let getCalls = 0
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/' && (init?.method ?? 'GET') === 'POST') {
+          return postGate.promise
+        }
+        if (url === '/api/budgets/' && (init?.method ?? 'GET') === 'GET') {
+          getCalls += 1
+          if (getCalls === 1) return jsonResponse(deleteList())
+          return refreshGate.promise
+        }
+        return jsonResponse(deleteList())
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+
+    const user = userEvent.setup()
+    await fillValidCreateForm(user, {
+      category: '2',
+      month: '2026-11',
+      budgeted: '50.00',
+    })
+    await user.click(screen.getByRole('button', { name: 'Create budget' }))
+
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Creating budget…',
+    )
+    expect(screen.getByRole('button', { name: 'Edit budget 10' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Edit budget 20' })).toBeDisabled()
+    expect(
+      screen.getByRole('button', { name: 'Delete budget 10' }),
+    ).toBeDisabled()
+    expect(
+      screen.getByRole('button', { name: 'Delete budget 20' }),
+    ).toBeDisabled()
+
+    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    expect(screen.queryByLabelText('Edit budget category')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Keep budget' })).not.toBeInTheDocument()
+    expect(calls(mock, '/api/budgets/10/', 'DELETE')).toHaveLength(0)
+    expect(calls(mock, '/api/budgets/20/', 'DELETE')).toHaveLength(0)
+    expect(calls(mock, '/api/budgets/10/', 'PATCH')).toHaveLength(0)
+    expect(calls(mock, '/api/budgets/', 'POST')).toHaveLength(1)
+
+    await act(async () => {
+      postGate.resolve(jsonResponse(created, 201))
+    })
+    expect(await screen.findByText('Budget created.')).toBeInTheDocument()
+    expect(await screen.findByText('Updating budgets…')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Edit budget 10' })).toBeDisabled()
+    expect(
+      screen.getByRole('button', { name: 'Delete budget 20' }),
+    ).toBeDisabled()
+
+    await act(async () => {
+      refreshGate.resolve(jsonResponse([...deleteList(), created]))
+    })
+
+    expect(await screen.findByText('November 2026')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Edit budget 10' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Edit budget 20' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Delete budget 10' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Delete budget 20' })).toBeEnabled()
+    expect(calls(mock, '/api/budgets/', 'POST')).toHaveLength(1)
+    expect(calls(mock, '/api/budgets/10/', 'DELETE')).toHaveLength(0)
+    expect(calls(mock, '/api/budgets/10/', 'PATCH')).toHaveLength(0)
+  })
+
+  it('locks create, other edits, and other deletes while DELETE is pending and recovers controls on retryable error', async () => {
+    const pending = deferred<Response>()
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'DELETE') {
+          return pending.promise
+        }
+        return jsonResponse(deleteList())
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await user.click(await screen.findByRole('button', { name: 'Delete budget' }))
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Deleting budget…',
+    )
+
+    expect(screen.getByRole('button', { name: 'Create budget' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Edit budget 20' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Delete budget 20' })).toBeDisabled()
+    expect(
+      screen.queryByRole('button', { name: 'Edit budget 10' }),
+    ).not.toBeInTheDocument()
+
+    const listsBefore = calls(mock, '/api/budgets/').length
+    const form = screen
+      .getByRole('button', { name: 'Create budget' })
+      .closest('form') as HTMLFormElement
+    await act(async () => {
+      fireEvent.submit(form)
+    })
+    expect(calls(mock, '/api/budgets/', 'POST')).toHaveLength(0)
+    expect(calls(mock, '/api/budgets/')).toHaveLength(listsBefore)
+
+    await act(async () => {
+      pending.resolve(jsonResponse({ detail: 'Server exploded.' }, 500))
+    })
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Server exploded.',
+    )
+    expect(screen.getByRole('button', { name: 'Delete budget' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Keep budget' })).toBeEnabled()
+    expect(screen.getByText('September 2026')).toBeInTheDocument()
+    expect(screen.getByText('August 2026')).toBeInTheDocument()
+    expect(calls(mock, '/api/budgets/10/', 'DELETE')).toHaveLength(1)
+    expect(calls(mock, '/api/budgets/')).toHaveLength(listsBefore)
+    expect(screen.queryByText('Budget deleted.')).not.toBeInTheDocument()
+    expect(
+      mock.mock.calls.some(([input]) =>
+        String(input).includes('/api/auth/logout/'),
+      ),
+    ).toBe(false)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  it('keeps confirmation and list with a safe alert when CSRF bootstrap yields no usable token', async () => {
+    const mock = installFetchMock((url: string) => {
+      if (url === '/api/auth/me/') {
+        return jsonResponse({ id: 1, email: 'student@example.com' })
+      }
+      if (url === '/api/auth/csrf/') {
+        return jsonResponse({ detail: 'CSRF cookie set.' })
+      }
+      if (url === '/api/accounts/') {
+        return jsonResponse([])
+      }
+      if (url === '/api/categories/') {
+        return jsonResponse(defaultCategories())
+      }
+      if (url.startsWith('/api/budgets/')) {
+        return jsonResponse(deleteList())
+      }
+      return jsonResponse({}, 404)
+    })
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await user.click(await screen.findByRole('button', { name: 'Delete budget' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Missing CSRF token.',
+    )
+    expect(screen.getByRole('button', { name: 'Delete budget' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Keep budget' })).toBeEnabled()
+    expect(screen.getByText('September 2026')).toBeInTheDocument()
+    expect(screen.getByText('August 2026')).toBeInTheDocument()
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(1)
+    expect(calls(mock, '/api/budgets/10/', 'DELETE')).toHaveLength(0)
+    expect(screen.queryByText('Budget deleted.')).not.toBeInTheDocument()
+    expect(
+      mock.mock.calls.some(([input]) =>
+        String(input).includes('/api/auth/logout/'),
+      ),
+    ).toBe(false)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
   })
 })
