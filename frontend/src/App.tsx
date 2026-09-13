@@ -7,6 +7,7 @@ import { NotFoundScreen } from './screens/NotFoundScreen'
 import { AccountsScreen } from './screens/AccountsScreen'
 import { CategoriesScreen } from './screens/CategoriesScreen'
 import { TransactionsScreen } from './screens/TransactionsScreen'
+import { BudgetsScreen } from './screens/BudgetsScreen'
 import { DashboardScreen } from './screens/DashboardScreen'
 import { RegisterScreen } from './screens/RegisterScreen'
 
@@ -61,6 +62,14 @@ function App() {
               element={
                 <ProtectedRoute>
                   <TransactionsScreen />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/budgets"
+              element={
+                <ProtectedRoute>
+                  <BudgetsScreen />
                 </ProtectedRoute>
               }
             />
