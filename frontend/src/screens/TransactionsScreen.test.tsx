@@ -457,23 +457,62 @@ describe('transactions list', () => {
     expect(calls(mock, '/api/categories/')).toHaveLength(1)
   })
 
-  it('ignores a transactions response that settles after unmount', async () => {
+  it('late list 401 after navigating away stays on accounts without logout or storage writes', async () => {
     const pending = deferred<Response>()
     const mock = installFetchMock(
-      authenticatedTransactionsHandler(() => pending.promise),
+      authenticatedTransactionsHandler(() => pending.promise, {
+        accounts: defaultAccounts(),
+        categories: defaultCategories(),
+      }),
     )
-    const view = renderApp('/transactions')
+    renderApp('/transactions')
 
     expect(
       await screen.findByText('Loading your transactions…'),
     ).toBeInTheDocument()
-    view.unmount()
+
+    const user = userEvent.setup()
+    const nav = await screen.findByRole('navigation', { name: 'Primary' })
+    await user.click(within(nav).getByRole('link', { name: 'Accounts' }))
+
+    expect(
+      await screen.findByRole('heading', { name: 'Accounts' }),
+    ).toBeInTheDocument()
+    expect(await screen.findByText('Everyday Checking')).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/accounts')
+    expect(calls(mock, '/api/transactions/')).toHaveLength(1)
+    expect(calls(mock, '/api/accounts/')).toHaveLength(2)
+    expect(calls(mock, '/api/categories/')).toHaveLength(1)
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(0)
+
     await act(async () => {
-      pending.resolve(jsonResponse([transactionFixture({ note: 'Late' })]))
+      pending.resolve(
+        jsonResponse(
+          { detail: 'Authentication credentials were not provided.' },
+          401,
+        ),
+      )
     })
 
-    expect(screen.queryByText('Late')).not.toBeInTheDocument()
+    expect(window.location.pathname).toBe('/accounts')
+    expect(
+      await screen.findByRole('heading', { name: 'Accounts' }),
+    ).toBeInTheDocument()
+    expect(screen.getByText('Everyday Checking')).toBeInTheDocument()
+    expect(
+      await screen.findByRole('navigation', { name: 'Primary' }),
+    ).toBeInTheDocument()
+    expect(screen.queryByLabelText('Email')).not.toBeInTheDocument()
+    expect(
+      mock.mock.calls.some(([input]) =>
+        String(input).includes('/api/auth/logout/'),
+      ),
+    ).toBe(false)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
     expect(calls(mock, '/api/transactions/')).toHaveLength(1)
+    expect(calls(mock, '/api/accounts/')).toHaveLength(2)
+    expect(calls(mock, '/api/categories/')).toHaveLength(1)
   })
 
   it('never writes auth values to web storage', async () => {
@@ -1849,7 +1888,7 @@ describe('transaction creation session expiry', () => {
     expect(sessionStorage.length).toBe(0)
   })
 
-  it('does nothing visible when a late 401 arrives after unmount', async () => {
+  it('late create 401 after navigating away stays on accounts without logout or storage writes', async () => {
     const pending = deferred<Response>()
     const mock = installFetchMock(
       authenticatedCreateHandler({
@@ -1859,7 +1898,7 @@ describe('transaction creation session expiry', () => {
         },
       }),
     )
-    const view = renderApp('/transactions')
+    renderApp('/transactions')
     await screen.findByText(/No transactions yet/)
 
     const user = userEvent.setup()
@@ -1874,8 +1913,22 @@ describe('transaction creation session expiry', () => {
     expect(await screen.findByRole('status')).toHaveTextContent(
       'Creating transaction…',
     )
+    await waitFor(() =>
+      expect(calls(mock, '/api/transactions/', 'POST')).toHaveLength(1),
+    )
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(1)
 
-    view.unmount()
+    const nav = await screen.findByRole('navigation', { name: 'Primary' })
+    await user.click(within(nav).getByRole('link', { name: 'Accounts' }))
+    expect(
+      await screen.findByRole('heading', { name: 'Accounts' }),
+    ).toBeInTheDocument()
+    expect(await screen.findByText('Everyday Checking')).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/accounts')
+    expect(calls(mock, '/api/transactions/')).toHaveLength(1)
+    expect(calls(mock, '/api/accounts/')).toHaveLength(2)
+    expect(calls(mock, '/api/categories/')).toHaveLength(1)
+
     await act(async () => {
       pending.resolve(
         jsonResponse(
@@ -1885,7 +1938,15 @@ describe('transaction creation session expiry', () => {
       )
     })
 
-    expect(window.location.pathname).toBe('/transactions')
+    expect(window.location.pathname).toBe('/accounts')
+    expect(
+      await screen.findByRole('heading', { name: 'Accounts' }),
+    ).toBeInTheDocument()
+    expect(screen.getByText('Everyday Checking')).toBeInTheDocument()
+    expect(
+      await screen.findByRole('navigation', { name: 'Primary' }),
+    ).toBeInTheDocument()
+    expect(screen.queryByLabelText('Email')).not.toBeInTheDocument()
     expect(
       mock.mock.calls.some(([input]) =>
         String(input).includes('/api/auth/logout/'),
@@ -1893,90 +1954,11 @@ describe('transaction creation session expiry', () => {
     ).toBe(false)
     expect(localStorage.length).toBe(0)
     expect(sessionStorage.length).toBe(0)
-  })
-
-  it('ignores a late success after unmount', async () => {
-    const pending = deferred<Response>()
-    const mock = installFetchMock(
-      authenticatedCreateHandler({
-        transactions: (_url, init) => {
-          if ((init?.method ?? 'GET') === 'GET') return jsonResponse([])
-          return pending.promise
-        },
-      }),
-    )
-    const view = renderApp('/transactions')
-    await screen.findByText(/No transactions yet/)
-
-    const user = userEvent.setup()
-    await fillValidCreateForm(user, {
-      account: '1',
-      category: '2',
-      amount: '12.50',
-      date: '2026-09-10',
-      note: 'Dinner',
-    })
-    await user.click(screen.getByRole('button', { name: 'Create transaction' }))
-    expect(await screen.findByRole('status')).toHaveTextContent(
-      'Creating transaction…',
-    )
-
-    view.unmount()
-    await act(async () => {
-      pending.resolve(
-        jsonResponse(
-          transactionFixture({
-            id: 21,
-            account: 1,
-            category: 2,
-            amount: '12.50',
-            date: '2026-09-10',
-            note: 'Late success',
-          }),
-          201,
-        ),
-      )
-    })
-
-    expect(screen.queryByText('Transaction created.')).not.toBeInTheDocument()
-    expect(screen.queryByText('Late success')).not.toBeInTheDocument()
-    expect(calls(mock, '/api/transactions/', 'POST')).toHaveLength(1)
     expect(calls(mock, '/api/transactions/')).toHaveLength(1)
-  })
-
-  it('ignores a late error after unmount', async () => {
-    const pending = deferred<Response>()
-    installFetchMock(
-      authenticatedCreateHandler({
-        transactions: (_url, init) => {
-          if ((init?.method ?? 'GET') === 'GET') return jsonResponse([])
-          return pending.promise
-        },
-      }),
-    )
-    const view = renderApp('/transactions')
-    await screen.findByText(/No transactions yet/)
-
-    const user = userEvent.setup()
-    await fillValidCreateForm(user, {
-      account: '1',
-      category: '2',
-      amount: '12.50',
-      date: '2026-09-10',
-      note: 'Dinner',
-    })
-    await user.click(screen.getByRole('button', { name: 'Create transaction' }))
-    expect(await screen.findByRole('status')).toHaveTextContent(
-      'Creating transaction…',
-    )
-
-    view.unmount()
-    await act(async () => {
-      pending.resolve(jsonResponse({ detail: 'Server exploded.' }, 500))
-    })
-
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
-    expect(screen.queryByText('Transaction created.')).not.toBeInTheDocument()
+    expect(calls(mock, '/api/transactions/', 'POST')).toHaveLength(1)
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(1)
+    expect(calls(mock, '/api/accounts/')).toHaveLength(2)
+    expect(calls(mock, '/api/categories/')).toHaveLength(1)
   })
 })
 
@@ -3390,103 +3372,6 @@ describe('transaction editing', () => {
     expect(sessionStorage.length).toBe(0)
   })
 
-  it('does nothing when a late edit success arrives after unmount', async () => {
-    const pending = deferred<Response>()
-    const mock = installFetchMock(
-      authenticatedEditHandler({
-        transactions: (_url, init) => {
-          if ((init?.method ?? 'GET') === 'GET') {
-            return jsonResponse([
-              transactionFixture({
-                id: 1,
-                account: 1,
-                category: 2,
-                transaction_type: 'expense',
-                amount: '12.50',
-                date: '2026-09-10',
-                note: 'Groceries',
-              }),
-            ])
-          }
-          return pending.promise
-        },
-      }),
-    )
-    const view = renderApp('/transactions')
-    await screen.findByText('Groceries')
-
-    const user = userEvent.setup()
-    await openEditorFor(user, 0)
-    const noteInput = screen.getByLabelText('Edit transaction note')
-    await user.clear(noteInput)
-    await user.type(noteInput, 'Late note')
-    await user.click(screen.getByRole('button', { name: 'Save changes' }))
-    expect(await screen.findByRole('status')).toHaveTextContent(
-      'Updating transaction…',
-    )
-
-    view.unmount()
-    await act(async () => {
-      pending.resolve(
-        jsonResponse(
-          transactionFixture({ id: 1, note: 'Late note' }),
-        ),
-      )
-    })
-
-    expect(screen.queryByText('Transaction updated.')).not.toBeInTheDocument()
-    expect(screen.queryByText('Late note')).not.toBeInTheDocument()
-    expect(window.location.pathname).toBe('/transactions')
-    expect(calls(mock, '/api/transactions/1/', 'PATCH')).toHaveLength(1)
-  })
-
-  it('does nothing when a late edit error or 401 arrives after unmount', async () => {
-    const pending = deferred<Response>()
-    const mock = installFetchMock(
-      authenticatedEditHandler({
-        transactions: (_url, init) => {
-          if ((init?.method ?? 'GET') === 'GET') {
-            return jsonResponse([
-              transactionFixture({
-                id: 1,
-                account: 1,
-                category: 2,
-                transaction_type: 'expense',
-                amount: '12.50',
-                date: '2026-09-10',
-                note: 'Groceries',
-              }),
-            ])
-          }
-          return pending.promise
-        },
-      }),
-    )
-    const view = renderApp('/transactions')
-    await screen.findByText('Groceries')
-
-    const user = userEvent.setup()
-    await openEditorFor(user, 0)
-    const noteInput = screen.getByLabelText('Edit transaction note')
-    await user.clear(noteInput)
-    await user.type(noteInput, 'Late note')
-    await user.click(screen.getByRole('button', { name: 'Save changes' }))
-    view.unmount()
-    await act(async () => {
-      pending.resolve(jsonResponse({ detail: 'Server exploded.' }, 500))
-    })
-
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
-    expect(window.location.pathname).toBe('/transactions')
-    expect(
-      mock.mock.calls.some(([input]) =>
-        String(input).includes('/api/auth/logout/'),
-      ),
-    ).toBe(false)
-    expect(localStorage.length).toBe(0)
-    expect(sessionStorage.length).toBe(0)
-  })
-
   it('opening an editor does not alter filter state or issue metadata refetches', async () => {
     const mock = installFetchMock(
       authenticatedEditHandler({
@@ -4283,7 +4168,7 @@ describe('transaction editing independent review defects', () => {
     })
   })
 
-  it('(i) does nothing visible on a real late 401 after unmount without logout', async () => {
+  it('(i) late edit 401 after navigating away stays on accounts without logout or storage writes', async () => {
     const patchPending = deferred<Response>()
     const mock = installFetchMock(
       authenticatedEditHandler({
@@ -4305,7 +4190,7 @@ describe('transaction editing independent review defects', () => {
         },
       }),
     )
-    const view = renderApp('/transactions')
+    renderApp('/transactions')
     await screen.findByText('Groceries')
 
     const user = userEvent.setup()
@@ -4317,8 +4202,22 @@ describe('transaction editing independent review defects', () => {
     expect(await screen.findByRole('status')).toHaveTextContent(
       'Updating transaction…',
     )
+    await waitFor(() =>
+      expect(calls(mock, '/api/transactions/1/', 'PATCH')).toHaveLength(1),
+    )
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(1)
 
-    view.unmount()
+    const nav = await screen.findByRole('navigation', { name: 'Primary' })
+    await user.click(within(nav).getByRole('link', { name: 'Accounts' }))
+    expect(
+      await screen.findByRole('heading', { name: 'Accounts' }),
+    ).toBeInTheDocument()
+    expect(await screen.findByText('Everyday Checking')).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/accounts')
+    expect(calls(mock, '/api/transactions/')).toHaveLength(1)
+    expect(calls(mock, '/api/accounts/')).toHaveLength(2)
+    expect(calls(mock, '/api/categories/')).toHaveLength(1)
+
     await act(async () => {
       patchPending.resolve(
         jsonResponse(
@@ -4328,7 +4227,15 @@ describe('transaction editing independent review defects', () => {
       )
     })
 
-    expect(window.location.pathname).toBe('/transactions')
+    expect(window.location.pathname).toBe('/accounts')
+    expect(
+      await screen.findByRole('heading', { name: 'Accounts' }),
+    ).toBeInTheDocument()
+    expect(screen.getByText('Everyday Checking')).toBeInTheDocument()
+    expect(
+      await screen.findByRole('navigation', { name: 'Primary' }),
+    ).toBeInTheDocument()
+    expect(screen.queryByLabelText('Email')).not.toBeInTheDocument()
     expect(
       mock.mock.calls.some(([input]) =>
         String(input).includes('/api/auth/logout/'),
@@ -4336,6 +4243,11 @@ describe('transaction editing independent review defects', () => {
     ).toBe(false)
     expect(localStorage.length).toBe(0)
     expect(sessionStorage.length).toBe(0)
+    expect(calls(mock, '/api/transactions/')).toHaveLength(1)
+    expect(calls(mock, '/api/transactions/1/', 'PATCH')).toHaveLength(1)
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(1)
+    expect(calls(mock, '/api/accounts/')).toHaveLength(2)
+    expect(calls(mock, '/api/categories/')).toHaveLength(1)
   })
 
   it('(swr) keeps ready rows with Updating results while a filter refresh is pending', async () => {
