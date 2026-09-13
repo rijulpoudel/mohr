@@ -56,6 +56,13 @@ async function parseBody(response: Response): Promise<unknown> {
   }
 }
 
+export function decodeNoContent(payload: unknown, status: number): undefined {
+  if (status !== 204 || payload !== null) {
+    throw new ApiError(MALFORMED_ERROR_MESSAGE, status, null, {})
+  }
+  return undefined
+}
+
 export async function apiFetch<T = unknown>(
   path: string,
   options: RequestInit = {},
@@ -79,16 +86,16 @@ export async function apiFetch<T = unknown>(
     throw new ApiError(NETWORK_ERROR_MESSAGE, null, null, {})
   }
 
-  if (response.status === 204) return null as T
-
   const responseBody = await parseBody(response)
   if (response.ok) {
+    if (decode !== undefined) {
+      return decode(responseBody, response.status)
+    }
     if (responseBody === null) {
+      if (response.status === 204) return undefined as T
       throw new ApiError(MALFORMED_ERROR_MESSAGE, response.status, null, {})
     }
-    return decode !== undefined
-      ? decode(responseBody, response.status)
-      : (responseBody as T)
+    return responseBody as T
   }
 
   throw new ApiError(

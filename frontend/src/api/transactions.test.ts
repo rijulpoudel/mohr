@@ -204,6 +204,40 @@ describe('fetchTransactions', () => {
     },
   )
 
+  it('rejects a 204 response safely with the real status', async () => {
+    installFetchMock((url) => {
+      if (url === '/api/transactions/') return emptyResponse(204)
+      return jsonResponse({}, 404)
+    })
+
+    const error = await rejection(fetchTransactions())
+    expect(error).toBeInstanceOf(ApiError)
+    if (error instanceof ApiError) {
+      expect(error.status).toBe(204)
+      expect(error.message).toBe('Unexpected server response.')
+      expect(error.detail).toBeNull()
+      expect(error.fieldErrors).toEqual({})
+    }
+  })
+
+  it('rejects a structurally valid list at 201 safely', async () => {
+    installFetchMock((url) => {
+      if (url === '/api/transactions/') {
+        return jsonResponse([transactionFixture({ id: 1 })], 201)
+      }
+      return jsonResponse({}, 404)
+    })
+
+    const error = await rejection(fetchTransactions())
+    expect(error).toBeInstanceOf(ApiError)
+    if (error instanceof ApiError) {
+      expect(error.status).toBe(201)
+      expect(error.message).toBe('Unexpected server response.')
+      expect(error.detail).toBeNull()
+      expect(error.fieldErrors).toEqual({})
+    }
+  })
+
   it.each([
     ['account', { account: 3 }, 'account=3'],
     ['category', { category: 5 }, 'category=5'],
@@ -455,6 +489,25 @@ describe('createTransaction', () => {
     if (error instanceof ApiError) {
       expect(error.status).toBe(200)
       expect(error.message).toBe('Unexpected server response.')
+      expect(error.fieldErrors).toEqual({})
+    }
+    expect(calls(mock, '/api/transactions/', 'POST')).toHaveLength(1)
+  })
+
+  it('rejects a 204 response even for an exact create', async () => {
+    const mock = installFetchMock(
+      mutationHandler((url) => {
+        if (url === '/api/transactions/') return emptyResponse(204)
+        return jsonResponse({}, 404)
+      }),
+    )
+
+    const error = await rejection(createTransaction(createInput()))
+    expect(error).toBeInstanceOf(ApiError)
+    if (error instanceof ApiError) {
+      expect(error.status).toBe(204)
+      expect(error.message).toBe('Unexpected server response.')
+      expect(error.detail).toBeNull()
       expect(error.fieldErrors).toEqual({})
     }
     expect(calls(mock, '/api/transactions/', 'POST')).toHaveLength(1)
@@ -756,6 +809,25 @@ describe('updateTransaction', () => {
     if (error instanceof ApiError) {
       expect(error.status).toBe(201)
       expect(error.message).toBe('Unexpected server response.')
+      expect(error.fieldErrors).toEqual({})
+    }
+    expect(calls(mock, '/api/transactions/7/', 'PATCH')).toHaveLength(1)
+  })
+
+  it('rejects a 204 response even for an exact update', async () => {
+    const mock = installFetchMock(
+      mutationHandler((url) => {
+        if (url === '/api/transactions/7/') return emptyResponse(204)
+        return jsonResponse({}, 404)
+      }),
+    )
+
+    const error = await rejection(updateTransaction(7, { note: 'X' }))
+    expect(error).toBeInstanceOf(ApiError)
+    if (error instanceof ApiError) {
+      expect(error.status).toBe(204)
+      expect(error.message).toBe('Unexpected server response.')
+      expect(error.detail).toBeNull()
       expect(error.fieldErrors).toEqual({})
     }
     expect(calls(mock, '/api/transactions/7/', 'PATCH')).toHaveLength(1)

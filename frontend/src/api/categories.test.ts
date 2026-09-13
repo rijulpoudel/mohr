@@ -146,6 +146,40 @@ describe('fetchCategories', () => {
     }
   })
 
+  it('rejects a 204 response safely with the real status', async () => {
+    installFetchMock((url) => {
+      if (url === '/api/categories/') return emptyResponse(204)
+      return jsonResponse({}, 404)
+    })
+
+    const error = await rejection(fetchCategories())
+    expect(error).toBeInstanceOf(ApiError)
+    if (error instanceof ApiError) {
+      expect(error.status).toBe(204)
+      expect(error.message).toBe('Unexpected server response.')
+      expect(error.detail).toBeNull()
+      expect(error.fieldErrors).toEqual({})
+    }
+  })
+
+  it('rejects a structurally valid list at 201 safely', async () => {
+    installFetchMock((url) => {
+      if (url === '/api/categories/') {
+        return jsonResponse([categoryFixture({ id: 1 })], 201)
+      }
+      return jsonResponse({}, 404)
+    })
+
+    const error = await rejection(fetchCategories())
+    expect(error).toBeInstanceOf(ApiError)
+    if (error instanceof ApiError) {
+      expect(error.status).toBe(201)
+      expect(error.message).toBe('Unexpected server response.')
+      expect(error.detail).toBeNull()
+      expect(error.fieldErrors).toEqual({})
+    }
+  })
+
   it('preserves a 401 status and safe network failures', async () => {
     const mock = installFetchMock((url) => {
       if (url === '/api/categories/') {
@@ -235,6 +269,25 @@ describe('createCategory', () => {
     if (error instanceof ApiError) {
       expect(error.status).toBe(200)
       expect(error.message).toBe('Unexpected server response.')
+      expect(error.fieldErrors).toEqual({})
+    }
+    expect(calls(mock, '/api/categories/', 'POST')).toHaveLength(1)
+  })
+
+  it('rejects a 204 response even for an exact create', async () => {
+    const mock = installFetchMock(
+      mutationHandler((url) => {
+        if (url === '/api/categories/') return emptyResponse(204)
+        return jsonResponse({}, 404)
+      }),
+    )
+
+    const error = await rejection(createCategory('Food', 'expense'))
+    expect(error).toBeInstanceOf(ApiError)
+    if (error instanceof ApiError) {
+      expect(error.status).toBe(204)
+      expect(error.message).toBe('Unexpected server response.')
+      expect(error.detail).toBeNull()
       expect(error.fieldErrors).toEqual({})
     }
     expect(calls(mock, '/api/categories/', 'POST')).toHaveLength(1)
@@ -411,6 +464,25 @@ describe('renameCategory', () => {
     if (error instanceof ApiError) {
       expect(error.status).toBe(201)
       expect(error.message).toBe('Unexpected server response.')
+      expect(error.fieldErrors).toEqual({})
+    }
+    expect(calls(mock, '/api/categories/7/', 'PATCH')).toHaveLength(1)
+  })
+
+  it('rejects a 204 response even for an exact rename', async () => {
+    const mock = installFetchMock(
+      mutationHandler((url) => {
+        if (url === '/api/categories/7/') return emptyResponse(204)
+        return jsonResponse({}, 404)
+      }),
+    )
+
+    const error = await rejection(renameCategory(7, 'Groceries'))
+    expect(error).toBeInstanceOf(ApiError)
+    if (error instanceof ApiError) {
+      expect(error.status).toBe(204)
+      expect(error.message).toBe('Unexpected server response.')
+      expect(error.detail).toBeNull()
       expect(error.fieldErrors).toEqual({})
     }
     expect(calls(mock, '/api/categories/7/', 'PATCH')).toHaveLength(1)

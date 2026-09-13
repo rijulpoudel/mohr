@@ -1,5 +1,5 @@
 import { getCsrfToken } from './auth'
-import { apiFetch } from './client'
+import { apiFetch, decodeNoContent } from './client'
 import { ApiError } from './types'
 
 const MALFORMED_RESPONSE_MESSAGE = 'Unexpected server response.'
@@ -86,6 +86,7 @@ function parseCategory(value: unknown): Category | null {
 function parseCategories(payload: unknown, status: number): Category[] {
   const malformed = () =>
     new ApiError(MALFORMED_RESPONSE_MESSAGE, status, null, {})
+  if (status !== 200) throw malformed()
   if (!Array.isArray(payload)) throw malformed()
   const categories: Category[] = []
   for (const item of payload) {
@@ -145,10 +146,6 @@ function parseRenamedCategory(
   }
 }
 
-function rejectUnexpectedSuccess(_payload: unknown, status: number): never {
-  throw new ApiError(MALFORMED_RESPONSE_MESSAGE, status, null, {})
-}
-
 function assertValidCategoryId(categoryId: number): void {
   if (!isPositiveInteger(categoryId)) {
     throw new ApiError(INVALID_CATEGORY_ID_MESSAGE, null, null, {})
@@ -195,6 +192,6 @@ export async function archiveCategory(categoryId: number): Promise<void> {
   await apiFetch(
     `/api/categories/${categoryId}/`,
     { method: 'DELETE', headers: { 'X-CSRFToken': token } },
-    rejectUnexpectedSuccess,
+    decodeNoContent,
   )
 }

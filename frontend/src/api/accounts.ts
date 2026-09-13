@@ -1,6 +1,6 @@
 import { isDecimalString } from '../format/money'
 import { getCsrfToken } from './auth'
-import { apiFetch } from './client'
+import { apiFetch, decodeNoContent } from './client'
 import { ApiError } from './types'
 
 const MALFORMED_RESPONSE_MESSAGE = 'Unexpected server response.'
@@ -115,6 +115,7 @@ export function parseAccount(value: unknown): Account | null {
 export function parseAccounts(payload: unknown, status: number): Account[] {
   const malformed = () =>
     new ApiError(MALFORMED_RESPONSE_MESSAGE, status, null, {})
+  if (status !== 200) throw malformed()
   if (!Array.isArray(payload)) throw malformed()
   const accounts: Account[] = []
   for (const item of payload) {
@@ -170,10 +171,6 @@ function parseUpdatedAccount(
   }
 }
 
-function rejectUnexpectedSuccess(_payload: unknown, status: number): never {
-  throw new ApiError(MALFORMED_RESPONSE_MESSAGE, status, null, {})
-}
-
 function assertValidAccountId(accountId: number): void {
   if (!isPositiveInteger(accountId)) {
     throw new ApiError(INVALID_ACCOUNT_ID_MESSAGE, null, null, {})
@@ -227,7 +224,7 @@ export async function archiveAccount(accountId: number): Promise<void> {
   await apiFetch(
     `/api/accounts/${accountId}/`,
     { method: 'DELETE', headers: { 'X-CSRFToken': token } },
-    rejectUnexpectedSuccess,
+    decodeNoContent,
   )
 }
 

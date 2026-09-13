@@ -1,5 +1,5 @@
 import { getCsrfToken } from './auth'
-import { apiFetch } from './client'
+import { apiFetch, decodeNoContent } from './client'
 import { ApiError } from './types'
 
 const MALFORMED_RESPONSE_MESSAGE = 'Unexpected server response.'
@@ -153,6 +153,7 @@ function parseTransaction(value: unknown): Transaction | null {
 function parseTransactions(payload: unknown, status: number): Transaction[] {
   const malformed = () =>
     new ApiError(MALFORMED_RESPONSE_MESSAGE, status, null, {})
+  if (status !== 200) throw malformed()
   if (!Array.isArray(payload)) throw malformed()
   const transactions: Transaction[] = []
   for (const item of payload) {
@@ -242,10 +243,6 @@ function parseUpdatedTransaction(
   }
 }
 
-function rejectUnexpectedSuccess(_payload: unknown, status: number): never {
-  throw new ApiError(MALFORMED_RESPONSE_MESSAGE, status, null, {})
-}
-
 function assertValidTransactionId(transactionId: number): void {
   if (!isPositiveInteger(transactionId)) {
     throw new ApiError(INVALID_TRANSACTION_ID_MESSAGE, null, null, {})
@@ -303,6 +300,6 @@ export async function deleteTransaction(transactionId: number): Promise<void> {
   await apiFetch(
     `/api/transactions/${transactionId}/`,
     { method: 'DELETE', headers: { 'X-CSRFToken': token } },
-    rejectUnexpectedSuccess,
+    decodeNoContent,
   )
 }

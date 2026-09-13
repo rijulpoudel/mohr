@@ -338,6 +338,30 @@ describe('malformed dashboard payloads', () => {
     expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
     expect(screen.queryByText('Total balance')).not.toBeInTheDocument()
   })
+
+  it('rejects a 204 summary safely with the malformed error and Retry', async () => {
+    installFetchMock(authenticatedHandler(() => emptyResponse(204)))
+    renderApp('/')
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Unexpected server response.',
+    )
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+    expect(screen.queryByText('Total balance')).not.toBeInTheDocument()
+  })
+
+  it('rejects a structurally valid summary at 201 safely', async () => {
+    installFetchMock(
+      authenticatedHandler(() => jsonResponse(summaryFixture(), 201)),
+    )
+    renderApp('/')
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Unexpected server response.',
+    )
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+    expect(screen.queryByText('Total balance')).not.toBeInTheDocument()
+  })
 })
 
 describe('dashboard session expiry', () => {
@@ -431,5 +455,39 @@ describe('logout from the dashboard', () => {
       screen.getByText('Signed in as stuck@example.com'),
     ).toBeInTheDocument()
     expect(window.location.pathname).toBe('/')
+  })
+
+  it('keeps the user authenticated when logout returns a 200 JSON body', async () => {
+    const mock = installFetchMock((url) => {
+      if (url === '/api/auth/me/') {
+        return jsonResponse({ id: 1, email: 'stuck@example.com' })
+      }
+      if (url === '/api/dashboard/summary/') {
+        return jsonResponse(summaryFixture())
+      }
+      if (url === '/api/auth/csrf/') {
+        document.cookie = 'csrftoken=logout-csrf-token; Path=/'
+        return jsonResponse({ detail: 'CSRF cookie set.' })
+      }
+      if (url === '/api/auth/logout/') {
+        return jsonResponse({ detail: 'Signed out.' })
+      }
+      return jsonResponse({}, 404)
+    })
+    const user = userEvent.setup()
+    renderApp('/')
+    await screen.findByText('Signed in as stuck@example.com')
+    await user.click(screen.getByRole('button', { name: 'Sign out' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Could not sign out',
+    )
+    expect(
+      screen.getByText('Signed in as stuck@example.com'),
+    ).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/')
+    expect(
+      calls(mock, '/api/auth/logout/', 'POST'),
+    ).toHaveLength(1)
   })
 })

@@ -126,6 +126,7 @@ export function parseDashboardSummary(
 ): DashboardSummary {
   const malformed = () =>
     new ApiError(MALFORMED_RESPONSE_MESSAGE, status, null, {})
+  if (status !== 200) throw malformed()
   if (!isRecord(payload) || !hasExactKeys(payload, SUMMARY_KEYS)) {
     throw malformed()
   }

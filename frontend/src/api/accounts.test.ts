@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { archiveAccount, createAccount, updateAccount } from './accounts'
+import {
+  archiveAccount,
+  createAccount,
+  fetchAccounts,
+  updateAccount,
+} from './accounts'
 import { ApiError } from './types'
 import {
   calls,
@@ -61,6 +66,44 @@ async function rejection(promise: Promise<unknown>): Promise<unknown> {
   }
   throw new Error('Expected the promise to reject.')
 }
+
+describe('fetchAccounts', () => {
+  it('rejects a 204 response safely with the real status', async () => {
+    const mock = installFetchMock((url) => {
+      if (url === '/api/accounts/') return emptyResponse(204)
+      return jsonResponse({}, 404)
+    })
+
+    const error = await rejection(fetchAccounts())
+    expect(error).toBeInstanceOf(ApiError)
+    if (error instanceof ApiError) {
+      expect(error.status).toBe(204)
+      expect(error.message).toBe('Unexpected server response.')
+      expect(error.detail).toBeNull()
+      expect(error.fieldErrors).toEqual({})
+    }
+    expect(calls(mock, '/api/accounts/')).toHaveLength(1)
+  })
+
+  it('rejects a structurally valid list at 201 safely', async () => {
+    const mock = installFetchMock((url) => {
+      if (url === '/api/accounts/') {
+        return jsonResponse([accountFixture({ id: 1 })], 201)
+      }
+      return jsonResponse({}, 404)
+    })
+
+    const error = await rejection(fetchAccounts())
+    expect(error).toBeInstanceOf(ApiError)
+    if (error instanceof ApiError) {
+      expect(error.status).toBe(201)
+      expect(error.message).toBe('Unexpected server response.')
+      expect(error.detail).toBeNull()
+      expect(error.fieldErrors).toEqual({})
+    }
+    expect(calls(mock, '/api/accounts/')).toHaveLength(1)
+  })
+})
 
 describe('createAccount', () => {
   it('bootstraps CSRF then POSTs exactly three fields and parses the 201 response', async () => {
@@ -173,6 +216,20 @@ describe('createAccount', () => {
     if (error instanceof ApiError) {
       expect(error.status).toBe(200)
       expect(error.message).toBe('Unexpected server response.')
+      expect(error.fieldErrors).toEqual({})
+    }
+    expect(calls(mock, '/api/accounts/', 'POST')).toHaveLength(1)
+  })
+
+  it('rejects a 204 response even for an exact create', async () => {
+    const mock = installFetchMock(createHandler(() => emptyResponse(204)))
+
+    const error = await rejection(createAccount('X', 'checking', '0.00'))
+    expect(error).toBeInstanceOf(ApiError)
+    if (error instanceof ApiError) {
+      expect(error.status).toBe(204)
+      expect(error.message).toBe('Unexpected server response.')
+      expect(error.detail).toBeNull()
       expect(error.fieldErrors).toEqual({})
     }
     expect(calls(mock, '/api/accounts/', 'POST')).toHaveLength(1)
@@ -415,6 +472,25 @@ describe('updateAccount', () => {
     if (error instanceof ApiError) {
       expect(error.status).toBe(201)
       expect(error.message).toBe('Unexpected server response.')
+      expect(error.fieldErrors).toEqual({})
+    }
+    expect(calls(mock, '/api/accounts/7/', 'PATCH')).toHaveLength(1)
+  })
+
+  it('rejects a 204 response even for an exact update', async () => {
+    const mock = installFetchMock(
+      mutationHandler((url) => {
+        if (url === '/api/accounts/7/') return emptyResponse(204)
+        return jsonResponse({}, 404)
+      }),
+    )
+
+    const error = await rejection(updateAccount(7, { name: 'X' }))
+    expect(error).toBeInstanceOf(ApiError)
+    if (error instanceof ApiError) {
+      expect(error.status).toBe(204)
+      expect(error.message).toBe('Unexpected server response.')
+      expect(error.detail).toBeNull()
       expect(error.fieldErrors).toEqual({})
     }
     expect(calls(mock, '/api/accounts/7/', 'PATCH')).toHaveLength(1)
