@@ -697,6 +697,21 @@ a {
   font-weight: 400;
 }
 
+.budget-actions {
+  display: flex;
+  gap: var(--space-3);
+  margin-block-start: var(--space-2);
+}
+
+.budget-edit .form {
+  margin-block: var(--space-3) 0;
+}
+
+.budget-edit-actions {
+  display: flex;
+  gap: var(--space-3);
+}
+
 @media (max-width: 24.375rem) {
   .site-header-inner {
     flex-direction: column;

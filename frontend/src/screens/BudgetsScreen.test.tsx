@@ -861,9 +861,11 @@ describe('budget creation form', () => {
     })
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
-      'Server exploded.',
+      'Your budget change was saved, but the current budget list could not be refreshed. Try again.',
     )
+    expect(screen.queryByText('Server exploded.')).not.toBeInTheDocument()
     expect(screen.queryByText('Budget created.')).not.toBeInTheDocument()
+    expect(screen.queryByText('Budget updated.')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Create budget' })).toBeEnabled()
     expect(calls(mock, '/api/budgets/')).toHaveLength(2)
 
@@ -1142,5 +1144,1116 @@ describe('budget creation session expiry', () => {
     ).toBe(false)
     expect(localStorage.length).toBe(0)
     expect(sessionStorage.length).toBe(0)
+  })
+})
+
+describe('budget inline editing controls', () => {
+  function editList() {
+    return [
+      budgetFixture({
+        id: 10,
+        category: 2,
+        month: '2026-09-01',
+        budgeted: '300.00',
+        spent: '125.50',
+        remaining: '174.50',
+      }),
+      budgetFixture({
+        id: 20,
+        category: 4,
+        month: '2026-08-01',
+        budgeted: '9999999999.99',
+        spent: '0.00',
+        remaining: '9999999999.99',
+      }),
+    ]
+  }
+
+  async function openEdit(user: ReturnType<typeof userEvent.setup>, id: number) {
+    await user.click(screen.getByRole('button', { name: `Edit budget ${id}` }))
+  }
+
+  it('offers an Edit action on every row including archived-linked rows', async () => {
+    installFetchMock(
+      authenticatedBudgetsHandler(() => jsonResponse(editList()), {
+        categories: categoriesWithArchived(),
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+
+    expect(
+      screen.getByRole('button', { name: 'Edit budget 10' }),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Edit budget 20' }),
+    ).toBeInTheDocument()
+  })
+
+  it('prefills category, month, and budgeted exactly with active plus current-archived options', async () => {
+    installFetchMock(
+      authenticatedBudgetsHandler(() => jsonResponse(editList()), {
+        categories: categoriesWithArchived(),
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+
+    const user = userEvent.setup()
+    await openEdit(user, 20)
+
+    expect(screen.getByLabelText('Edit budget category')).toHaveValue('4')
+    expect(screen.getByLabelText('Edit budget month')).toHaveValue('2026-08')
+    expect(screen.getByLabelText('Edit budget budgeted amount')).toHaveValue(
+      '9999999999.99',
+    )
+    const options = within(
+      screen.getByLabelText('Edit budget category'),
+    ).getAllByRole('option')
+    expect(options.map((o) => o.textContent)).toEqual([
+      'Food',
+      'Transport',
+      'Old Hobby (archived, current)',
+    ])
+    expect(
+      within(screen.getByLabelText('Edit budget category')).queryByText(
+        'Salary',
+      ),
+    ).not.toBeInTheDocument()
+  })
+
+  it('prefills an active row with only active expense options', async () => {
+    installFetchMock(
+      authenticatedBudgetsHandler(() => jsonResponse(editList()), {
+        categories: categoriesWithArchived(),
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+
+    const user = userEvent.setup()
+    await openEdit(user, 10)
+
+    expect(screen.getByLabelText('Edit budget category')).toHaveValue('2')
+    expect(screen.getByLabelText('Edit budget month')).toHaveValue('2026-09')
+    expect(screen.getByLabelText('Edit budget budgeted amount')).toHaveValue(
+      '300.00',
+    )
+    const options = within(
+      screen.getByLabelText('Edit budget category'),
+    ).getAllByRole('option')
+    expect(options.map((o) => o.textContent)).toEqual([
+      'Food',
+      'Transport',
+    ])
+  })
+
+  it('allows only one editor and locks Create with a visible hint', async () => {
+    installFetchMock(
+      authenticatedBudgetsHandler(() => jsonResponse(editList()), {
+        categories: categoriesWithArchived(),
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+
+    const user = userEvent.setup()
+    await openEdit(user, 10)
+
+    expect(screen.getByLabelText('Edit budget category')).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Edit budget 20' }),
+    ).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Create budget' })).toBeDisabled()
+    expect(
+      screen.getByText(
+        'Finish or cancel your edit before creating another budget.',
+      ),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Edit budget 10' }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('moves focus into the editor on open and returns focus on cancel with zero requests', async () => {
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler(() => jsonResponse(editList()), {
+        categories: categoriesWithArchived(),
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+
+    const user = userEvent.setup()
+    await openEdit(user, 10)
+
+    const first = screen.getByLabelText('Edit budget category')
+    expect(first).toHaveFocus()
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(
+      screen.getByRole('button', { name: 'Edit budget 10' }),
+    ).toHaveFocus()
+    expect(calls(mock, '/api/budgets/10/', 'PATCH')).toHaveLength(0)
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(0)
+  })
+})
+
+describe('budget edit PATCH bodies', () => {
+  function singleBudget() {
+    return [
+      budgetFixture({
+        id: 10,
+        category: 2,
+        month: '2026-09-01',
+        budgeted: '300.00',
+        spent: '10.00',
+        remaining: '290.00',
+      }),
+    ]
+  }
+
+  async function setupEdit(mockHandler: (url: string, init?: RequestInit) => Response | Promise<Response>) {
+    const mock = installFetchMock(mockHandler)
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    return { mock, user }
+  }
+
+  function patchCalls(mock: ReturnType<typeof installFetchMock>) {
+    return calls(mock, '/api/budgets/10/', 'PATCH')
+  }
+
+  it('sends an exact category-only PATCH body', async () => {
+    let resolveRefresh!: (v: Response | Promise<Response>) => void
+    let getCalls = 0
+    const refreshGate = new Promise<Response>((res) => {
+      resolveRefresh = res as unknown as (v: Response | Promise<Response>) => void
+    })
+    const { mock, user } = await setupEdit(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'PATCH') {
+          return jsonResponse(
+            budgetFixture({
+              id: 10,
+              category: 3,
+              month: '2026-09-01',
+              budgeted: '300.00',
+              spent: '10.00',
+              remaining: '290.00',
+            }),
+          )
+        }
+        if (url === '/api/budgets/' && (init?.method ?? 'GET') === 'GET') {
+          getCalls += 1
+          if (getCalls === 1) return jsonResponse(singleBudget())
+          return refreshGate
+        }
+        if (url === '/api/budgets/') return jsonResponse(singleBudget())
+        return jsonResponse({}, 404)
+      }, { categories: defaultCategories() }),
+    )
+    await user.selectOptions(
+      screen.getByLabelText('Edit budget category'),
+      '3',
+    )
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    await waitFor(() => expect(patchCalls(mock)).toHaveLength(1))
+    const [, init] = patchCalls(mock)[0]
+    const body = JSON.parse(String(init?.body))
+    expect(body).toEqual({ category: 3 })
+    expect(Object.keys(body).sort()).toEqual(['category'])
+    expect('spent' in body).toBe(false)
+    expect('remaining' in body).toBe(false)
+    const headers = init?.headers as Headers
+    expect(headers.get('Content-Type')).toBe('application/json')
+    expect(headers.get('X-CSRFToken')).toBe(CSRF_TOKEN)
+    const log = requestLog(mock)
+    expect(log.indexOf('GET /api/auth/csrf/')).toBeGreaterThanOrEqual(0)
+    expect(log.indexOf('GET /api/auth/csrf/')).toBeLessThan(
+      log.indexOf('PATCH /api/budgets/10/'),
+    )
+    await act(async () => {
+      resolveRefresh(jsonResponse(singleBudget()))
+    })
+  })
+
+  it('sends an exact month-only PATCH body as first-of-month', async () => {
+    let resolveRefresh!: (v: Response) => void
+    let getCalls = 0
+    const refreshGate = new Promise<Response>((res) => {
+      resolveRefresh = res
+    })
+    const { mock, user } = await setupEdit(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'PATCH') {
+          return jsonResponse(
+            budgetFixture({ id: 10, month: '2026-10-01' }),
+          )
+        }
+        if (url === '/api/budgets/' && (init?.method ?? 'GET') === 'GET') {
+          getCalls += 1
+          if (getCalls === 1) return jsonResponse(singleBudget())
+          return refreshGate
+        }
+        return jsonResponse({}, 404)
+      }, { categories: defaultCategories() }),
+    )
+    fireEvent.change(screen.getByLabelText('Edit budget month'), {
+      target: { value: '2026-10' },
+    })
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    await waitFor(() => expect(patchCalls(mock)).toHaveLength(1))
+    const [, init] = patchCalls(mock)[0]
+    expect(JSON.parse(String(init?.body))).toEqual({ month: '2026-10-01' })
+    await act(async () => {
+      resolveRefresh(jsonResponse(singleBudget()))
+    })
+  })
+
+  it('sends an exact budgeted-only PATCH body', async () => {
+    let resolveRefresh!: (v: Response) => void
+    let getCalls = 0
+    const refreshGate = new Promise<Response>((res) => {
+      resolveRefresh = res
+    })
+    const { mock, user } = await setupEdit(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'PATCH') {
+          return jsonResponse(budgetFixture({ id: 10, budgeted: '450.00' }))
+        }
+        if (url === '/api/budgets/' && (init?.method ?? 'GET') === 'GET') {
+          getCalls += 1
+          if (getCalls === 1) return jsonResponse(singleBudget())
+          return refreshGate
+        }
+        return jsonResponse({}, 404)
+      }, { categories: defaultCategories() }),
+    )
+    const input = screen.getByLabelText('Edit budget budgeted amount')
+    await user.clear(input)
+    await user.type(input, '450.00')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    await waitFor(() => expect(patchCalls(mock)).toHaveLength(1))
+    const [, init] = patchCalls(mock)[0]
+    expect(JSON.parse(String(init?.body))).toEqual({ budgeted: '450.00' })
+    await act(async () => {
+      resolveRefresh(jsonResponse(singleBudget()))
+    })
+  })
+
+  it('sends an exact all-three PATCH body without spent or remaining', async () => {
+    let resolveRefresh!: (v: Response) => void
+    let getCalls = 0
+    const refreshGate = new Promise<Response>((res) => {
+      resolveRefresh = res
+    })
+    const { mock, user } = await setupEdit(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'PATCH') {
+          return jsonResponse(
+            budgetFixture({
+              id: 10,
+              category: 3,
+              month: '2026-10-01',
+              budgeted: '450.00',
+            }),
+          )
+        }
+        if (url === '/api/budgets/' && (init?.method ?? 'GET') === 'GET') {
+          getCalls += 1
+          if (getCalls === 1) return jsonResponse(singleBudget())
+          return refreshGate
+        }
+        return jsonResponse({}, 404)
+      }, { categories: defaultCategories() }),
+    )
+    await user.selectOptions(
+      screen.getByLabelText('Edit budget category'),
+      '3',
+    )
+    fireEvent.change(screen.getByLabelText('Edit budget month'), {
+      target: { value: '2026-10' },
+    })
+    const input = screen.getByLabelText('Edit budget budgeted amount')
+    await user.clear(input)
+    await user.type(input, '450.00')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    await waitFor(() => expect(patchCalls(mock)).toHaveLength(1))
+    const [, init] = patchCalls(mock)[0]
+    const body = JSON.parse(String(init?.body))
+    expect(body).toEqual({ category: 3, month: '2026-10-01', budgeted: '450.00' })
+    expect('spent' in body).toBe(false)
+    expect('remaining' in body).toBe(false)
+    await act(async () => {
+      resolveRefresh(jsonResponse(singleBudget()))
+    })
+  })
+
+  it('omits an untouched archived category on a budgeted-only PATCH', async () => {
+    let resolveRefresh!: (v: Response) => void
+    let getCalls = 0
+    const refreshGate = new Promise<Response>((res) => {
+      resolveRefresh = res
+    })
+    const archivedList = [
+      budgetFixture({
+        id: 20,
+        category: 4,
+        month: '2026-08-01',
+        budgeted: '9999999999.99',
+        spent: '0.00',
+        remaining: '9999999999.99',
+      }),
+    ]
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/20/' && (init?.method ?? 'GET') === 'PATCH') {
+          return jsonResponse(budgetFixture({ id: 20, category: 4, month: '2026-08-01', budgeted: '100.00' }))
+        }
+        if (url === '/api/budgets/' && (init?.method ?? 'GET') === 'GET') {
+          getCalls += 1
+          if (getCalls === 1) return jsonResponse(archivedList)
+          return refreshGate
+        }
+        return jsonResponse({}, 404)
+      }, { categories: categoriesWithArchived() }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('August 2026')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Edit budget 20' }))
+    const input = screen.getByLabelText('Edit budget budgeted amount')
+    await user.clear(input)
+    await user.type(input, '100.00')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    await waitFor(() =>
+      expect(calls(mock, '/api/budgets/20/', 'PATCH')).toHaveLength(1),
+    )
+    const [, init] = calls(mock, '/api/budgets/20/', 'PATCH')[0]
+    expect(JSON.parse(String(init?.body))).toEqual({ budgeted: '100.00' })
+    await act(async () => {
+      resolveRefresh(jsonResponse(archivedList))
+    })
+  })
+
+  it('blocks a changed-away-and-back archived reassignment with zero network', async () => {
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler(() => jsonResponse([
+        budgetFixture({ id: 20, category: 4, month: '2026-08-01', budgeted: '9999999999.99' }),
+      ]), { categories: categoriesWithArchived() }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('August 2026')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Edit budget 20' }))
+    const select = screen.getByLabelText('Edit budget category')
+    await user.selectOptions(select, '2')
+    await user.selectOptions(select, '4')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+    expect(select).toHaveAttribute('aria-invalid', 'true')
+    expect(calls(mock, '/api/budgets/20/', 'PATCH')).toHaveLength(0)
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(0)
+    expect(screen.getByLabelText('Edit budget budgeted amount')).toHaveValue(
+      '9999999999.99',
+    )
+  })
+
+  it('keeps the editor open on a no-op save with zero network', async () => {
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler(() => jsonResponse([
+        budgetFixture({ id: 10, category: 2, month: '2026-09-01', budgeted: '300.00' }),
+      ])),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByText('Make at least one change before saving.')).toBeInTheDocument()
+    expect(screen.getByLabelText('Edit budget category')).toBeInTheDocument()
+    expect(calls(mock, '/api/budgets/10/', 'PATCH')).toHaveLength(0)
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(0)
+  })
+})
+
+describe('budget edit validation', () => {
+  it.each([
+    ['empty month', ''],
+    ['bad shape', '2026-13'],
+    ['zero year', '0000-01'],
+  ])('rejects an invalid %s with zero network and preserved values', async (_label, month) => {
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler(() => jsonResponse([
+        budgetFixture({ id: 10, category: 2, month: '2026-09-01', budgeted: '300.00' }),
+      ])),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    fireEvent.change(screen.getByLabelText('Edit budget month'), {
+      target: { value: month },
+    })
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+    expect(screen.getByLabelText('Edit budget month')).toHaveAttribute(
+      'aria-invalid',
+      'true',
+    )
+    expect(screen.getByLabelText('Edit budget budgeted amount')).toHaveValue('300.00')
+    expect(calls(mock, '/api/budgets/10/', 'PATCH')).toHaveLength(0)
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(0)
+  })
+
+  it.each([
+    ['empty', ''],
+    ['zero', '0.00'],
+    ['negative', '-12.50'],
+    ['one decimal', '12.5'],
+    ['three decimals', '12.345'],
+    ['thirteen digits', '12345678901.23'],
+  ])('rejects an invalid %s budgeted value with zero network', async (_label, budgeted) => {
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler(() => jsonResponse([
+        budgetFixture({ id: 10, category: 2, month: '2026-09-01', budgeted: '300.00' }),
+      ])),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    fireEvent.change(screen.getByLabelText('Edit budget budgeted amount'), {
+      target: { value: budgeted },
+    })
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+    expect(screen.getByLabelText('Edit budget budgeted amount')).toHaveAttribute(
+      'aria-invalid',
+      'true',
+    )
+    expect(screen.getByLabelText('Edit budget budgeted amount')).toHaveValue(budgeted)
+    expect(calls(mock, '/api/budgets/10/', 'PATCH')).toHaveLength(0)
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(0)
+  })
+
+  it('rejects an empty category with zero network', async () => {
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler(() => jsonResponse([
+        budgetFixture({ id: 10, category: 2, month: '2026-09-01', budgeted: '300.00' }),
+      ])),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    fireEvent.change(screen.getByLabelText('Edit budget category'), {
+      target: { value: '' },
+    })
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+    expect(screen.getByLabelText('Edit budget category')).toHaveAttribute(
+      'aria-invalid',
+      'true',
+    )
+    expect(calls(mock, '/api/budgets/10/', 'PATCH')).toHaveLength(0)
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(0)
+  })
+})
+
+describe('budget edit backend errors', () => {
+  function oneBudget() {
+    return [budgetFixture({ id: 10, category: 2, month: '2026-09-01', budgeted: '300.00' })]
+  }
+
+  async function openAndSaveInvalid(
+    user: ReturnType<typeof userEvent.setup>,
+  ) {
+    fireEvent.change(screen.getByLabelText('Edit budget month'), {
+      target: { value: '2026-10' },
+    })
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+  }
+
+  it('maps backend 400 field errors and preserves values', async () => {
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'PATCH') {
+          return jsonResponse(
+            {
+              category: ['Bad category.'],
+              month: ['Bad month.'],
+              budgeted: ['Bad budgeted.'],
+              non_field_errors: ['A budget for this month already exists.'],
+            },
+            400,
+          )
+        }
+        return jsonResponse(oneBudget())
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    await openAndSaveInvalid(user)
+
+    expect(await screen.findByText('Bad category.')).toBeInTheDocument()
+    expect(screen.getByText('Bad month.')).toBeInTheDocument()
+    expect(screen.getByText('Bad budgeted.')).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'A budget for this month already exists.',
+    )
+    expect(screen.getByLabelText('Edit budget month')).toHaveValue('2026-10')
+    expect(calls(mock, '/api/budgets/10/', 'PATCH')).toHaveLength(1)
+    expect(screen.getByLabelText('Edit budget category')).toBeInTheDocument()
+  })
+
+  it('shows a non-field-only duplicate message safely', async () => {
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'PATCH') {
+          return jsonResponse(
+            { non_field_errors: ['A budget for this month already exists.'] },
+            400,
+          )
+        }
+        return jsonResponse(oneBudget())
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    fireEvent.change(screen.getByLabelText('Edit budget month'), {
+      target: { value: '2026-10' },
+    })
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'A budget for this month already exists.',
+    )
+    expect(screen.getByLabelText('Edit budget category')).toBeInTheDocument()
+    expect(calls(mock, '/api/budgets/10/', 'PATCH')).toHaveLength(1)
+  })
+
+  it('shows the generic message for unknown-only 400 bodies without exposing contents', async () => {
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'PATCH') {
+          return jsonResponse({ mystery: ['boom-exposed'] }, 400)
+        }
+        return jsonResponse(oneBudget())
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    fireEvent.change(screen.getByLabelText('Edit budget month'), {
+      target: { value: '2026-10' },
+    })
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Something went wrong. Please try again.',
+    )
+    expect(screen.queryByText('boom-exposed')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Edit budget category')).toBeInTheDocument()
+    expect(calls(mock, '/api/budgets/10/', 'PATCH')).toHaveLength(1)
+  })
+
+  it.each([
+    ['forbidden', 403, { detail: 'No permission here.' }, 'No permission here.'],
+    ['missing', 404, { detail: 'Not found.' }, 'Not found.'],
+    ['server error', 500, { detail: 'Server exploded.' }, 'Server exploded.'],
+  ])('keeps the editor open for retry on %s', async (_label, status, body, message) => {
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'PATCH') {
+          return jsonResponse(body, status)
+        }
+        return jsonResponse(oneBudget())
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    fireEvent.change(screen.getByLabelText('Edit budget month'), {
+      target: { value: '2026-10' },
+    })
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(message)
+    expect(screen.getByLabelText('Edit budget month')).toHaveValue('2026-10')
+    expect(screen.getByLabelText('Edit budget category')).toBeInTheDocument()
+    expect(calls(mock, '/api/budgets/10/', 'PATCH')).toHaveLength(1)
+  })
+
+  it('keeps the editor open on a network failure', async () => {
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'PATCH') {
+          throw new TypeError('Failed to fetch')
+        }
+        return jsonResponse(oneBudget())
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    fireEvent.change(screen.getByLabelText('Edit budget month'), {
+      target: { value: '2026-10' },
+    })
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Could not reach the server.',
+    )
+    expect(screen.getByLabelText('Edit budget category')).toBeInTheDocument()
+    expect(calls(mock, '/api/budgets/10/', 'PATCH')).toHaveLength(1)
+  })
+})
+
+describe('budget edit session and submit guards', () => {
+  it('clears only in-memory session and returns to login on PATCH 401', async () => {
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'PATCH') {
+          return jsonResponse(
+            { detail: 'Authentication credentials were not provided.' },
+            401,
+          )
+        }
+        return jsonResponse([
+          budgetFixture({ id: 10, category: 2, month: '2026-09-01', budgeted: '300.00' }),
+        ])
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    fireEvent.change(screen.getByLabelText('Edit budget month'), {
+      target: { value: '2026-10' },
+    })
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByLabelText('Email')).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/login')
+    expect(calls(mock, '/api/budgets/10/', 'PATCH')).toHaveLength(1)
+    expect(
+      mock.mock.calls.some(([input]) =>
+        String(input).includes('/api/auth/logout/'),
+      ),
+    ).toBe(false)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  it('leaves a live observer on Accounts when a late edit 401 arrives after navigating away', async () => {
+    const pending = deferred<Response>()
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'PATCH') {
+          return pending.promise
+        }
+        if (url.startsWith('/api/budgets/')) {
+          return jsonResponse([
+            budgetFixture({ id: 10, category: 2, month: '2026-09-01', budgeted: '300.00' }),
+          ])
+        }
+        if (url === '/api/accounts/') return jsonResponse([])
+        return jsonResponse({ id: 1, email: 'student@example.com' })
+      }),
+    )
+    // Prime the accounts route handler through the shared budgets handler path
+    void mock
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    fireEvent.change(screen.getByLabelText('Edit budget month'), {
+      target: { value: '2026-10' },
+    })
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Updating budget',
+    )
+
+    await user.click(screen.getByRole('link', { name: 'Accounts' }))
+    expect(
+      await screen.findByRole('heading', { name: 'Accounts' }),
+    ).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/accounts')
+
+    await act(async () => {
+      pending.resolve(
+        jsonResponse(
+          { detail: 'Authentication credentials were not provided.' },
+          401,
+        ),
+      )
+    })
+
+    expect(window.location.pathname).toBe('/accounts')
+    expect(screen.getByRole('heading', { name: 'Accounts' })).toBeInTheDocument()
+    expect(screen.queryByLabelText('Email')).not.toBeInTheDocument()
+    expect(
+      mock.mock.calls.some(([input]) =>
+        String(input).includes('/api/auth/logout/'),
+      ),
+    ).toBe(false)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  it('produces exactly one PATCH on a same-tick double submit', async () => {
+    const pending = deferred<Response>()
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'PATCH') {
+          return pending.promise
+        }
+        return jsonResponse([
+          budgetFixture({ id: 10, category: 2, month: '2026-09-01', budgeted: '300.00' }),
+        ])
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+    await userEvent.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    fireEvent.change(screen.getByLabelText('Edit budget month'), {
+      target: { value: '2026-10' },
+    })
+    const form = screen
+      .getByRole('button', { name: 'Save changes' })
+      .closest('form') as HTMLFormElement
+    await act(async () => {
+      fireEvent.submit(form)
+      fireEvent.submit(form)
+    })
+
+    await waitFor(() =>
+      expect(calls(mock, '/api/budgets/10/', 'PATCH')).toHaveLength(1),
+    )
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(1)
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Updating budget',
+    )
+    await act(async () => {
+      pending.resolve(jsonResponse(budgetFixture({ id: 10, month: '2026-10-01' })))
+    })
+  })
+})
+
+describe('budget edit success and refresh', () => {
+  it('closes the editor, announces, reorders from the server, uses recomputed values, and refetches budgets only', async () => {
+    let getCalls = 0
+    const refreshGate = deferred<Response>()
+    let refreshed = false
+    const initial = [
+      budgetFixture({ id: 10, category: 2, month: '2026-09-01', budgeted: '300.00', spent: '10.00', remaining: '290.00' }),
+      budgetFixture({ id: 30, category: 3, month: '2026-10-01', budgeted: '150.00', spent: '20.00', remaining: '130.00' }),
+    ]
+    const authoritative = [
+      budgetFixture({ id: 30, category: 3, month: '2026-10-01', budgeted: '150.00', spent: '20.00', remaining: '130.00' }),
+      budgetFixture({ id: 10, category: 2, month: '2026-11-01', budgeted: '300.00', spent: '99.99', remaining: '200.01' }),
+    ]
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'PATCH') {
+          const body = JSON.parse(String(init?.body))
+          expect(body).toEqual({ month: '2026-11-01' })
+          return jsonResponse(authoritative[1])
+        }
+        if (url === '/api/budgets/' && (init?.method ?? 'GET') === 'GET') {
+          getCalls += 1
+          if (getCalls === 1) return jsonResponse(initial)
+          if (!refreshed) {
+            refreshed = true
+            return refreshGate.promise
+          }
+          return jsonResponse(authoritative)
+        }
+        return jsonResponse({}, 404)
+      }, { categories: defaultCategories() }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    fireEvent.change(screen.getByLabelText('Edit budget month'), {
+      target: { value: '2026-11' },
+    })
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByText('Updating budgets…')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Edit budget category')).not.toBeInTheDocument()
+    expect(screen.getByText('Budget updated.')).toBeInTheDocument()
+
+    await act(async () => {
+      refreshGate.resolve(jsonResponse(authoritative))
+    })
+
+    const items = await screen.findAllByRole('listitem')
+    expect(items).toHaveLength(2)
+    expect(within(items[0]).getByText('October 2026')).toBeInTheDocument()
+    expect(within(items[1]).getByText('November 2026')).toBeInTheDocument()
+    expect(screen.getByText('$200.01')).toBeInTheDocument()
+    expect(screen.getByText('$99.99')).toBeInTheDocument()
+    expect(calls(mock, '/api/budgets/')).toHaveLength(2)
+    expect(calls(mock, '/api/categories/')).toHaveLength(1)
+    expect(calls(mock, '/api/budgets/10/', 'PATCH')).toHaveLength(1)
+  })
+
+  it('drops a stale older list response after a post-update refetch', async () => {
+    const firstRefresh = deferred<Response>()
+    const secondRefresh = deferred<Response>()
+    let getCalls = 0
+    let postCalls = 0
+    const initial = [
+      budgetFixture({ id: 10, category: 2, month: '2026-09-01', budgeted: '300.00' }),
+    ]
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler((url, init) => {
+        if ((init?.method ?? 'GET') === 'POST' && url === '/api/budgets/') {
+          postCalls += 1
+          return jsonResponse(budgetFixture({ id: 41, category: 2, month: '2026-10-01', budgeted: '10.00' }), 201)
+        }
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'PATCH') {
+          return jsonResponse(budgetFixture({ id: 10, category: 2, month: '2026-11-01', budgeted: '300.00' }))
+        }
+        if (url === '/api/budgets/' && (init?.method ?? 'GET') === 'GET') {
+          getCalls += 1
+          if (getCalls === 1) return jsonResponse(initial)
+          if (getCalls === 2) return firstRefresh.promise
+          return secondRefresh.promise
+        }
+        return jsonResponse({}, 404)
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    fireEvent.change(screen.getByLabelText('Edit budget month'), {
+      target: { value: '2026-11' },
+    })
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    expect(await screen.findByText('Updating budgets…')).toBeInTheDocument()
+    await waitFor(() => expect(calls(mock, '/api/budgets/')).toHaveLength(2))
+
+    await fillValidCreateForm(user, { category: '2', month: '2026-10', budgeted: '10.00' })
+    await user.click(screen.getByRole('button', { name: 'Create budget' }))
+    await waitFor(() => expect(calls(mock, '/api/budgets/')).toHaveLength(3))
+
+    await act(async () => {
+      firstRefresh.resolve(
+        jsonResponse([budgetFixture({ id: 99, category: 2, month: '2030-01-01', budgeted: '999.99' })]),
+      )
+    })
+    expect(screen.queryByText('January 2030')).not.toBeInTheDocument()
+
+    await act(async () => {
+      secondRefresh.resolve(
+        jsonResponse([
+          budgetFixture({ id: 10, category: 2, month: '2026-11-01', budgeted: '300.00' }),
+          budgetFixture({ id: 41, category: 2, month: '2026-10-01', budgeted: '10.00' }),
+        ]),
+      )
+    })
+    expect(await screen.findByText('November 2026')).toBeInTheDocument()
+    expect(screen.getByText('October 2026')).toBeInTheDocument()
+    expect(screen.queryByText('January 2030')).not.toBeInTheDocument()
+    expect(postCalls).toBe(1)
+  })
+
+  it('clears success when the post-update refresh fails and Retry recovers', async () => {
+    let getCalls = 0
+    const refreshFailure = deferred<Response>()
+    const updated = budgetFixture({ id: 10, category: 2, month: '2026-10-01', budgeted: '300.00', spent: '5.00', remaining: '295.00' })
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'PATCH') {
+          return jsonResponse(updated)
+        }
+        if (url === '/api/budgets/' && (init?.method ?? 'GET') === 'GET') {
+          getCalls += 1
+          if (getCalls === 1) {
+            return jsonResponse([budgetFixture({ id: 10, category: 2, month: '2026-09-01', budgeted: '300.00' })])
+          }
+          if (getCalls === 2) return refreshFailure.promise
+          return jsonResponse([updated])
+        }
+        return jsonResponse({}, 404)
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    fireEvent.change(screen.getByLabelText('Edit budget month'), {
+      target: { value: '2026-10' },
+    })
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    expect(await screen.findByText('Budget updated.')).toBeInTheDocument()
+
+    await act(async () => {
+      refreshFailure.resolve(jsonResponse({ detail: 'Server exploded.' }, 500))
+    })
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Your budget change was saved, but the current budget list could not be refreshed. Try again.',
+    )
+    expect(screen.queryByText('Server exploded.')).not.toBeInTheDocument()
+    expect(screen.queryByText('Budget updated.')).not.toBeInTheDocument()
+    expect(screen.queryByText('Budget created.')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(await screen.findByText('October 2026')).toBeInTheDocument()
+    expect(screen.getByText('$295.00')).toBeInTheDocument()
+    expect(calls(mock, '/api/budgets/')).toHaveLength(3)
+  })
+
+  it('disables every Edit action while the authoritative refresh is pending', async () => {
+    const refreshGate = deferred<Response>()
+    let getCalls = 0
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'PATCH') {
+          return jsonResponse(budgetFixture({ id: 10, month: '2026-10-01' }))
+        }
+        if (url === '/api/budgets/' && (init?.method ?? 'GET') === 'GET') {
+          getCalls += 1
+          if (getCalls === 1) {
+            return jsonResponse([
+              budgetFixture({ id: 10, month: '2026-09-01' }),
+              budgetFixture({ id: 11, category: 3, month: '2026-09-01' }),
+            ])
+          }
+          return refreshGate.promise
+        }
+        return jsonResponse({}, 404)
+      }),
+    )
+    void mock
+    renderApp('/budgets')
+    expect((await screen.findAllByText('September 2026'))).toHaveLength(2)
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    fireEvent.change(screen.getByLabelText('Edit budget month'), {
+      target: { value: '2026-10' },
+    })
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByText('Updating budgets…')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Edit budget 10' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Edit budget 11' })).toBeDisabled()
+
+    await act(async () => {
+      refreshGate.resolve(
+        jsonResponse([
+          budgetFixture({ id: 10, month: '2026-10-01' }),
+          budgetFixture({ id: 11, category: 3, month: '2026-09-01' }),
+        ]),
+      )
+    })
+    expect(await screen.findByText('October 2026')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Edit budget 10' })).toBeEnabled()
+  })
+
+  it('returns focus to the moved row after a reordered refresh', async () => {
+    const refreshGate = deferred<Response>()
+    let getCalls = 0
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'PATCH') {
+          return jsonResponse(budgetFixture({ id: 10, month: '2026-11-01' }))
+        }
+        if (url === '/api/budgets/' && (init?.method ?? 'GET') === 'GET') {
+          getCalls += 1
+          if (getCalls === 1) {
+            return jsonResponse([
+              budgetFixture({ id: 10, month: '2026-09-01' }),
+              budgetFixture({ id: 30, category: 3, month: '2026-10-01' }),
+            ])
+          }
+          return refreshGate.promise
+        }
+        return jsonResponse({}, 404)
+      }),
+    )
+    void mock
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    fireEvent.change(screen.getByLabelText('Edit budget month'), {
+      target: { value: '2026-11' },
+    })
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    await screen.findByText('Updating budgets…')
+
+    await act(async () => {
+      refreshGate.resolve(
+        jsonResponse([
+          budgetFixture({ id: 30, category: 3, month: '2026-10-01' }),
+          budgetFixture({ id: 10, month: '2026-11-01' }),
+        ]),
+      )
+    })
+
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Edit budget 10' })).toHaveFocus(),
+    )
+  })
+
+  it('focuses the Budgets heading when the refetch omits the updated row', async () => {
+    const refreshGate = deferred<Response>()
+    let getCalls = 0
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'PATCH') {
+          return jsonResponse(budgetFixture({ id: 10, month: '2026-10-01' }))
+        }
+        if (url === '/api/budgets/' && (init?.method ?? 'GET') === 'GET') {
+          getCalls += 1
+          if (getCalls === 1) {
+            return jsonResponse([budgetFixture({ id: 10, month: '2026-09-01' })])
+          }
+          return refreshGate.promise
+        }
+        return jsonResponse({}, 404)
+      }),
+    )
+    void mock
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    fireEvent.change(screen.getByLabelText('Edit budget month'), {
+      target: { value: '2026-10' },
+    })
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    await screen.findByText('Updating budgets…')
+
+    await act(async () => {
+      refreshGate.resolve(jsonResponse([]))
+    })
+
+    await waitFor(() =>
+      expect(screen.getByRole('heading', { name: 'Budgets' })).toHaveFocus(),
+    )
   })
 })
