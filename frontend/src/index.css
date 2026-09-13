@@ -219,6 +219,16 @@ a {
   background: var(--color-surface);
 }
 
+.transaction-create {
+  max-width: 32rem;
+  margin-block-end: var(--space-6);
+}
+
+.transaction-create h3 {
+  margin: 0 0 var(--space-4);
+  font-size: 1rem;
+}
+
 .transaction-filters .form-field {
   margin: 0;
 }
