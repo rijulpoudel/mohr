@@ -208,6 +208,21 @@ a {
   margin: 0 0 var(--space-4);
 }
 
+.transaction-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: var(--space-3);
+  margin-block-end: var(--space-6);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-1);
+  background: var(--color-surface);
+}
+
+.transaction-filters .form-field {
+  margin: 0;
+}
+
 .screen-narrow {
   max-width: 22rem;
   margin-inline: auto;

@@ -20,6 +20,7 @@ export function AppShell() {
               </NavLink>
               <NavLink to="/accounts">Accounts</NavLink>
               <NavLink to="/categories">Categories</NavLink>
+              <NavLink to="/transactions">Transactions</NavLink>
             </nav>
           )}
         </div>
