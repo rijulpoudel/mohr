@@ -2601,3 +2601,2175 @@ describe('transaction creation pre-create race', () => {
     expect(screen.queryByText('Stale result')).not.toBeInTheDocument()
   })
 })
+
+function authenticatedEditHandler(
+  options: {
+    accounts?: unknown[]
+    categories?: unknown[]
+    transactions?: (url: string, init?: RequestInit) => Response | Promise<Response>
+  } = {},
+) {
+  return (url: string, init?: RequestInit) => {
+    if (url === '/api/auth/me/') {
+      return jsonResponse({ id: 1, email: 'student@example.com' })
+    }
+    if (url === '/api/auth/csrf/') {
+      setCsrfCookie()
+      return jsonResponse({ detail: 'CSRF cookie set.' })
+    }
+    if (url === '/api/accounts/') {
+      return jsonResponse(options.accounts ?? defaultAccounts())
+    }
+    if (url === '/api/categories/') {
+      return jsonResponse(options.categories ?? defaultCategories())
+    }
+    if (url.startsWith('/api/transactions/')) {
+      if (options.transactions !== undefined) {
+        return options.transactions(url, init)
+      }
+      return jsonResponse([])
+    }
+    return jsonResponse({}, 404)
+  }
+}
+
+function editListHandler(
+  rows: unknown[],
+  patchImpl?: (url: string, init?: RequestInit) => Response | Promise<Response>,
+) {
+  return authenticatedEditHandler({
+    transactions: (url, init) => {
+      if ((init?.method ?? 'GET') === 'PATCH') {
+        if (patchImpl !== undefined) return patchImpl(url, init)
+        const id = Number(url.split('/')[3])
+        const body = JSON.parse(String(init?.body))
+        const original = (rows as Record<string, unknown>[]).find(
+          (item) => item.id === id,
+        ) as Record<string, unknown>
+        return jsonResponse({ ...original, ...body })
+      }
+      return jsonResponse(rows)
+    },
+  })
+}
+
+async function openEditorFor(user: ReturnType<typeof userEvent.setup>, index = 0) {
+  const edits = await screen.findAllByRole('button', { name: /^Edit/ })
+  await user.click(edits[index])
+  return edits
+}
+
+describe('transaction editing', () => {
+  it('shows an Edit action on every row including archived-linked rows; cancel sends no request and restores the row', async () => {
+    const mock = installFetchMock(
+      authenticatedEditHandler({
+        accounts: [
+          accountFixture({ id: 1, name: 'Everyday Checking' }),
+          accountFixture({
+            id: 2,
+            name: 'Old Card',
+            account_type: 'credit_card',
+            is_archived: true,
+          }),
+        ],
+        categories: [
+          categoryFixture({ id: 1, name: 'Salary', category_type: 'income' }),
+          categoryFixture({ id: 2, name: 'Food', category_type: 'expense' }),
+          categoryFixture({
+            id: 3,
+            name: 'Old Hobby',
+            category_type: 'expense',
+            is_archived: true,
+          }),
+        ],
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'GET') {
+            return jsonResponse([
+              transactionFixture({
+                id: 7,
+                account: 2,
+                category: 3,
+                amount: '88.50',
+                date: '2026-08-15',
+                note: 'Vintage purchase',
+              }),
+            ])
+          }
+          return jsonResponse(transactionFixture(), 200)
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Vintage purchase')
+
+    const edits = await screen.findAllByRole('button', { name: /^Edit/ })
+    expect(edits).toHaveLength(1)
+
+    const user = userEvent.setup()
+    await user.click(edits[0])
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save changes' })).toBeInTheDocument()
+
+    const noteInput = screen.getByLabelText('Edit transaction note')
+    await user.clear(noteInput)
+    await user.type(noteInput, 'Changed')
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    expect(screen.queryByRole('button', { name: 'Save changes' })).not.toBeInTheDocument()
+    expect(screen.getByText('Vintage purchase')).toBeInTheDocument()
+    expect(calls(mock, '/api/transactions/7/', 'PATCH')).toHaveLength(0)
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(0)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  it('prefills the editor with the exact account, category, type, amount, date, and note', async () => {
+    installFetchMock(
+      authenticatedEditHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'GET') {
+            return jsonResponse([
+              transactionFixture({
+                id: 1,
+                account: 1,
+                category: 2,
+                transaction_type: 'expense',
+                amount: '12.50',
+                date: '2026-09-10',
+                note: 'Groceries',
+              }),
+            ])
+          }
+          return jsonResponse(transactionFixture(), 200)
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+
+    expect(screen.getByLabelText('Edit transaction account')).toHaveValue('1')
+    expect(screen.getByLabelText('Edit transaction category')).toHaveValue('2')
+    expect(screen.getByLabelText('Edit transaction type')).toHaveValue('expense')
+    expect(screen.getByLabelText('Edit transaction amount')).toHaveValue('12.50')
+    expect(screen.getByLabelText('Edit transaction date')).toHaveValue('2026-09-10')
+    expect(screen.getByLabelText('Edit transaction note')).toHaveValue('Groceries')
+  })
+
+  it('keeps only one editor open at a time', async () => {
+    installFetchMock(
+      authenticatedEditHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'GET') {
+            return jsonResponse(serverOrderedTransactions())
+          }
+          return jsonResponse(transactionFixture(), 200)
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Monthly paycheck')
+
+    const user = userEvent.setup()
+    const edits = await screen.findAllByRole('button', { name: /^Edit/ })
+    expect(edits).toHaveLength(3)
+    await user.click(edits[0])
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: /^Edit/ })).toHaveLength(2)
+
+    const remaining = screen.getAllByRole('button', { name: /^Edit/ })
+    for (const button of remaining) {
+      expect(button).toBeDisabled()
+    }
+    await user.click(remaining[1])
+    expect(screen.getAllByRole('button', { name: 'Cancel' })).toHaveLength(1)
+    expect(screen.queryByRole('button', { name: 'Save changes' })).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: /^Edit/ })).toHaveLength(2)
+  })
+
+  it('offers active choices plus the current archived account and category as marked historical options', async () => {
+    installFetchMock(
+      authenticatedEditHandler({
+        accounts: [
+          accountFixture({ id: 1, name: 'Everyday Checking' }),
+          accountFixture({
+            id: 2,
+            name: 'Old Card',
+            account_type: 'credit_card',
+            is_archived: true,
+          }),
+        ],
+        categories: [
+          categoryFixture({ id: 1, name: 'Salary', category_type: 'income' }),
+          categoryFixture({ id: 2, name: 'Food', category_type: 'expense' }),
+          categoryFixture({
+            id: 3,
+            name: 'Old Hobby',
+            category_type: 'expense',
+            is_archived: true,
+          }),
+        ],
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'GET') {
+            return jsonResponse([
+              transactionFixture({
+                id: 7,
+                account: 2,
+                category: 3,
+                amount: '88.50',
+                date: '2026-08-15',
+                note: 'Vintage purchase',
+              }),
+            ])
+          }
+          return jsonResponse(transactionFixture(), 200)
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Vintage purchase')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+
+    const accountOptions = within(
+      screen.getByLabelText('Edit transaction account'),
+    ).getAllByRole('option')
+    expect(accountOptions.map((option) => option.getAttribute('value'))).toEqual([
+      '1',
+      '2',
+    ])
+    const archivedAccount = accountOptions.find(
+      (option) => option.getAttribute('value') === '2',
+    ) as HTMLOptionElement
+    expect(archivedAccount.textContent).toMatch(/archived/i)
+    expect(screen.getByLabelText('Edit transaction account')).toHaveValue('2')
+
+    const categoryOptions = within(
+      screen.getByLabelText('Edit transaction category'),
+    ).getAllByRole('option')
+    expect(categoryOptions.map((option) => option.getAttribute('value'))).toEqual([
+      '',
+      '2',
+      '3',
+    ])
+    const archivedCategory = categoryOptions.find(
+      (option) => option.getAttribute('value') === '3',
+    ) as HTMLOptionElement
+    expect(archivedCategory.textContent).toMatch(/archived/i)
+    expect(screen.getByLabelText('Edit transaction category')).toHaveValue('3')
+  })
+
+  it('sends only the changed note when archived relations are unchanged', async () => {
+    const mock = installFetchMock(
+      authenticatedEditHandler({
+        accounts: [
+          accountFixture({ id: 1, name: 'Everyday Checking' }),
+          accountFixture({
+            id: 2,
+            name: 'Old Card',
+            account_type: 'credit_card',
+            is_archived: true,
+          }),
+        ],
+        categories: [
+          categoryFixture({ id: 2, name: 'Food', category_type: 'expense' }),
+          categoryFixture({
+            id: 3,
+            name: 'Old Hobby',
+            category_type: 'expense',
+            is_archived: true,
+          }),
+        ],
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'GET') {
+            return jsonResponse([
+              transactionFixture({
+                id: 7,
+                account: 2,
+                category: 3,
+                amount: '88.50',
+                date: '2026-08-15',
+                note: 'Vintage purchase',
+              }),
+            ])
+          }
+          if ((init?.method ?? 'GET') === 'PATCH') {
+            return jsonResponse(
+              transactionFixture({
+                id: 7,
+                account: 2,
+                category: 3,
+                amount: '88.50',
+                date: '2026-08-15',
+                note: 'Corrected note',
+              }),
+            )
+          }
+          return jsonResponse({}, 404)
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Vintage purchase')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    const noteInput = screen.getByLabelText('Edit transaction note')
+    await user.clear(noteInput)
+    await user.type(noteInput, 'Corrected note')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() =>
+      expect(calls(mock, '/api/transactions/7/', 'PATCH')).toHaveLength(1),
+    )
+    const [, init] = calls(mock, '/api/transactions/7/', 'PATCH')[0]
+    expect(JSON.parse(String(init?.body))).toEqual({ note: 'Corrected note' })
+    expect(await screen.findByText('Transaction updated.')).toBeInTheDocument()
+  })
+
+  it('sends exactly the changed writable fields', async () => {
+    const rows = [
+      transactionFixture({
+        id: 1,
+        account: 1,
+        category: 2,
+        transaction_type: 'expense',
+        amount: '12.50',
+        date: '2026-09-10',
+        note: 'Groceries',
+      }),
+    ]
+    const mock = installFetchMock(editListHandler(rows))
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    const amountInput = screen.getByLabelText('Edit transaction amount')
+    await user.clear(amountInput)
+    await user.type(amountInput, '20.00')
+    fireEvent.change(screen.getByLabelText('Edit transaction date'), {
+      target: { value: '2026-09-11' },
+    })
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() =>
+      expect(calls(mock, '/api/transactions/1/', 'PATCH')).toHaveLength(1),
+    )
+    const [, init] = calls(mock, '/api/transactions/1/', 'PATCH')[0]
+    expect(JSON.parse(String(init?.body))).toEqual({
+      amount: '20.00',
+      date: '2026-09-11',
+    })
+  })
+
+  it('clears an incompatible category on type change and requires an active matching category', async () => {
+    const mock = installFetchMock(
+      authenticatedEditHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'GET') {
+            return jsonResponse([
+              transactionFixture({
+                id: 1,
+                account: 1,
+                category: 2,
+                transaction_type: 'expense',
+                amount: '12.50',
+                date: '2026-09-10',
+                note: 'Groceries',
+              }),
+            ])
+          }
+          return jsonResponse(transactionFixture(), 200)
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    const typeSelect = screen.getByLabelText('Edit transaction type')
+    await user.selectOptions(typeSelect, 'income')
+    expect(
+      screen.getByLabelText('Edit transaction category'),
+    ).toHaveValue('')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Please check the highlighted fields.',
+    )
+    expect(calls(mock, '/api/transactions/1/', 'PATCH')).toHaveLength(0)
+
+    await user.selectOptions(
+      screen.getByLabelText('Edit transaction category'),
+      '1',
+    )
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    await waitFor(() =>
+      expect(calls(mock, '/api/transactions/1/', 'PATCH')).toHaveLength(1),
+    )
+    const [, init] = calls(mock, '/api/transactions/1/', 'PATCH')[0]
+    expect(JSON.parse(String(init?.body))).toEqual({
+      transaction_type: 'income',
+      category: 1,
+    })
+  })
+
+  it('blocks client-invalid edits before any network call without float conversion', async () => {
+    const mock = installFetchMock(
+      authenticatedEditHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'GET') {
+            return jsonResponse([
+              transactionFixture({
+                id: 1,
+                account: 1,
+                category: 2,
+                transaction_type: 'expense',
+                amount: '12.50',
+                date: '2026-09-10',
+                note: 'Groceries',
+              }),
+            ])
+          }
+          return jsonResponse(transactionFixture(), 200)
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    const amountInput = screen.getByLabelText('Edit transaction amount')
+    await user.clear(amountInput)
+    await user.type(amountInput, '0.00')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Please check the highlighted fields.',
+    )
+    expect(amountInput).toHaveValue('0.00')
+    expect(calls(mock, '/api/transactions/1/', 'PATCH')).toHaveLength(0)
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(0)
+  })
+
+  it('maps backend 400 field errors safely and preserves editor values', async () => {
+    const mock = installFetchMock(
+      authenticatedEditHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'GET') {
+            return jsonResponse([
+              transactionFixture({
+                id: 1,
+                account: 1,
+                category: 2,
+                transaction_type: 'expense',
+                amount: '12.50',
+                date: '2026-09-10',
+                note: 'Groceries',
+              }),
+            ])
+          }
+          return jsonResponse(
+            {
+              amount: ['Bad amount.'],
+              note: ['Bad note.'],
+              non_field_errors: ['Check everything.'],
+            },
+            400,
+          )
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    const amountInput = screen.getByLabelText('Edit transaction amount')
+    await user.clear(amountInput)
+    await user.type(amountInput, '20.00')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByText('Bad amount.')).toBeInTheDocument()
+    expect(screen.getByText('Bad note.')).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('Check everything.')
+    expect(screen.getByLabelText('Edit transaction amount')).toHaveValue('20.00')
+    expect(calls(mock, '/api/transactions/1/', 'PATCH')).toHaveLength(1)
+    expect(screen.queryByText('Transaction updated.')).not.toBeInTheDocument()
+  })
+
+  it('shows a generic alert for unknown-only 400 without exposing contents', async () => {
+    installFetchMock(
+      authenticatedEditHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'GET') {
+            return jsonResponse([
+              transactionFixture({
+                id: 1,
+                account: 1,
+                category: 2,
+                transaction_type: 'expense',
+                amount: '12.50',
+                date: '2026-09-10',
+                note: 'Groceries',
+              }),
+            ])
+          }
+          return jsonResponse({ mystery: ['boom-exposed'] }, 400)
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    const noteInput = screen.getByLabelText('Edit transaction note')
+    await user.clear(noteInput)
+    await user.type(noteInput, 'New note')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Something went wrong. Please try again.',
+    )
+    expect(screen.queryByText('boom-exposed')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Edit transaction note')).toHaveValue('New note')
+  })
+
+  it.each([
+    ['forbidden', 403],
+    ['missing', 404],
+    ['server error', 500],
+  ])('preserves the editor for retry on %s', async (_label, status) => {
+    const mock = installFetchMock(
+      authenticatedEditHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'GET') {
+            return jsonResponse([
+              transactionFixture({
+                id: 1,
+                account: 1,
+                category: 2,
+                transaction_type: 'expense',
+                amount: '12.50',
+                date: '2026-09-10',
+                note: 'Groceries',
+              }),
+            ])
+          }
+          return jsonResponse({ detail: 'Edit failed.' }, status)
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    const noteInput = screen.getByLabelText('Edit transaction note')
+    await user.clear(noteInput)
+    await user.type(noteInput, 'Retry me')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Edit failed.')
+    expect(screen.getByRole('button', { name: 'Save changes' })).toBeEnabled()
+    expect(screen.getByLabelText('Edit transaction note')).toHaveValue('Retry me')
+    expect(calls(mock, '/api/transactions/1/', 'PATCH')).toHaveLength(1)
+  })
+
+  it('preserves the editor on network failure', async () => {
+    const mock = installFetchMock(
+      authenticatedEditHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'GET') {
+            return jsonResponse([
+              transactionFixture({
+                id: 1,
+                account: 1,
+                category: 2,
+                transaction_type: 'expense',
+                amount: '12.50',
+                date: '2026-09-10',
+                note: 'Groceries',
+              }),
+            ])
+          }
+          throw new TypeError('Failed to fetch')
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    const noteInput = screen.getByLabelText('Edit transaction note')
+    await user.clear(noteInput)
+    await user.type(noteInput, 'Retry me')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Could not reach the server.',
+    )
+    expect(screen.getByLabelText('Edit transaction note')).toHaveValue('Retry me')
+    expect(calls(mock, '/api/transactions/1/', 'PATCH')).toHaveLength(1)
+  })
+
+  it('disables editor controls, announces updating, and dedups same-tick duplicate PATCH', async () => {
+    const pending = deferred<Response>()
+    const mock = installFetchMock(
+      authenticatedEditHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'GET') {
+            return jsonResponse([
+              transactionFixture({
+                id: 1,
+                account: 1,
+                category: 2,
+                transaction_type: 'expense',
+                amount: '12.50',
+                date: '2026-09-10',
+                note: 'Groceries',
+              }),
+            ])
+          }
+          return pending.promise
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    const noteInput = screen.getByLabelText('Edit transaction note')
+    await user.clear(noteInput)
+    await user.type(noteInput, 'Pending note')
+    const form = screen
+      .getByRole('button', { name: 'Save changes' })
+      .closest('form') as HTMLFormElement
+    await act(async () => {
+      fireEvent.submit(form)
+      fireEvent.submit(form)
+    })
+
+    await waitFor(() =>
+      expect(calls(mock, '/api/transactions/1/', 'PATCH')).toHaveLength(1),
+    )
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(1)
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Updating transaction…',
+    )
+    expect(screen.getByLabelText('Edit transaction note')).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Updating transaction…' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled()
+
+    await act(async () => {
+      pending.resolve(
+        jsonResponse(
+          transactionFixture({
+            id: 1,
+            account: 1,
+            category: 2,
+            transaction_type: 'expense',
+            amount: '12.50',
+            date: '2026-09-10',
+            note: 'Pending note',
+          }),
+        ),
+      )
+    })
+    expect(await screen.findByText('Transaction updated.')).toBeInTheDocument()
+  })
+
+  it('replaces only the matching row at the same position without refetching list or metadata', async () => {
+    const rows = serverOrderedTransactions()
+    const mock = installFetchMock(
+      authenticatedEditHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'GET') return jsonResponse(rows)
+          if ((init?.method ?? 'GET') === 'PATCH') {
+            return jsonResponse(
+              transactionFixture({
+                id: 1,
+                account: 1,
+                category: 2,
+                transaction_type: 'expense',
+                amount: '99.99',
+                date: '2026-09-10',
+                note: 'Updated row',
+              }),
+            )
+          }
+          return jsonResponse({}, 404)
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Monthly paycheck')
+    const beforeLists = calls(mock, '/api/transactions/').length
+    const beforeAccounts = calls(mock, '/api/accounts/').length
+    const beforeCategories = calls(mock, '/api/categories/').length
+
+    const user = userEvent.setup()
+    const edits = await screen.findAllByRole('button', { name: /^Edit/ })
+    await user.click(edits[1])
+    const noteInput = screen.getByLabelText('Edit transaction note')
+    await user.clear(noteInput)
+    await user.type(noteInput, 'Updated row')
+    const amountInput = screen.getByLabelText('Edit transaction amount')
+    await user.clear(amountInput)
+    await user.type(amountInput, '99.99')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByText('Transaction updated.')).toBeInTheDocument()
+    const items = screen.getAllByRole('listitem')
+    expect(items).toHaveLength(3)
+    expect(items[0]).toHaveTextContent('Monthly paycheck')
+    expect(items[1]).toHaveTextContent('Updated row')
+    expect(items[1]).toHaveTextContent('-$99.99')
+    expect(items[2]).toHaveTextContent('Dinner')
+    expect(screen.queryByRole('button', { name: 'Save changes' })).not.toBeInTheDocument()
+    expect(calls(mock, '/api/transactions/')).toHaveLength(beforeLists)
+    expect(calls(mock, '/api/accounts/')).toHaveLength(beforeAccounts)
+    expect(calls(mock, '/api/categories/')).toHaveLength(beforeCategories)
+    expect(calls(mock, '/api/transactions/1/', 'PATCH')).toHaveLength(1)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  it('clears only in-memory session and returns to login on edit 401', async () => {
+    const mock = installFetchMock(
+      authenticatedEditHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'GET') {
+            return jsonResponse([
+              transactionFixture({
+                id: 1,
+                account: 1,
+                category: 2,
+                transaction_type: 'expense',
+                amount: '12.50',
+                date: '2026-09-10',
+                note: 'Groceries',
+              }),
+            ])
+          }
+          return jsonResponse(
+            { detail: 'Authentication credentials were not provided.' },
+            401,
+          )
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    const noteInput = screen.getByLabelText('Edit transaction note')
+    await user.clear(noteInput)
+    await user.type(noteInput, 'New note')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByLabelText('Email')).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/login')
+    expect(calls(mock, '/api/transactions/1/', 'PATCH')).toHaveLength(1)
+    expect(
+      mock.mock.calls.some(([input]) =>
+        String(input).includes('/api/auth/logout/'),
+      ),
+    ).toBe(false)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  it('does nothing when a late edit success arrives after unmount', async () => {
+    const pending = deferred<Response>()
+    const mock = installFetchMock(
+      authenticatedEditHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'GET') {
+            return jsonResponse([
+              transactionFixture({
+                id: 1,
+                account: 1,
+                category: 2,
+                transaction_type: 'expense',
+                amount: '12.50',
+                date: '2026-09-10',
+                note: 'Groceries',
+              }),
+            ])
+          }
+          return pending.promise
+        },
+      }),
+    )
+    const view = renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    const noteInput = screen.getByLabelText('Edit transaction note')
+    await user.clear(noteInput)
+    await user.type(noteInput, 'Late note')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Updating transaction…',
+    )
+
+    view.unmount()
+    await act(async () => {
+      pending.resolve(
+        jsonResponse(
+          transactionFixture({ id: 1, note: 'Late note' }),
+        ),
+      )
+    })
+
+    expect(screen.queryByText('Transaction updated.')).not.toBeInTheDocument()
+    expect(screen.queryByText('Late note')).not.toBeInTheDocument()
+    expect(window.location.pathname).toBe('/transactions')
+    expect(calls(mock, '/api/transactions/1/', 'PATCH')).toHaveLength(1)
+  })
+
+  it('does nothing when a late edit error or 401 arrives after unmount', async () => {
+    const pending = deferred<Response>()
+    const mock = installFetchMock(
+      authenticatedEditHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'GET') {
+            return jsonResponse([
+              transactionFixture({
+                id: 1,
+                account: 1,
+                category: 2,
+                transaction_type: 'expense',
+                amount: '12.50',
+                date: '2026-09-10',
+                note: 'Groceries',
+              }),
+            ])
+          }
+          return pending.promise
+        },
+      }),
+    )
+    const view = renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    const noteInput = screen.getByLabelText('Edit transaction note')
+    await user.clear(noteInput)
+    await user.type(noteInput, 'Late note')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    view.unmount()
+    await act(async () => {
+      pending.resolve(jsonResponse({ detail: 'Server exploded.' }, 500))
+    })
+
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(window.location.pathname).toBe('/transactions')
+    expect(
+      mock.mock.calls.some(([input]) =>
+        String(input).includes('/api/auth/logout/'),
+      ),
+    ).toBe(false)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  it('opening an editor does not alter filter state or issue metadata refetches', async () => {
+    const mock = installFetchMock(
+      authenticatedEditHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'GET') return jsonResponse(serverOrderedTransactions())
+          return jsonResponse(transactionFixture(), 200)
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Monthly paycheck')
+
+    const user = userEvent.setup()
+    await user.selectOptions(screen.getByLabelText('Transaction type'), 'expense')
+    await waitFor(() =>
+      expect(
+        calls(mock, '/api/transactions/?transaction_type=expense'),
+      ).toHaveLength(1),
+    )
+    const txCalls = transactionRequests(mock)
+    const accountCalls = calls(mock, '/api/accounts/').length
+    const categoryCalls = calls(mock, '/api/categories/').length
+
+    const edits = await screen.findAllByRole('button', { name: /^Edit/ })
+    await user.click(edits[0])
+
+    expect(screen.getByLabelText('Transaction type')).toHaveValue('expense')
+    expect(transactionRequests(mock)).toBe(txCalls)
+    expect(calls(mock, '/api/accounts/')).toHaveLength(accountCalls)
+    expect(calls(mock, '/api/categories/')).toHaveLength(categoryCalls)
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeInTheDocument()
+  })
+
+  it('blocks an archived account that is changed away and restored before any network call', async () => {
+    const mock = installFetchMock(
+      authenticatedEditHandler({
+        accounts: [
+          accountFixture({ id: 1, name: 'Everyday Checking' }),
+          accountFixture({
+            id: 2,
+            name: 'Old Card',
+            account_type: 'credit_card',
+            is_archived: true,
+          }),
+        ],
+        categories: [categoryFixture({ id: 2, name: 'Food', category_type: 'expense' })],
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'GET') {
+            return jsonResponse([
+              transactionFixture({
+                id: 7,
+                account: 2,
+                category: 2,
+                transaction_type: 'expense',
+                amount: '88.50',
+                date: '2026-08-15',
+                note: 'Vintage purchase',
+              }),
+            ])
+          }
+          return jsonResponse(transactionFixture(), 200)
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Vintage purchase')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    const accountSelect = screen.getByLabelText('Edit transaction account')
+    await user.selectOptions(accountSelect, '1')
+    await user.selectOptions(accountSelect, '2')
+    const noteInput = screen.getByLabelText('Edit transaction note')
+    await user.clear(noteInput)
+    await user.type(noteInput, 'Touched note')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Please check the highlighted fields.',
+    )
+    expect(screen.getByText('Choose an active account.')).toBeInTheDocument()
+    expect(calls(mock, '/api/transactions/7/', 'PATCH')).toHaveLength(0)
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(0)
+    expect(screen.getByRole('button', { name: 'Save changes' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Edit transaction account')).toHaveValue('2')
+  })
+
+  it('blocks an archived category that is changed away, type-changed, and restored before any network call', async () => {
+    const mock = installFetchMock(
+      authenticatedEditHandler({
+        accounts: [accountFixture({ id: 1, name: 'Everyday Checking' })],
+        categories: [
+          categoryFixture({ id: 1, name: 'Salary', category_type: 'income' }),
+          categoryFixture({ id: 2, name: 'Food', category_type: 'expense' }),
+          categoryFixture({
+            id: 3,
+            name: 'Old Hobby',
+            category_type: 'expense',
+            is_archived: true,
+          }),
+        ],
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'GET') {
+            return jsonResponse([
+              transactionFixture({
+                id: 7,
+                account: 1,
+                category: 3,
+                transaction_type: 'expense',
+                amount: '88.50',
+                date: '2026-08-15',
+                note: 'Vintage purchase',
+              }),
+            ])
+          }
+          return jsonResponse(transactionFixture(), 200)
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Vintage purchase')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    await user.selectOptions(screen.getByLabelText('Edit transaction category'), '2')
+    await user.selectOptions(screen.getByLabelText('Edit transaction type'), 'income')
+    await user.selectOptions(screen.getByLabelText('Edit transaction type'), 'expense')
+    await user.selectOptions(screen.getByLabelText('Edit transaction category'), '3')
+    const noteInput = screen.getByLabelText('Edit transaction note')
+    await user.clear(noteInput)
+    await user.type(noteInput, 'Touched note')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Please check the highlighted fields.',
+    )
+    expect(
+      screen.getByText('Choose an active category matching the transaction type.'),
+    ).toBeInTheDocument()
+    expect(calls(mock, '/api/transactions/7/', 'PATCH')).toHaveLength(0)
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(0)
+    expect(screen.getByRole('button', { name: 'Save changes' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Edit transaction category')).toHaveValue('3')
+  })
+
+  it('blocks a no-op save without any network call and keeps the editor open', async () => {
+    const mock = installFetchMock(
+      authenticatedEditHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'GET') {
+            return jsonResponse([
+              transactionFixture({
+                id: 1,
+                account: 1,
+                category: 2,
+                transaction_type: 'expense',
+                amount: '12.50',
+                date: '2026-09-10',
+                note: 'Groceries',
+              }),
+            ])
+          }
+          return jsonResponse(transactionFixture(), 200)
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Make at least one change',
+    )
+    expect(calls(mock, '/api/transactions/1/', 'PATCH')).toHaveLength(0)
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(0)
+    expect(screen.getByRole('button', { name: 'Save changes' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Edit transaction note')).toHaveValue('Groceries')
+  })
+
+  it('removes an updated row that no longer matches the active expense filter without refetching', async () => {
+    const expenseRow = transactionFixture({
+      id: 1,
+      account: 1,
+      category: 2,
+      transaction_type: 'expense',
+      amount: '12.50',
+      date: '2026-09-10',
+      note: 'Groceries',
+    })
+    const mock = installFetchMock(
+      authenticatedEditHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'PATCH') {
+            return jsonResponse(
+              transactionFixture({
+                id: 1,
+                account: 1,
+                category: 1,
+                transaction_type: 'income',
+                amount: '12.50',
+                date: '2026-09-10',
+                note: 'Groceries',
+              }),
+            )
+          }
+          return jsonResponse([expenseRow])
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await user.selectOptions(screen.getByLabelText('Transaction type'), 'expense')
+    await waitFor(() =>
+      expect(
+        calls(mock, '/api/transactions/?transaction_type=expense'),
+      ).toHaveLength(1),
+    )
+    expect(await screen.findByText('Groceries')).toBeInTheDocument()
+    const filteredLists = calls(
+      mock,
+      '/api/transactions/?transaction_type=expense',
+    ).length
+    const unfilteredLists = calls(mock, '/api/transactions/').length
+    const accountCalls = calls(mock, '/api/accounts/').length
+    const categoryCalls = calls(mock, '/api/categories/').length
+
+    await openEditorFor(user, 0)
+    await user.selectOptions(screen.getByLabelText('Edit transaction type'), 'income')
+    await user.selectOptions(screen.getByLabelText('Edit transaction category'), '1')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByText('Transaction updated.')).toBeInTheDocument()
+    expect(screen.queryByText('Groceries')).not.toBeInTheDocument()
+    expect(
+      screen.getByText('No matches for these filters. Try clearing or changing a filter.'),
+    ).toBeInTheDocument()
+    expect(screen.getByLabelText('Transaction type')).toHaveValue('expense')
+    expect(
+      calls(mock, '/api/transactions/?transaction_type=expense'),
+    ).toHaveLength(filteredLists)
+    expect(calls(mock, '/api/transactions/')).toHaveLength(unfilteredLists)
+    expect(calls(mock, '/api/accounts/')).toHaveLength(accountCalls)
+    expect(calls(mock, '/api/categories/')).toHaveLength(categoryCalls)
+    expect(calls(mock, '/api/transactions/1/', 'PATCH')).toHaveLength(1)
+  })
+})
+
+describe('transaction editing independent review defects', () => {
+  it('(a) sends the exact account-only patch on active account change', async () => {
+    const rows = [
+      transactionFixture({
+        id: 1,
+        account: 1,
+        category: 2,
+        transaction_type: 'expense',
+        amount: '12.50',
+        date: '2026-09-10',
+        note: 'Groceries',
+      }),
+    ]
+    const mock = installFetchMock(editListHandler(rows))
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    await user.selectOptions(
+      screen.getByLabelText('Edit transaction account'),
+      '2',
+    )
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() =>
+      expect(calls(mock, '/api/transactions/1/', 'PATCH')).toHaveLength(1),
+    )
+    const [, init] = calls(mock, '/api/transactions/1/', 'PATCH')[0]
+    expect(JSON.parse(String(init?.body))).toEqual({ account: 2 })
+  })
+
+  it('(b-account) removes an updated row that no longer matches the active account filter', async () => {
+    const row = transactionFixture({
+      id: 1,
+      account: 1,
+      category: 2,
+      transaction_type: 'expense',
+      amount: '12.50',
+      date: '2026-09-10',
+      note: 'Groceries',
+    })
+    const mock = installFetchMock(
+      authenticatedEditHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'PATCH') {
+            return jsonResponse(
+              transactionFixture({
+                id: 1,
+                account: 2,
+                category: 2,
+                transaction_type: 'expense',
+                amount: '12.50',
+                date: '2026-09-10',
+                note: 'Groceries',
+              }),
+            )
+          }
+          return jsonResponse([row])
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await user.selectOptions(screen.getByLabelText('Account'), '1')
+    await waitFor(() =>
+      expect(calls(mock, '/api/transactions/?account=1')).toHaveLength(1),
+    )
+    expect(await screen.findByText('Groceries')).toBeInTheDocument()
+
+    await openEditorFor(user, 0)
+    await user.selectOptions(
+      screen.getByLabelText('Edit transaction account'),
+      '2',
+    )
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByText('Transaction updated.')).toBeInTheDocument()
+    expect(screen.queryByText('Groceries')).not.toBeInTheDocument()
+    expect(
+      screen.getByText('No matches for these filters. Try clearing or changing a filter.'),
+    ).toBeInTheDocument()
+    expect(calls(mock, '/api/transactions/1/', 'PATCH')).toHaveLength(1)
+  })
+
+  it('(b-category) removes an updated row that no longer matches the active category filter', async () => {
+    const row = transactionFixture({
+      id: 1,
+      account: 1,
+      category: 2,
+      transaction_type: 'expense',
+      amount: '12.50',
+      date: '2026-09-10',
+      note: 'Groceries',
+    })
+    const mock = installFetchMock(
+      authenticatedEditHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'PATCH') {
+            return jsonResponse(
+              transactionFixture({
+                id: 1,
+                account: 1,
+                category: 3,
+                transaction_type: 'expense',
+                amount: '12.50',
+                date: '2026-09-10',
+                note: 'Groceries',
+              }),
+            )
+          }
+          return jsonResponse([row])
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await user.selectOptions(screen.getByLabelText('Category'), '2')
+    await waitFor(() =>
+      expect(calls(mock, '/api/transactions/?category=2')).toHaveLength(1),
+    )
+    expect(await screen.findByText('Groceries')).toBeInTheDocument()
+
+    await openEditorFor(user, 0)
+    await user.selectOptions(
+      screen.getByLabelText('Edit transaction category'),
+      '3',
+    )
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByText('Transaction updated.')).toBeInTheDocument()
+    expect(screen.queryByText('Groceries')).not.toBeInTheDocument()
+    expect(
+      screen.getByText('No matches for these filters. Try clearing or changing a filter.'),
+    ).toBeInTheDocument()
+    expect(calls(mock, '/api/transactions/1/', 'PATCH')).toHaveLength(1)
+  })
+
+  it('(b-dates) removes an updated row that falls outside the active start/end range', async () => {
+    const row = transactionFixture({
+      id: 1,
+      account: 1,
+      category: 2,
+      transaction_type: 'expense',
+      amount: '12.50',
+      date: '2026-09-10',
+      note: 'Groceries',
+    })
+    const mock = installFetchMock(
+      authenticatedEditHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'PATCH') {
+            return jsonResponse(
+              transactionFixture({
+                id: 1,
+                account: 1,
+                category: 2,
+                transaction_type: 'expense',
+                amount: '12.50',
+                date: '2026-08-01',
+                note: 'Groceries',
+              }),
+            )
+          }
+          return jsonResponse([row])
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    fireEvent.change(screen.getByLabelText('Start date'), {
+      target: { value: '2026-09-01' },
+    })
+    fireEvent.change(screen.getByLabelText('End date'), {
+      target: { value: '2026-09-30' },
+    })
+    await waitFor(() =>
+      expect(
+        calls(
+          mock,
+          '/api/transactions/?start_date=2026-09-01&end_date=2026-09-30',
+        ),
+      ).toHaveLength(1),
+    )
+    expect(await screen.findByText('Groceries')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    fireEvent.change(screen.getByLabelText('Edit transaction date'), {
+      target: { value: '2026-08-01' },
+    })
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByText('Transaction updated.')).toBeInTheDocument()
+    expect(screen.queryByText('Groceries')).not.toBeInTheDocument()
+    expect(
+      screen.getByText('No matches for these filters. Try clearing or changing a filter.'),
+    ).toBeInTheDocument()
+    expect(calls(mock, '/api/transactions/1/', 'PATCH')).toHaveLength(1)
+  })
+
+  it('(c) filter change while PATCH pending is impossible; save still applies and unlocks', async () => {
+    const rows = [
+      transactionFixture({
+        id: 1,
+        account: 1,
+        category: 2,
+        transaction_type: 'expense',
+        amount: '12.50',
+        date: '2026-09-10',
+        note: 'Groceries',
+      }),
+    ]
+    const patchPending = deferred<Response>()
+    const mock = installFetchMock(
+      authenticatedEditHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'PATCH') return patchPending.promise
+          return jsonResponse(rows)
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    const noteInput = screen.getByLabelText('Edit transaction note')
+    await user.clear(noteInput)
+    await user.type(noteInput, 'Pending raced')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Updating transaction…',
+    )
+    expect(screen.getByLabelText('Account')).toBeDisabled()
+    expect(screen.getByLabelText('Category')).toBeDisabled()
+    expect(screen.getByLabelText('Transaction type')).toBeDisabled()
+    expect(screen.getByLabelText('Start date')).toBeDisabled()
+    expect(screen.getByLabelText('End date')).toBeDisabled()
+    expect(
+      screen.getByRole('button', { name: 'Create transaction' }),
+    ).toBeDisabled()
+
+    await act(async () => {
+      patchPending.resolve(
+        jsonResponse(
+          transactionFixture({
+            id: 1,
+            account: 1,
+            category: 2,
+            transaction_type: 'expense',
+            amount: '12.50',
+            date: '2026-09-10',
+            note: 'Pending raced',
+          }),
+        ),
+      )
+    })
+
+    expect(await screen.findByText('Transaction updated.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Save changes' })).not.toBeInTheDocument()
+    expect(screen.getByText('Pending raced')).toBeInTheDocument()
+    const editButtons = screen.getAllByRole('button', { name: /^Edit transaction / })
+    expect(editButtons).toHaveLength(1)
+    for (const button of editButtons) {
+      expect(button).toBeEnabled()
+    }
+    expect(calls(mock, '/api/transactions/1/', 'PATCH')).toHaveLength(1)
+  })
+
+  it('(d) filter controls stay locked while an editor is open so the typed draft cannot be destroyed', async () => {
+    const rows = [
+      transactionFixture({
+        id: 1,
+        account: 1,
+        category: 2,
+        transaction_type: 'expense',
+        amount: '12.50',
+        date: '2026-09-10',
+        note: 'Groceries',
+      }),
+    ]
+    const mock = installFetchMock(editListHandler(rows))
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    const noteInput = screen.getByLabelText('Edit transaction note')
+    await user.clear(noteInput)
+    await user.type(noteInput, 'Draft keeps me')
+
+    const accountFilter = screen.getByLabelText('Account')
+    expect(accountFilter).toBeDisabled()
+    await user.selectOptions(accountFilter, '1')
+
+    expect(accountFilter).toHaveValue('')
+    expect(
+      screen.getByRole('button', { name: 'Save changes' }),
+    ).toBeInTheDocument()
+    expect(screen.getByLabelText('Edit transaction note')).toHaveValue(
+      'Draft keeps me',
+    )
+    expect(calls(mock, '/api/transactions/')).toHaveLength(1)
+  })
+
+  it('(e) other rows Edit buttons are disabled while an editor is open and re-enabled after cancel', async () => {
+    installFetchMock(
+      authenticatedEditHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'GET')
+            return jsonResponse(serverOrderedTransactions())
+          return jsonResponse(transactionFixture(), 200)
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Monthly paycheck')
+
+    const user = userEvent.setup()
+    const edits = await screen.findAllByRole('button', { name: /^Edit/ })
+    expect(edits).toHaveLength(3)
+    await user.click(edits[0])
+
+    const remaining = screen.getAllByRole('button', { name: /^Edit/ })
+    expect(remaining).toHaveLength(2)
+    for (const button of remaining) {
+      expect(button).toBeDisabled()
+    }
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    const after = await screen.findAllByRole('button', { name: /^Edit/ })
+    expect(after).toHaveLength(3)
+    for (const button of after) {
+      expect(button).toBeEnabled()
+    }
+  })
+
+  it('(f) updateNotice clears after a filter change', async () => {
+    const rows = [
+      transactionFixture({
+        id: 1,
+        account: 1,
+        category: 2,
+        transaction_type: 'expense',
+        amount: '12.50',
+        date: '2026-09-10',
+        note: 'Groceries',
+      }),
+    ]
+    const mock = installFetchMock(editListHandler(rows))
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    const noteInput = screen.getByLabelText('Edit transaction note')
+    await user.clear(noteInput)
+    await user.type(noteInput, 'Second note')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByText('Transaction updated.')).toBeInTheDocument()
+
+    await user.selectOptions(screen.getByLabelText('Account'), '1')
+    await waitFor(() =>
+      expect(calls(mock, '/api/transactions/?account=1')).toHaveLength(1),
+    )
+    await waitFor(() =>
+      expect(screen.queryByText('Transaction updated.')).not.toBeInTheDocument(),
+    )
+  })
+
+  it('(g-open) moves focus into the editor on open', async () => {
+    const rows = [
+      transactionFixture({
+        id: 1,
+        account: 1,
+        category: 2,
+        transaction_type: 'expense',
+        amount: '12.50',
+        date: '2026-09-10',
+        note: 'Groceries',
+      }),
+    ]
+    installFetchMock(editListHandler(rows))
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+
+    expect(screen.getByLabelText('Edit transaction account')).toHaveFocus()
+  })
+
+  it('(g-save) returns focus to the Edit button after save', async () => {
+    const rows = [
+      transactionFixture({
+        id: 1,
+        account: 1,
+        category: 2,
+        transaction_type: 'expense',
+        amount: '12.50',
+        date: '2026-09-10',
+        note: 'Groceries',
+      }),
+    ]
+    installFetchMock(editListHandler(rows))
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    const noteInput = screen.getByLabelText('Edit transaction note')
+    await user.clear(noteInput)
+    await user.type(noteInput, 'Focused save')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    const editButton = await screen.findByRole('button', {
+      name: 'Edit transaction 1',
+    })
+    expect(editButton).toHaveFocus()
+    expect(await screen.findByText('Transaction updated.')).toBeInTheDocument()
+  })
+
+  it('(g-cancel) returns focus to the Edit button after cancel', async () => {
+    const rows = [
+      transactionFixture({
+        id: 1,
+        account: 1,
+        category: 2,
+        transaction_type: 'expense',
+        amount: '12.50',
+        date: '2026-09-10',
+        note: 'Groceries',
+      }),
+    ]
+    installFetchMock(editListHandler(rows))
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    const editButton = await screen.findByRole('button', {
+      name: 'Edit transaction 1',
+    })
+    expect(editButton).toHaveFocus()
+  })
+
+  it('(h-six) sends the exact six-field body when every writable field changes', async () => {
+    const rows = [
+      transactionFixture({
+        id: 1,
+        account: 1,
+        category: 2,
+        transaction_type: 'expense',
+        amount: '12.50',
+        date: '2026-09-10',
+        note: 'Groceries',
+      }),
+    ]
+    const mock = installFetchMock(editListHandler(rows))
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    await user.selectOptions(
+      screen.getByLabelText('Edit transaction account'),
+      '2',
+    )
+    await user.selectOptions(screen.getByLabelText('Edit transaction type'), 'income')
+    await user.selectOptions(
+      screen.getByLabelText('Edit transaction category'),
+      '1',
+    )
+    const amountInput = screen.getByLabelText('Edit transaction amount')
+    await user.clear(amountInput)
+    await user.type(amountInput, '20.00')
+    fireEvent.change(screen.getByLabelText('Edit transaction date'), {
+      target: { value: '2026-09-11' },
+    })
+    const noteInput = screen.getByLabelText('Edit transaction note')
+    await user.clear(noteInput)
+    await user.type(noteInput, 'New note')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() =>
+      expect(calls(mock, '/api/transactions/1/', 'PATCH')).toHaveLength(1),
+    )
+    const [, init] = calls(mock, '/api/transactions/1/', 'PATCH')[0]
+    expect(JSON.parse(String(init?.body))).toEqual({
+      account: 2,
+      category: 1,
+      transaction_type: 'income',
+      amount: '20.00',
+      date: '2026-09-11',
+      note: 'New note',
+    })
+  })
+
+  it('(h-type-category) sends the exact type plus category body', async () => {
+    const rows = [
+      transactionFixture({
+        id: 1,
+        account: 1,
+        category: 2,
+        transaction_type: 'expense',
+        amount: '12.50',
+        date: '2026-09-10',
+        note: 'Groceries',
+      }),
+    ]
+    const mock = installFetchMock(editListHandler(rows))
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    await user.selectOptions(screen.getByLabelText('Edit transaction type'), 'income')
+    await user.selectOptions(
+      screen.getByLabelText('Edit transaction category'),
+      '1',
+    )
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() =>
+      expect(calls(mock, '/api/transactions/1/', 'PATCH')).toHaveLength(1),
+    )
+    const [, init] = calls(mock, '/api/transactions/1/', 'PATCH')[0]
+    expect(JSON.parse(String(init?.body))).toEqual({
+      transaction_type: 'income',
+      category: 1,
+    })
+  })
+
+  it('(i) does nothing visible on a real late 401 after unmount without logout', async () => {
+    const patchPending = deferred<Response>()
+    const mock = installFetchMock(
+      authenticatedEditHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'GET') {
+            return jsonResponse([
+              transactionFixture({
+                id: 1,
+                account: 1,
+                category: 2,
+                transaction_type: 'expense',
+                amount: '12.50',
+                date: '2026-09-10',
+                note: 'Groceries',
+              }),
+            ])
+          }
+          return patchPending.promise
+        },
+      }),
+    )
+    const view = renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    const noteInput = screen.getByLabelText('Edit transaction note')
+    await user.clear(noteInput)
+    await user.type(noteInput, 'Late 401 note')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Updating transaction…',
+    )
+
+    view.unmount()
+    await act(async () => {
+      patchPending.resolve(
+        jsonResponse(
+          { detail: 'Authentication credentials were not provided.' },
+          401,
+        ),
+      )
+    })
+
+    expect(window.location.pathname).toBe('/transactions')
+    expect(
+      mock.mock.calls.some(([input]) =>
+        String(input).includes('/api/auth/logout/'),
+      ),
+    ).toBe(false)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  it('(swr) keeps ready rows with Updating results while a filter refresh is pending', async () => {
+    const refreshPending = deferred<Response>()
+    installFetchMock(
+      authenticatedTransactionsHandler(
+        (url) => {
+          if (url === '/api/transactions/?transaction_type=expense') {
+            return refreshPending.promise
+          }
+          return jsonResponse(serverOrderedTransactions())
+        },
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Monthly paycheck')
+
+    const user = userEvent.setup()
+    await user.selectOptions(
+      screen.getByLabelText('Transaction type'),
+      'expense',
+    )
+
+    expect(await screen.findByText('Updating results…')).toBeInTheDocument()
+    expect(screen.queryByText('Loading your transactions…')).not.toBeInTheDocument()
+    expect(screen.getByText('Monthly paycheck')).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Updating results…')
+
+    await act(async () => {
+      refreshPending.resolve(
+        jsonResponse([
+          transactionFixture({ id: 9, note: 'Filtered result' }),
+        ]),
+      )
+    })
+    expect(await screen.findByText('Filtered result')).toBeInTheDocument()
+    expect(screen.queryByText('Updating results…')).not.toBeInTheDocument()
+  })
+
+  it('(refresh-lock) disables every Edit button while a filter refresh is in flight, then re-enables', async () => {
+    const refreshPending = deferred<Response>()
+    installFetchMock(
+      authenticatedTransactionsHandler(
+        (url) => {
+          if (url === '/api/transactions/?transaction_type=expense') {
+            return refreshPending.promise
+          }
+          return jsonResponse(serverOrderedTransactions())
+        },
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Monthly paycheck')
+
+    const initialEdits = await screen.findAllByRole('button', {
+      name: /^Edit transaction /,
+    })
+    expect(initialEdits).toHaveLength(3)
+    for (const button of initialEdits) {
+      expect(button).toBeEnabled()
+    }
+
+    const user = userEvent.setup()
+    await user.selectOptions(
+      screen.getByLabelText('Transaction type'),
+      'expense',
+    )
+
+    expect(await screen.findByText('Updating results…')).toBeInTheDocument()
+    expect(screen.getByText('Monthly paycheck')).toBeInTheDocument()
+    const lockedEdits = screen.getAllByRole('button', {
+      name: /^Edit transaction /,
+    })
+    expect(lockedEdits).toHaveLength(3)
+    for (const button of lockedEdits) {
+      expect(button).toBeDisabled()
+    }
+
+    await act(async () => {
+      refreshPending.resolve(
+        jsonResponse([
+          transactionFixture({ id: 9, note: 'Filtered result' }),
+        ]),
+      )
+    })
+    expect(await screen.findByText('Filtered result')).toBeInTheDocument()
+    expect(screen.queryByText('Updating results…')).not.toBeInTheDocument()
+    const unlockedEdits = screen.getAllByRole('button', {
+      name: /^Edit transaction /,
+    })
+    expect(unlockedEdits).toHaveLength(1)
+    for (const button of unlockedEdits) {
+      expect(button).toBeEnabled()
+    }
+  })
+
+  it('(create-lock) disables create submit while an editor is open, then re-enables after cancel', async () => {
+    const rows = [
+      transactionFixture({
+        id: 1,
+        account: 1,
+        category: 2,
+        transaction_type: 'expense',
+        amount: '12.50',
+        date: '2026-09-10',
+        note: 'Groceries',
+      }),
+    ]
+    installFetchMock(editListHandler(rows))
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    expect(
+      screen.getByRole('button', { name: 'Create transaction' }),
+    ).toBeEnabled()
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    expect(
+      screen.getByRole('button', { name: 'Create transaction' }),
+    ).toBeDisabled()
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(
+      await screen.findByRole('button', { name: 'Edit transaction 1' }),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Create transaction' }),
+    ).toBeEnabled()
+  })
+
+  it('(filters-locked) disables all five filter controls while an editor is open and re-enables after cancel', async () => {
+    const rows = [
+      transactionFixture({
+        id: 1,
+        account: 1,
+        category: 2,
+        transaction_type: 'expense',
+        amount: '12.50',
+        date: '2026-09-10',
+        note: 'Groceries',
+      }),
+    ]
+    installFetchMock(editListHandler(rows))
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+
+    expect(screen.getByLabelText('Account')).toBeDisabled()
+    expect(screen.getByLabelText('Category')).toBeDisabled()
+    expect(screen.getByLabelText('Transaction type')).toBeDisabled()
+    expect(screen.getByLabelText('Start date')).toBeDisabled()
+    expect(screen.getByLabelText('End date')).toBeDisabled()
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(
+      await screen.findByRole('button', { name: 'Edit transaction 1' }),
+    ).toBeInTheDocument()
+
+    expect(screen.getByLabelText('Account')).toBeEnabled()
+    expect(screen.getByLabelText('Category')).toBeEnabled()
+    expect(screen.getByLabelText('Transaction type')).toBeEnabled()
+    expect(screen.getByLabelText('Start date')).toBeEnabled()
+    expect(screen.getByLabelText('End date')).toBeEnabled()
+  })
+
+  it('(filters-locked-draft) attempting a filter change with an open editor leaves the filter, editor, and draft untouched', async () => {
+    const row = transactionFixture({
+      id: 1,
+      account: 1,
+      category: 2,
+      transaction_type: 'expense',
+      amount: '12.50',
+      date: '2026-09-10',
+      note: 'Groceries',
+    })
+    const mock = installFetchMock(
+      authenticatedEditHandler({
+        transactions: (url, init) => {
+          if ((init?.method ?? 'GET') === 'PATCH') {
+            return jsonResponse(
+              transactionFixture({
+                id: 1,
+                account: 2,
+                category: 2,
+                transaction_type: 'expense',
+                amount: '12.50',
+                date: '2026-09-10',
+                note: 'Groceries',
+              }),
+            )
+          }
+          if (url === '/api/transactions/?account=2') {
+            return jsonResponse([])
+          }
+          return jsonResponse([row])
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    const noteInput = screen.getByLabelText('Edit transaction note')
+    await user.clear(noteInput)
+    await user.type(noteInput, 'Unsaved draft here')
+
+    const accountFilter = screen.getByLabelText('Account')
+    await user.selectOptions(accountFilter, '2')
+
+    expect(accountFilter).toHaveValue('')
+    expect(
+      screen.getByRole('button', { name: 'Save changes' }),
+    ).toBeInTheDocument()
+    expect(screen.getByLabelText('Edit transaction note')).toHaveValue(
+      'Unsaved draft here',
+    )
+    expect(calls(mock, '/api/transactions/?account=2')).toHaveLength(0)
+  })
+
+  it('(filters-locked-hint) renders and links the filters-locked hint while an editor is open', async () => {
+    const rows = [
+      transactionFixture({
+        id: 1,
+        account: 1,
+        category: 2,
+        transaction_type: 'expense',
+        amount: '12.50',
+        date: '2026-09-10',
+        note: 'Groceries',
+      }),
+    ]
+    installFetchMock(editListHandler(rows))
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    expect(
+      screen.queryByText('Finish or cancel your edit to change filters.'),
+    ).not.toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+
+    expect(
+      screen.getByText('Finish or cancel your edit to change filters.'),
+    ).toBeInTheDocument()
+    expect(document.querySelector('.transaction-filters')).toHaveAttribute(
+      'aria-describedby',
+      'transactions-filters-locked-hint',
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(
+      await screen.findByRole('button', { name: 'Edit transaction 1' }),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByText('Finish or cancel your edit to change filters.'),
+    ).not.toBeInTheDocument()
+  })
+
+  it('(filters-locked-save) no refresh can start with an editor open; save applies, notices, and refocuses', async () => {
+    const row = transactionFixture({
+      id: 1,
+      account: 1,
+      category: 2,
+      transaction_type: 'expense',
+      amount: '12.50',
+      date: '2026-09-10',
+      note: 'Groceries',
+    })
+    const mock = installFetchMock(
+      authenticatedEditHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'PATCH') {
+            return jsonResponse(
+              transactionFixture({
+                id: 1,
+                account: 1,
+                category: 2,
+                transaction_type: 'expense',
+                amount: '12.50',
+                date: '2026-09-10',
+                note: 'Saved and focused',
+              }),
+            )
+          }
+          return jsonResponse([row])
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+
+    expect(screen.getByLabelText('Account')).toBeDisabled()
+    expect(screen.getByLabelText('Category')).toBeDisabled()
+    expect(screen.getByLabelText('Transaction type')).toBeDisabled()
+    expect(screen.getByLabelText('Start date')).toBeDisabled()
+    expect(screen.getByLabelText('End date')).toBeDisabled()
+    expect(calls(mock, '/api/transactions/')).toHaveLength(1)
+
+    const noteInput = screen.getByLabelText('Edit transaction note')
+    await user.clear(noteInput)
+    await user.type(noteInput, 'Saved and focused')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByText('Transaction updated.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Save changes' })).not.toBeInTheDocument()
+    expect(screen.getByText('Saved and focused')).toBeInTheDocument()
+    expect(calls(mock, '/api/transactions/1/', 'PATCH')).toHaveLength(1)
+    expect(calls(mock, '/api/transactions/')).toHaveLength(1)
+    const editButton = screen.getByRole('button', {
+      name: 'Edit transaction 1',
+    })
+    expect(editButton).toHaveFocus()
+    expect(editButton).toBeEnabled()
+  })
+
+  it('(create-submit-guard) requestSubmit on the create form with an editor open sends nothing and preserves the draft', async () => {
+    const rows = [
+      transactionFixture({
+        id: 1,
+        account: 1,
+        category: 2,
+        transaction_type: 'expense',
+        amount: '12.50',
+        date: '2026-09-10',
+        note: 'Groceries',
+      }),
+    ]
+    const mock = installFetchMock(editListHandler(rows))
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    const noteInput = screen.getByLabelText('Edit transaction note')
+    await user.clear(noteInput)
+    await user.type(noteInput, 'Draft under edit')
+
+    await fillValidCreateForm(user, {
+      account: '1',
+      category: '2',
+      amount: '20.00',
+      date: '2026-09-10',
+      note: 'Create attempt',
+    })
+    expect(
+      screen.getByRole('button', { name: 'Create transaction' }),
+    ).toBeDisabled()
+
+    const createForm = screen
+      .getByRole('button', { name: 'Create transaction' })
+      .closest('form') as HTMLFormElement
+    await act(async () => {
+      createForm.requestSubmit()
+    })
+
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(0)
+    expect(calls(mock, '/api/transactions/', 'POST')).toHaveLength(0)
+    expect(calls(mock, '/api/transactions/')).toHaveLength(1)
+    expect(
+      screen.getByRole('button', { name: 'Save changes' }),
+    ).toBeInTheDocument()
+    expect(screen.getByLabelText('Edit transaction note')).toHaveValue(
+      'Draft under edit',
+    )
+    expect(screen.queryByText('Transaction created.')).not.toBeInTheDocument()
+  })
+
+  it('(focus-heading) save that removes the row from filtered results focuses the Transactions heading', async () => {
+    const row = transactionFixture({
+      id: 1,
+      account: 1,
+      category: 2,
+      transaction_type: 'expense',
+      amount: '12.50',
+      date: '2026-09-10',
+      note: 'Groceries',
+    })
+    const mock = installFetchMock(
+      authenticatedEditHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'PATCH') {
+            return jsonResponse(
+              transactionFixture({
+                id: 1,
+                account: 1,
+                category: 1,
+                transaction_type: 'income',
+                amount: '12.50',
+                date: '2026-09-10',
+                note: 'Groceries',
+              }),
+            )
+          }
+          return jsonResponse([row])
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await user.selectOptions(screen.getByLabelText('Transaction type'), 'expense')
+    await waitFor(() =>
+      expect(
+        calls(mock, '/api/transactions/?transaction_type=expense'),
+      ).toHaveLength(1),
+    )
+    expect(await screen.findByText('Groceries')).toBeInTheDocument()
+
+    await openEditorFor(user, 0)
+    await user.selectOptions(screen.getByLabelText('Edit transaction type'), 'income')
+    await user.selectOptions(
+      screen.getByLabelText('Edit transaction category'),
+      '1',
+    )
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByText('Transaction updated.')).toBeInTheDocument()
+    expect(screen.queryByText('Groceries')).not.toBeInTheDocument()
+    expect(
+      screen.getByText('No matches for these filters. Try clearing or changing a filter.'),
+    ).toBeInTheDocument()
+    expect(calls(mock, '/api/transactions/1/', 'PATCH')).toHaveLength(1)
+    const heading = screen.getByRole('heading', { name: 'Transactions' })
+    expect(heading).toHaveFocus()
+    expect(document.activeElement).not.toBe(document.body)
+  })
+})

@@ -185,6 +185,14 @@ a {
   font: inherit;
 }
 
+/* Locked filter controls must look locked, not merely be unresponsive.
+   Matches the .btn:disabled opacity so all disabled affordances read the same. */
+.input:disabled,
+.select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .account-create {
   max-width: 32rem;
   margin-block-end: var(--space-6);
@@ -379,6 +387,19 @@ a {
 .transaction-item .transaction-note {
   margin: var(--space-1) 0 0;
   font-size: 0.875rem;
+}
+
+.transaction-edit .form {
+  margin-block: var(--space-3) 0;
+}
+
+.transaction-edit-actions {
+  display: flex;
+  gap: var(--space-3);
+}
+
+.btn-edit {
+  margin-block-start: var(--space-2);
 }
 
 .account-list {

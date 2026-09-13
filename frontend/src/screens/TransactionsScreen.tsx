@@ -5,8 +5,10 @@ import {
   createTransaction,
   fetchTransactions,
   resetTransactionsRequest,
+  updateTransaction,
   type Transaction,
   type TransactionFilters,
+  type TransactionPatch,
   type TransactionType,
 } from '../api/transactions'
 import { ApiError, userMessage, type FieldErrors } from '../api/types'
@@ -33,6 +35,8 @@ const NO_ACTIVE_ACCOUNTS_MESSAGE =
   'Create an active account before adding transactions.'
 const NO_ACTIVE_CATEGORIES_MESSAGE =
   'Create an active category for this type before adding transactions.'
+
+const NO_CHANGES_MESSAGE = 'Make at least one change before saving.'
 
 const KNOWN_CREATE_FIELDS = [
   'account',
@@ -149,14 +153,140 @@ function firstCreateError(
   return messages !== undefined && messages.length > 0 ? messages[0] : null
 }
 
+function validateEditFields(
+  account: string,
+  category: string,
+  transactionType: string,
+  amount: string,
+  date: string,
+  accounts: Account[],
+  categories: Category[],
+  original: Transaction,
+  accountDirty = false,
+  categoryDirty = false,
+): FieldErrors {
+  const errors: FieldErrors = {}
+  if (account === '') {
+    errors.account = [CREATE_ACCOUNT_REQUIRED]
+  } else if (account !== String(original.account)) {
+    const selected = accounts.find((item) => String(item.id) === account)
+    if (selected === undefined || selected.is_archived) {
+      errors.account = [CREATE_ACCOUNT_INVALID]
+    }
+  } else if (accountDirty) {
+    const selected = accounts.find((item) => String(item.id) === account)
+    if (selected === undefined || selected.is_archived) {
+      errors.account = [CREATE_ACCOUNT_INVALID]
+    }
+  }
+  if (transactionType !== 'income' && transactionType !== 'expense') {
+    errors.transaction_type = [CREATE_TYPE_REQUIRED]
+  }
+  if (category === '') {
+    errors.category = [CREATE_CATEGORY_REQUIRED]
+  } else if (
+    category !== String(original.category) ||
+    transactionType !== original.transaction_type
+  ) {
+    const selected = categories.find((item) => String(item.id) === category)
+    if (
+      selected === undefined ||
+      selected.is_archived ||
+      (transactionType === 'income' || transactionType === 'expense'
+        ? selected.category_type !== transactionType
+        : true)
+    ) {
+      errors.category = [CREATE_CATEGORY_INVALID]
+    }
+  } else if (categoryDirty) {
+    const selected = categories.find((item) => String(item.id) === category)
+    if (
+      selected === undefined ||
+      selected.is_archived ||
+      (transactionType === 'income' || transactionType === 'expense'
+        ? selected.category_type !== transactionType
+        : true)
+    ) {
+      errors.category = [CREATE_CATEGORY_INVALID]
+    }
+  }
+  if (!isValidCreateAmount(amount)) {
+    errors.amount = [CREATE_AMOUNT_ERROR]
+  }
+  if (!isStrictDate(date)) {
+    errors.date = [CREATE_DATE_ERROR]
+  }
+  return errors
+}
+
+function buildEditPatch(
+  original: Transaction,
+  account: string,
+  category: string,
+  transactionType: string,
+  amount: string,
+  date: string,
+  note: string,
+): TransactionPatch {
+  const patch: TransactionPatch = {}
+  if (account !== String(original.account)) {
+    patch.account = Number(account)
+  }
+  if (category !== String(original.category)) {
+    patch.category = Number(category)
+  }
+  if (transactionType !== original.transaction_type) {
+    patch.transaction_type = transactionType as TransactionType
+  }
+  if (amount !== original.amount) {
+    patch.amount = amount
+  }
+  if (date !== original.date) {
+    patch.date = date
+  }
+  if (note !== original.note) {
+    patch.note = note
+  }
+  return patch
+}
+
+function transactionMatchesFilters(
+  transaction: Transaction,
+  filters: TransactionFilters,
+): boolean {
+  if (filters.account !== undefined && transaction.account !== filters.account) {
+    return false
+  }
+  if (filters.category !== undefined && transaction.category !== filters.category) {
+    return false
+  }
+  if (
+    filters.transaction_type !== undefined &&
+    transaction.transaction_type !== filters.transaction_type
+  ) {
+    return false
+  }
+  if (filters.start_date !== undefined && transaction.date < filters.start_date) {
+    return false
+  }
+  if (filters.end_date !== undefined && transaction.date > filters.end_date) {
+    return false
+  }
+  return true
+}
+
 function TransactionItem({
   transaction,
   accountById,
   categoryById,
+  editDisabled,
+  onEdit,
 }: {
   transaction: Transaction
   accountById: Map<number, Account>
   categoryById: Map<number, Category>
+  editDisabled: boolean
+  onEdit: () => void
 }) {
   const accountName = accountById.get(transaction.account)?.name
   const categoryName = categoryById.get(transaction.category)?.name
@@ -178,6 +308,420 @@ function TransactionItem({
       {transaction.note !== '' && (
         <p className="transaction-note">{transaction.note}</p>
       )}
+      <button
+        type="button"
+        className="btn-edit"
+        aria-label={`Edit transaction ${transaction.id}`}
+        onClick={onEdit}
+        disabled={editDisabled}
+      >
+        Edit
+      </button>
+    </li>
+  )
+}
+
+function EditTransactionForm({
+  transaction,
+  accounts,
+  categories,
+  onCancel,
+  onUpdated,
+  onPendingChange,
+}: {
+  transaction: Transaction
+  accounts: Account[]
+  categories: Category[]
+  onCancel: () => void
+  onUpdated: (updated: Transaction) => void
+  onPendingChange: (pending: boolean) => void
+}) {
+  const { clearSession } = useAuth()
+  const [account, setAccount] = useState(String(transaction.account))
+  const [category, setCategory] = useState(String(transaction.category))
+  const [transactionType, setTransactionType] = useState<string>(
+    transaction.transaction_type,
+  )
+  const [amount, setAmount] = useState(transaction.amount)
+  const [date, setDate] = useState(transaction.date)
+  const [note, setNote] = useState(transaction.note)
+  const [pending, setPending] = useState(false)
+  const [fieldErrors, setFieldErrors] = useState<FieldErrors | null>(null)
+  const [submitError, setSubmitError] = useState<string | null>(null)
+  const mountedRef = useRef(true)
+  const submittingRef = useRef(false)
+  const initialAccountRef = useRef(String(transaction.account))
+  const initialCategoryRef = useRef(String(transaction.category))
+  const initialTypeRef = useRef(transaction.transaction_type)
+  const accountDirtyRef = useRef(false)
+  const categoryDirtyRef = useRef(false)
+  const firstFieldRef = useRef<HTMLSelectElement>(null)
+
+  useEffect(() => {
+    mountedRef.current = true
+    firstFieldRef.current?.focus()
+    return () => {
+      mountedRef.current = false
+      onPendingChange(false)
+    }
+  }, [onPendingChange])
+
+  function clearEditFieldError(field: string): void {
+    setFieldErrors((current) => {
+      if (current === null || current[field] === undefined) return current
+      const next = { ...current }
+      delete next[field]
+      return next
+    })
+  }
+
+  const activeAccounts = accounts.filter((item) => !item.is_archived)
+  const originalAccount = accounts.find((item) => item.id === transaction.account)
+  const accountOptions =
+    originalAccount !== undefined && originalAccount.is_archived
+      ? [...activeAccounts, originalAccount]
+      : activeAccounts
+  const originalCategory = categories.find(
+    (item) => item.id === transaction.category,
+  )
+  const visibleCategories = categories.filter(
+    (item) => !item.is_archived && item.category_type === transactionType,
+  )
+  if (
+    originalCategory !== undefined &&
+    originalCategory.is_archived &&
+    originalCategory.category_type === transactionType &&
+    !visibleCategories.some((item) => item.id === originalCategory.id)
+  ) {
+    visibleCategories.push(originalCategory)
+  }
+
+  function handleTypeChange(value: string): void {
+    if (value !== initialTypeRef.current) {
+      categoryDirtyRef.current = true
+    }
+    setTransactionType(value)
+    clearEditFieldError('transaction_type')
+    clearEditFieldError('category')
+    setCategory((current) => {
+      if (current === '') return current
+      const selected = categories.find((item) => String(item.id) === current)
+      if (selected !== undefined && selected.category_type !== value) return ''
+      return current
+    })
+  }
+
+  function handleAccountChange(value: string): void {
+    if (value !== initialAccountRef.current) {
+      accountDirtyRef.current = true
+    }
+    setAccount(value)
+    clearEditFieldError('account')
+  }
+
+  function handleCategoryChange(value: string): void {
+    if (value !== initialCategoryRef.current) {
+      categoryDirtyRef.current = true
+    }
+    setCategory(value)
+    clearEditFieldError('category')
+  }
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (submittingRef.current) return
+    if (pending) return
+    setSubmitError(null)
+
+    const clientErrors = validateEditFields(
+      account,
+      category,
+      transactionType,
+      amount,
+      date,
+      accounts,
+      categories,
+      transaction,
+      accountDirtyRef.current,
+      categoryDirtyRef.current,
+    )
+    if (Object.keys(clientErrors).length > 0) {
+      setFieldErrors(clientErrors)
+      return
+    }
+
+    setFieldErrors(null)
+    const patch = buildEditPatch(
+      transaction,
+      account,
+      category,
+      transactionType,
+      amount,
+      date,
+      note,
+    )
+    if (Object.keys(patch).length === 0) {
+      setSubmitError(NO_CHANGES_MESSAGE)
+      return
+    }
+    submittingRef.current = true
+    setPending(true)
+    onPendingChange(true)
+    try {
+      const updated = await updateTransaction(transaction.id, patch)
+      if (mountedRef.current) {
+        onUpdated(updated)
+      }
+    } catch (caught) {
+      if (!mountedRef.current) return
+      if (caught instanceof ApiError && caught.status === 401) {
+        clearSession()
+        return
+      }
+      if (caught instanceof ApiError) {
+        const backendFields = caught.fieldErrors ?? {}
+        const known: FieldErrors = {}
+        for (const field of KNOWN_CREATE_FIELDS) {
+          const messages = backendFields[field]
+          if (messages !== undefined && messages.length > 0) {
+            known[field] = [...messages]
+          }
+        }
+        const nonFieldMessage = backendFields.non_field_errors?.[0]
+        if (Object.keys(known).length > 0 || nonFieldMessage !== undefined) {
+          setFieldErrors(Object.keys(known).length > 0 ? known : null)
+          setSubmitError(nonFieldMessage ?? null)
+          return
+        }
+        setSubmitError(userMessage(caught))
+        return
+      }
+      setSubmitError(GENERIC_ERROR_MESSAGE)
+    } finally {
+      if (mountedRef.current) {
+        submittingRef.current = false
+        setPending(false)
+        onPendingChange(false)
+      }
+    }
+  }
+
+  const accountError = firstCreateError(fieldErrors, 'account')
+  const categoryError = firstCreateError(fieldErrors, 'category')
+  const typeError = firstCreateError(fieldErrors, 'transaction_type')
+  const amountError = firstCreateError(fieldErrors, 'amount')
+  const dateError = firstCreateError(fieldErrors, 'date')
+  const noteError = firstCreateError(fieldErrors, 'note')
+  const hasFieldErrors =
+    accountError !== null ||
+    categoryError !== null ||
+    typeError !== null ||
+    amountError !== null ||
+    dateError !== null ||
+    noteError !== null
+  const summary = submitError ?? (hasFieldErrors ? FIELD_ERROR_SUMMARY : null)
+  const base = `edit-transaction-${transaction.id}`
+
+  return (
+    <li className="transaction-item transaction-edit">
+      {pending && (
+        <p role="status" className="notice">
+          Updating transaction…
+        </p>
+      )}
+      {summary !== null && (
+        <div className="error-summary" role="alert">
+          {summary}
+        </div>
+      )}
+      <form className="form" onSubmit={handleSubmit} noValidate>
+        <div className="form-field">
+          <label htmlFor={`${base}-account`}>Edit transaction account</label>
+          <select
+            id={`${base}-account`}
+            ref={firstFieldRef}
+            className="select"
+            name="account"
+            value={account}
+            onChange={(event) => {
+              handleAccountChange(event.target.value)
+            }}
+            disabled={pending}
+            required
+            aria-invalid={accountError !== null}
+            aria-describedby={
+              accountError !== null ? `${base}-account-error` : undefined
+            }
+          >
+            {accountOptions.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.is_archived ? `${item.name} (archived, current)` : item.name}
+              </option>
+            ))}
+          </select>
+          {accountError !== null && (
+            <ul id={`${base}-account-error`} className="field-errors">
+              {fieldErrors?.account?.map((message) => (
+                <li key={message}>{message}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div className="form-field">
+          <label htmlFor={`${base}-type`}>Edit transaction type</label>
+          <select
+            id={`${base}-type`}
+            className="select"
+            name="transaction_type"
+            value={transactionType}
+            onChange={(event) => handleTypeChange(event.target.value)}
+            disabled={pending}
+            required
+            aria-invalid={typeError !== null}
+            aria-describedby={
+              typeError !== null ? `${base}-type-error` : undefined
+            }
+          >
+            <option value="income">Income</option>
+            <option value="expense">Expense</option>
+          </select>
+          {typeError !== null && (
+            <ul id={`${base}-type-error`} className="field-errors">
+              {fieldErrors?.transaction_type?.map((message) => (
+                <li key={message}>{message}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div className="form-field">
+          <label htmlFor={`${base}-category`}>Edit transaction category</label>
+          <select
+            id={`${base}-category`}
+            className="select"
+            name="category"
+            value={category}
+            onChange={(event) => {
+              handleCategoryChange(event.target.value)
+            }}
+            disabled={pending}
+            required
+            aria-invalid={categoryError !== null}
+            aria-describedby={
+              categoryError !== null ? `${base}-category-error` : undefined
+            }
+          >
+            <option value="">Select a category</option>
+            {visibleCategories.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.is_archived ? `${item.name} (archived, current)` : item.name}
+              </option>
+            ))}
+          </select>
+          {categoryError !== null && (
+            <ul id={`${base}-category-error`} className="field-errors">
+              {fieldErrors?.category?.map((message) => (
+                <li key={message}>{message}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div className="form-field">
+          <label htmlFor={`${base}-amount`}>Edit transaction amount</label>
+          <input
+            id={`${base}-amount`}
+            className="input"
+            type="text"
+            inputMode="decimal"
+            name="amount"
+            autoComplete="off"
+            value={amount}
+            onChange={(event) => {
+              setAmount(event.target.value)
+              clearEditFieldError('amount')
+            }}
+            disabled={pending}
+            required
+            aria-invalid={amountError !== null}
+            aria-describedby={
+              amountError !== null ? `${base}-amount-error` : undefined
+            }
+          />
+          {amountError !== null && (
+            <ul id={`${base}-amount-error`} className="field-errors">
+              {fieldErrors?.amount?.map((message) => (
+                <li key={message}>{message}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div className="form-field">
+          <label htmlFor={`${base}-date`}>Edit transaction date</label>
+          <input
+            id={`${base}-date`}
+            className="input"
+            type="date"
+            name="date"
+            value={date}
+            onChange={(event) => {
+              setDate(event.target.value)
+              clearEditFieldError('date')
+            }}
+            disabled={pending}
+            required
+            aria-invalid={dateError !== null}
+            aria-describedby={
+              dateError !== null ? `${base}-date-error` : undefined
+            }
+          />
+          {dateError !== null && (
+            <ul id={`${base}-date-error`} className="field-errors">
+              {fieldErrors?.date?.map((message) => (
+                <li key={message}>{message}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div className="form-field">
+          <label htmlFor={`${base}-note`}>Edit transaction note</label>
+          <input
+            id={`${base}-note`}
+            className="input"
+            type="text"
+            name="note"
+            autoComplete="off"
+            value={note}
+            onChange={(event) => {
+              setNote(event.target.value)
+              clearEditFieldError('note')
+            }}
+            disabled={pending}
+            aria-invalid={noteError !== null}
+            aria-describedby={
+              noteError !== null ? `${base}-note-error` : undefined
+            }
+          />
+          {noteError !== null && (
+            <ul id={`${base}-note-error`} className="field-errors">
+              {fieldErrors?.note?.map((message) => (
+                <li key={message}>{message}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div className="transaction-edit-actions">
+          <button type="submit" className="btn" disabled={pending}>
+            {pending ? 'Updating transaction…' : 'Save changes'}
+          </button>
+          <button
+            type="button"
+            className="btn"
+            onClick={onCancel}
+            disabled={pending}
+          >
+            Cancel
+          </button>
+        </div>
+      </form>
     </li>
   )
 }
@@ -186,10 +730,12 @@ function CreateTransactionForm({
   accounts,
   categories,
   onCreated,
+  submitLocked,
 }: {
   accounts: Account[]
   categories: Category[]
   onCreated: () => void
+  submitLocked: boolean
 }) {
   const { clearSession } = useAuth()
   const [account, setAccount] = useState('')
@@ -242,6 +788,7 @@ function CreateTransactionForm({
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (submitLocked) return
     if (submittingRef.current) return
     if (pending) return
     setSubmitError(null)
@@ -332,7 +879,8 @@ function CreateTransactionForm({
   const summary = submitError ?? (hasFieldErrors ? FIELD_ERROR_SUMMARY : null)
   const hasActiveAccounts = activeAccounts.length > 0
   const hasVisibleCategories = visibleCategories.length > 0
-  const submitDisabled = pending || !hasActiveAccounts || !hasVisibleCategories
+  const submitDisabled =
+    pending || submitLocked || !hasActiveAccounts || !hasVisibleCategories
 
   return (
     <section
@@ -564,9 +1112,28 @@ export function TransactionsScreen() {
   const [draft, setDraft] = useState<FilterDraft>(EMPTY_DRAFT)
   const [dateError, setDateError] = useState<string | null>(null)
   const [filters, setFilters] = useState<TransactionFilters>({})
+  const [editingId, setEditingId] = useState<number | null>(null)
+  const [updateNotice, setUpdateNotice] = useState<string | null>(null)
+  const [editPending, setEditPending] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
   const metaPromiseRef = useRef<Promise<[Account[], Category[]]> | null>(null)
   const requestSeqRef = useRef(0)
   const mountedRef = useRef(true)
+  const filtersRef = useRef<TransactionFilters>({})
+  const editingIdRef = useRef<number | null>(null)
+  const stateRef = useRef<TransactionsState>({ status: 'loading' })
+  type ReturnFocusTarget = { kind: 'edit'; id: number } | { kind: 'heading' }
+  const returnFocusRef = useRef<ReturnFocusTarget | null>(null)
+  const headingRef = useRef<HTMLHeadingElement>(null)
+  useEffect(() => {
+    filtersRef.current = filters
+  }, [filters])
+  useEffect(() => {
+    editingIdRef.current = editingId
+  }, [editingId])
+  useEffect(() => {
+    stateRef.current = state
+  }, [state])
 
   useEffect(() => {
     mountedRef.current = true
@@ -574,6 +1141,23 @@ export function TransactionsScreen() {
       mountedRef.current = false
     }
   }, [])
+
+  useEffect(() => {
+    if (editingId === null && returnFocusRef.current !== null) {
+      const target = returnFocusRef.current
+      returnFocusRef.current = null
+      if (target.kind === 'heading') {
+        headingRef.current?.focus()
+        return
+      }
+      const element = document.querySelector(
+        `[aria-label="Edit transaction ${target.id}"]`,
+      )
+      if (element instanceof HTMLElement) {
+        element.focus()
+      }
+    }
+  }, [editingId])
 
   useEffect(() => {
     let cancelled = false
@@ -599,6 +1183,16 @@ export function TransactionsScreen() {
         setAccounts(loadedAccounts)
         setCategories(loadedCategories)
         setState({ status: 'ready', transactions })
+        setRefreshing(false)
+        const currentEditingId = editingIdRef.current
+        if (
+          currentEditingId !== null &&
+          !transactions.some((item) => item.id === currentEditingId)
+        ) {
+          editingIdRef.current = null
+          setEditingId(null)
+          setEditPending(false)
+        }
       })
       .catch((error: unknown) => {
         if (cancelled || !mountedRef.current || seq !== requestSeqRef.current) {
@@ -608,6 +1202,8 @@ export function TransactionsScreen() {
           clearSession()
           return
         }
+        setRefreshing(false)
+        setUpdateNotice(null)
         setState({
           status: 'error',
           message:
@@ -643,35 +1239,106 @@ export function TransactionsScreen() {
       return
     }
     setDateError(null)
-    setState({ status: 'loading' })
+    setUpdateNotice(null)
+    if (stateRef.current.status === 'ready') {
+      setRefreshing(true)
+    } else {
+      setState({ status: 'loading' })
+    }
+    filtersRef.current = next
     setFilters(next)
   }
 
   const handleRetry = useCallback(() => {
-    setState({ status: 'loading' })
+    setUpdateNotice(null)
+    if (stateRef.current.status === 'ready') {
+      setRefreshing(true)
+    } else {
+      setState({ status: 'loading' })
+    }
     setAttempt((current) => current + 1)
   }, [])
 
   const handleTransactionCreated = useCallback(() => {
+    setUpdateNotice(null)
+    if (stateRef.current.status === 'ready') {
+      setRefreshing(true)
+    }
     requestSeqRef.current += 1
     resetTransactionsRequest()
     setAttempt((current) => current + 1)
+  }, [])
+
+  const handleEditOpen = useCallback((id: number) => {
+    setEditingId(id)
+  }, [])
+
+  const handleEditCancel = useCallback((id: number) => {
+    returnFocusRef.current = { kind: 'edit', id }
+    setEditingId(null)
+    setEditPending(false)
+  }, [])
+
+  const handleEditPendingChange = useCallback((pending: boolean) => {
+    setEditPending(pending)
+  }, [])
+
+  const handleEditUpdated = useCallback((updated: Transaction) => {
+    const currentFilters = filtersRef.current
+    const matches = transactionMatchesFilters(updated, currentFilters)
+    setState((current) => {
+      if (current.status !== 'ready') return current
+      if (!matches) {
+        return {
+          status: 'ready',
+          transactions: current.transactions.filter(
+            (item) => item.id !== updated.id,
+          ),
+        }
+      }
+      return {
+        status: 'ready',
+        transactions: current.transactions.map((item) =>
+          item.id === updated.id ? updated : item,
+        ),
+      }
+    })
+    setEditingId(null)
+    setEditPending(false)
+    returnFocusRef.current = matches
+      ? { kind: 'edit', id: updated.id }
+      : { kind: 'heading' }
+    setUpdateNotice('Transaction updated.')
   }, [])
 
   const accountById = new Map(accounts.map((account) => [account.id, account]))
   const categoryById = new Map(
     categories.map((category) => [category.id, category]),
   )
+  const filtersLocked = editPending || editingId !== null
 
   return (
     <div className="screen">
-      <h2>Transactions</h2>
+      <h2 ref={headingRef} tabIndex={-1}>
+        Transactions
+      </h2>
       <CreateTransactionForm
         accounts={accounts}
         categories={categories}
         onCreated={handleTransactionCreated}
+        submitLocked={editPending || editingId !== null}
       />
-      <section className="transaction-filters">
+      <section
+        className="transaction-filters"
+        aria-describedby={
+          editingId !== null ? 'transactions-filters-locked-hint' : undefined
+        }
+      >
+        {editingId !== null && (
+          <p id="transactions-filters-locked-hint" className="notice">
+            Finish or cancel your edit to change filters.
+          </p>
+        )}
         <div className="form-field">
           <label htmlFor="transactions-account">Account</label>
           <select
@@ -680,6 +1347,7 @@ export function TransactionsScreen() {
             name="account"
             value={draft.account}
             onChange={(event) => handleDraftChange({ account: event.target.value })}
+            disabled={filtersLocked}
           >
             <option value="">All</option>
             {accounts.map((account) => (
@@ -699,6 +1367,7 @@ export function TransactionsScreen() {
             onChange={(event) =>
               handleDraftChange({ category: event.target.value })
             }
+            disabled={filtersLocked}
           >
             <option value="">All</option>
             {categories.map((category) => (
@@ -716,6 +1385,7 @@ export function TransactionsScreen() {
             name="transaction_type"
             value={draft.type}
             onChange={(event) => handleDraftChange({ type: event.target.value })}
+            disabled={filtersLocked}
           >
             <option value="">All</option>
             <option value="income">Income</option>
@@ -731,6 +1401,7 @@ export function TransactionsScreen() {
             name="start_date"
             value={draft.start}
             onChange={(event) => handleDraftChange({ start: event.target.value })}
+            disabled={filtersLocked}
           />
         </div>
         <div className="form-field">
@@ -742,6 +1413,7 @@ export function TransactionsScreen() {
             name="end_date"
             value={draft.end}
             onChange={(event) => handleDraftChange({ end: event.target.value })}
+            disabled={filtersLocked}
             aria-invalid={dateError !== null}
             aria-describedby={
               dateError !== null ? 'transactions-end-date-error' : undefined
@@ -757,6 +1429,9 @@ export function TransactionsScreen() {
       {state.status === 'loading' && (
         <p role="status">Loading your transactions…</p>
       )}
+      {refreshing && state.status === 'ready' && (
+        <p role="status">Updating results…</p>
+      )}
       {state.status === 'error' && (
         <div className="error-summary" role="alert">
           <p>{state.message}</p>
@@ -764,6 +1439,11 @@ export function TransactionsScreen() {
             Retry
           </button>
         </div>
+      )}
+      {updateNotice !== null && state.status === 'ready' && (
+        <p role="status" className="notice">
+          {updateNotice}
+        </p>
       )}
       {state.status === 'ready' &&
         (state.transactions.length === 0 ? (
@@ -778,14 +1458,32 @@ export function TransactionsScreen() {
           )
         ) : (
           <ul className="transaction-list">
-            {state.transactions.map((transaction) => (
-              <TransactionItem
-                key={transaction.id}
-                transaction={transaction}
-                accountById={accountById}
-                categoryById={categoryById}
-              />
-            ))}
+            {state.transactions.map((transaction) =>
+              editingId === transaction.id ? (
+                <EditTransactionForm
+                  key={transaction.id}
+                  transaction={transaction}
+                  accounts={accounts}
+                  categories={categories}
+                  onCancel={() => handleEditCancel(transaction.id)}
+                  onUpdated={handleEditUpdated}
+                  onPendingChange={handleEditPendingChange}
+                />
+              ) : (
+                <TransactionItem
+                  key={transaction.id}
+                  transaction={transaction}
+                  accountById={accountById}
+                  categoryById={categoryById}
+                  editDisabled={
+                    editPending ||
+                    refreshing ||
+                    (editingId !== null && editingId !== transaction.id)
+                  }
+                  onEdit={() => handleEditOpen(transaction.id)}
+                />
+              ),
+            )}
           </ul>
         ))}
     </div>
