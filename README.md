@@ -48,7 +48,7 @@ See [`PLAN.md`](PLAN.md) for the complete scope, data model, non-goals, and impl
 - One issue branch per change
 - Conventional commits
 - Automated tests before merge
-- Pull requests with squash merges
+- Pull requests with regular merge commits
 - Stable `main`
 
 ## Core ownership rule
@@ -363,12 +363,19 @@ Verify the health endpoint at `http://127.0.0.1:8000/api/health/`. A healthy bac
 {"status": "ok"}
 ```
 
+## Deployment
+
+Production is designed to run on a Render Free Docker web service in Ohio
+with an external Neon PostgreSQL database over TLS; no live deployment exists
+yet. See [`docs/deployment.md`](docs/deployment.md) for the full runbook,
+including the Blueprint flow, verification, and rollback.
+
 ## Contributing
 
 Mohr currently follows a solo-founder workflow:
 
 ```text
-Issue → issue-N branch → logical commits → pull request → checks → squash merge
+Issue → issue-N branch → logical commits → pull request → checks → merge commit
 ```
 
 Each feature must include tests for successful behavior, invalid input, authentication, ownership isolation, and database side effects where relevant.
