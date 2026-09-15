@@ -23,6 +23,8 @@ README_PATH = REPO_ROOT / "README.md"
 
 SERVICE_NAME = "mohr"
 
+PREVIEW_URL = "https://mohr-mnws.onrender.com"
+
 EXPECTED_SERVICE_FIELDS = {
     "type": "web",
     "name": SERVICE_NAME,
@@ -203,9 +205,89 @@ class DeploymentRunbookTests(unittest.TestCase):
         self.assertNotIn("squash", self.readme.lower())
         self.assertIn("merge commit", self.readme.lower())
 
-    def test_readme_does_not_claim_production_is_live(self):
-        self.assertIn("designed to run on", self.readme.lower())
-        self.assertNotIn("production runs on", self.readme.lower())
+    def test_readme_links_the_live_preview_and_deployment_doc(self):
+        self.assertIn(PREVIEW_URL, self.readme)
+        self.assertIn("docs/deployment.md", self.readme)
+
+    def test_readme_has_no_stale_no_live_deployment_claim(self):
+        self.assertNotIn("no live deployment exists", self.readme.lower())
+
+    def test_covers_neon_console_projects_get_production_root_branch(self):
+        self.assertIn("neon console", self.flat)
+        self.assertIn("root branch", self.flat)
+        self.assertIn("production", self.flat)
+
+    def test_covers_neon_api_cli_projects_get_main_root_branch(self):
+        self.assertIn("neon api or cli", self.flat)
+        self.assertIn("root branch", self.flat)
+        self.assertIn("main", self.flat)
+
+    def test_covers_this_project_was_console_created_with_production_branch(self):
+        self.assertIn("created in the console", self.flat)
+        self.assertIn("console branch", self.flat)
+        self.assertIn("production", self.flat)
+
+    def test_neon_naming_is_not_one_branch_with_two_names(self):
+        self.assertNotIn("shown as", self.flat)
+        self.assertNotIn("is named", self.flat)
+
+    def test_covers_neon_branch_unrelated_to_github_main_and_no_rename(self):
+        self.assertIn("github", self.flat)
+        self.assertIn("unrelated", self.flat)
+        self.assertIn("rename", self.flat)
+
+    def test_covers_connect_modal_flow_and_connection_pooling_off(self):
+        self.assertIn("project dashboard", self.flat)
+        self.assertIn("connect", self.flat)
+        self.assertIn("connection pooling", self.flat)
+        self.assertIn("pooler", self.flat)
+        self.assertIn("single-worker", self.flat)
+
+    def test_covers_sslmode_require_and_channel_binding_require(self):
+        self.assertIn("sslmode=require", self.doc)
+        self.assertIn("channel_binding=require", self.doc)
+
+    def test_cleanup_covers_delete_and_archive_lifecycle(self):
+        self.assertIn("transactions and budgets", self.flat)
+        self.assertIn("archived, not permanently deleted", self.flat)
+        self.assertIn("historical", self.flat)
+
+    def test_cleanup_does_not_instruct_deleting_throwaway_accounts(self):
+        self.assertNotIn("delete throwaway account", self.flat)
+        self.assertNotIn("delete throwaway category", self.flat)
+
+    def test_runbook_has_current_preview_section(self):
+        self.assertIn("current preview", self.flat)
+        self.assertIn(PREVIEW_URL, self.doc)
+
+    def test_preview_is_zero_cost_not_uptime_promise_or_final_release(self):
+        self.assertIn("zero-cost", self.flat)
+        self.assertIn("not an uptime promise", self.flat)
+        self.assertIn("v0.1.0", self.flat)
+
+    def test_preview_records_only_verified_public_behavior(self):
+        self.assertIn("ohio", self.flat)
+        self.assertIn("neon", self.flat)
+        self.assertIn("tls", self.flat)
+        self.assertIn("redirect", self.flat)
+        self.assertIn("react shell", self.flat)
+        self.assertIn("deep route", self.flat)
+        self.assertIn("static asset", self.flat)
+        self.assertIn("390px", self.flat)
+        self.assertIn("overflow", self.flat)
+        self.assertIn("session", self.flat)
+        self.assertIn("archive lifecycle", self.flat)
+        self.assertIn("csrftoken", self.doc)
+
+    def test_cross_user_isolation_remains_covered_by_automated_tests(self):
+        self.assertIn("automated test", self.flat)
+        self.assertIn("cross-user", self.flat)
+        self.assertNotIn("manually verified cross-user", self.flat)
+
+    def test_preview_claims_registration_login_logout_relogin_only(self):
+        self.assertIn("registration, login, logout, and re-login", self.flat)
+        self.assertNotIn("session persistence", self.flat)
+        self.assertNotIn("across reloads", self.flat)
 
     def test_covers_neon_ohio_and_tls_requirement(self):
         self.assertIn("neon", self.flat)
