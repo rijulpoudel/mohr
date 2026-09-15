@@ -11,14 +11,19 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
 from pathlib import Path
+from typing import cast
 
 import environ
+from django.core.exceptions import ImproperlyConfigured
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 env = environ.Env(
+    DJANGO_PRODUCTION=(bool, False),
     DJANGO_DEBUG=(bool, False),
     DJANGO_ALLOWED_HOSTS=(list, []),
+    DJANGO_CSRF_TRUSTED_ORIGINS=(list, []),
+    DATABASE_URL=(str, ""),
 )
 
 environ.Env.read_env(BASE_DIR / ".env")
@@ -27,9 +32,43 @@ environ.Env.read_env(BASE_DIR / ".env")
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
+PRODUCTION = env("DJANGO_PRODUCTION")
 SECRET_KEY = env("DJANGO_SECRET_KEY")
 DEBUG = env("DJANGO_DEBUG")
-ALLOWED_HOSTS = env("DJANGO_ALLOWED_HOSTS")
+ALLOWED_HOSTS = cast(list[str], env("DJANGO_ALLOWED_HOSTS"))
+CSRF_TRUSTED_ORIGINS = cast(list[str], env("DJANGO_CSRF_TRUSTED_ORIGINS"))
+
+# The frontend reads the CSRF cookie and echoes it in the X-CSRFToken header,
+# so the cookie must stay readable from JavaScript in every environment.
+CSRF_COOKIE_HTTPONLY = False
+
+if PRODUCTION:
+    if DEBUG:
+        raise ImproperlyConfigured(
+            "DJANGO_DEBUG must be False when DJANGO_PRODUCTION is enabled."
+        )
+    if not ALLOWED_HOSTS:
+        raise ImproperlyConfigured(
+            "DJANGO_ALLOWED_HOSTS must list every allowed host when "
+            "DJANGO_PRODUCTION is enabled."
+        )
+    if any(host == "*" or host.startswith(".") for host in ALLOWED_HOSTS):
+        raise ImproperlyConfigured(
+            "DJANGO_ALLOWED_HOSTS entries must be exact hosts and must not "
+            "contain '*' or begin with '.' when DJANGO_PRODUCTION is enabled."
+        )
+    if any(
+        not origin.startswith("https://") or "*" in origin
+        for origin in CSRF_TRUSTED_ORIGINS
+    ):
+        raise ImproperlyConfigured(
+            "DJANGO_CSRF_TRUSTED_ORIGINS entries must start with 'https://' "
+            "and must not contain '*' when DJANGO_PRODUCTION is enabled."
+        )
+    if not env("DATABASE_URL"):
+        raise ImproperlyConfigured(
+            "DATABASE_URL is required when DJANGO_PRODUCTION is enabled."
+        )
 
 
 # Application definition
@@ -90,8 +129,26 @@ WSGI_APPLICATION = "config.wsgi.application"
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
-DATABASES = {
-    "default": {
+if PRODUCTION:
+    database_config = env.db("DATABASE_URL")
+    if database_config["ENGINE"] != "django.db.backends.postgresql":
+        raise ImproperlyConfigured(
+            "DATABASE_URL must point to a PostgreSQL database when "
+            "DJANGO_PRODUCTION is enabled."
+        )
+    if database_config.get("OPTIONS", {}).get("sslmode") != "require":
+        raise ImproperlyConfigured(
+            "DATABASE_URL must include sslmode=require when "
+            "DJANGO_PRODUCTION is enabled."
+        )
+    # Persistent connections live on the database alias, not as top-level
+    # settings. A small pool suits the single Render web instance.
+    database_config["CONN_MAX_AGE"] = 60
+    database_config["CONN_HEALTH_CHECKS"] = True
+elif env("DATABASE_URL"):
+    database_config = env.db("DATABASE_URL")
+else:
+    database_config = {
         "ENGINE": "django.db.backends.postgresql",
         "NAME": env("POSTGRES_DB"),
         "USER": env("POSTGRES_USER"),
@@ -99,7 +156,20 @@ DATABASES = {
         "HOST": env("POSTGRES_HOST"),
         "PORT": env("POSTGRES_PORT"),
     }
-}
+
+DATABASES = {"default": database_config}
+
+if PRODUCTION:
+    # Render terminates TLS, so trust its X-Forwarded-Proto header and make
+    # Django enforce HTTPS and secure cookies itself.
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    SECURE_SSL_REDIRECT = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    # Short initial HSTS window while the deployment settles in.
+    SECURE_HSTS_SECONDS = 3600
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = False
+    SECURE_HSTS_PRELOAD = False
 
 
 # Password validation
