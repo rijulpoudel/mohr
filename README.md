@@ -365,10 +365,10 @@ Verify the health endpoint at `http://127.0.0.1:8000/api/health/`. A healthy bac
 
 ## Deployment
 
-Production is designed to run on a Render Free Docker web service in Ohio
-with an external Neon PostgreSQL database over TLS; no live deployment exists
-yet. See [`docs/deployment.md`](docs/deployment.md) for the full runbook,
-including the Blueprint flow, verification, and rollback.
+A public preview is live at <https://mohr-mnws.onrender.com>. It runs a
+Render Free Docker web service in Ohio with an external Neon PostgreSQL
+database over TLS. See [`docs/deployment.md`](docs/deployment.md) for the
+full runbook, including the Blueprint flow, verification, and rollback.
 
 ## Contributing
 

@@ -1,12 +1,27 @@
 # Deployment runbook
 
-This runbook describes the intended production path for Mohr v0.1: a Render
-Free Docker web service in Ohio talking to an external Neon Free PostgreSQL
+This runbook describes the production path for Mohr v0.1: a Render Free
+Docker web service in Ohio talking to an external Neon Free PostgreSQL
 database over TLS.
 
-This document does not claim that the live cloud deployment is complete. It
-is the operational checklist to follow when issue #17 is provisioned and
-verified.
+## Current preview
+
+The public preview is live at <https://mohr-mnws.onrender.com>. It is a
+zero-cost preview, not an uptime promise, and not a claim that `v0.1.0` is
+final. Only the following public behavior has been verified against it:
+
+- Render Docker web service in Ohio; external Neon PostgreSQL over TLS.
+- HTTP requests redirect to HTTPS; `/api/health/` returns `{"status": "ok"}`.
+- The React shell loads at `/`, deep routes serve the app, and static assets
+  are served.
+- Signed out, `/api/auth/me/` returns a JSON `401`, and `/api/auth/csrf/`
+  returns `200` with a secure, readable `csrftoken` cookie.
+- Registration, login, logout, and re-login work.
+- Account, category, transaction, and budget flows work, including the
+  archive lifecycle.
+- The UI renders without horizontal overflow at 390px viewport width.
+- Cross-user isolation was not manually verified here; it remains covered by
+  the automated test suite.
 
 ## Architecture
 
@@ -60,14 +75,21 @@ path.
    continuing.
 3. Choose **PostgreSQL 16** if the UI offers a version choice. Django 5.2
    supports it and it matches local development.
-4. Keep the default database and role unless you have a reason to change
-   them.
-5. Copy the **direct** TLS connection string, not a pooled one. The current
-   deployment runs exactly one Gunicorn worker, so a direct connection is
-   sufficient and simpler to reason about.
-6. Confirm the connection string's query parameters include
-   `sslmode=require`. Production settings refuse to start without it.
-7. Treat that connection string as a secret. Store it only in Render's
+4. Neon names the root branch by how the project was created: projects
+   created in the Neon console get a root branch named `production`, and
+   projects created through the Neon API or CLI get one named `main`. This
+   project was created in the console, so its root branch is `production`.
+   That name is unrelated to GitHub's `main` code branch, so do not rename
+   it to match Git.
+5. On the project dashboard click **Connect**, keep the default compute,
+   database, and role, and select the console branch `production`.
+6. Neon shows pooled connection details by default. Turn **Connection
+   pooling** off so the string is the direct URL used by this single-worker
+   deployment; the direct hostname must not contain `-pooler`.
+7. Confirm the connection string's query parameters include
+   `sslmode=require`; `channel_binding=require` may also appear. Production
+   settings refuse to start without `sslmode=require`.
+8. Treat that connection string as a secret. Store it only in Render's
    `DATABASE_URL` environment variable. Never paste it into Git, GitHub
    issues or pull requests, logs, notes, chat, or screenshots.
 
@@ -148,8 +170,8 @@ control:
 2. Log in and confirm the browser stores the session cookie for the Render
    hostname.
 3. Reload the page and confirm the session is restored.
-4. Create, edit, and delete a throwaway account, category, transaction, and
-   budget.
+4. Create, edit, and archive throwaway accounts and categories; create,
+   edit, and delete throwaway transactions and budgets.
 5. Log out and confirm the session ends.
 
 Because the frontend and API share one origin, the browser sends cookies
@@ -221,7 +243,11 @@ migrates while old instances keep serving. Do not raise
 
 ## Cleanup and incident verification
 
-- Delete throwaway accounts and records created during verification.
+- Transactions and budgets can be deleted through the app.
+- Accounts and categories are archived, not permanently deleted: the app's
+  `DELETE` sets `is_archived` and preserves the row, so historical
+  transactions keep valid references. There is no app-level permanent delete
+  for accounts or categories.
 - If a secret or connection string was exposed, rotate it in Neon and update
   `DATABASE_URL` in Render; do not leave the old value anywhere.
 - After any incident, confirm the service is live, health checks pass, the
