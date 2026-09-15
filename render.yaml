@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: mohr
+    runtime: docker
+    plan: free
+    region: ohio
+    branch: main
+    autoDeployTrigger: checksPass
+    healthCheckPath: /api/health/
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    previews:
+      generation: "off"
+    envVars:
+      - key: DJANGO_PRODUCTION
+        value: "True"
+      - key: DJANGO_DEBUG
+        value: "False"
+      - key: DJANGO_SECRET_KEY
+        generateValue: true
+      - key: DJANGO_ALLOWED_HOSTS
+        fromService:
+          name: mohr
+          type: web
+          envVarKey: RENDER_EXTERNAL_HOSTNAME
+      - key: DATABASE_URL
+        sync: false
+      - key: FORWARDED_ALLOW_IPS
+        value: "*"
+      - key: WEB_CONCURRENCY
+        value: "1"
+      - key: GUNICORN_TIMEOUT
+        value: "120"

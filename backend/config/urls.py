@@ -16,9 +16,9 @@ Including another URLconf
 """
 
 from django.contrib import admin
-from django.urls import include, path
+from django.urls import include, path, re_path
 
-from config.views import health_check
+from config.views import health_check, spa_index
 
 urlpatterns = [
     path("admin/", admin.site.urls),
@@ -29,4 +29,11 @@ urlpatterns = [
     path("api/", include("transactions.urls")),
     path("api/", include("budgets.urls")),
     path("api/", include("dashboard.urls")),
+    # SPA fallback: anything that is not API, admin, or static serves the
+    # built shell. Unknown /api/... paths stay real 404s.
+    re_path(
+        r"^(?!(?:api|admin|static)(?:/|$))(?P<path>.*)$",
+        spa_index,
+        name="spa-index",
+    ),
 ]

@@ -1,0 +1,60 @@
+# Version control
+.git
+
+# Environment files: every .env variant anywhere except the committed example
+# template (e.g. .env, .env.local, backend/.env.production).
+.env*
+**/.env*
+!.env.example
+!**/.env.example
+
+# JavaScript
+node_modules
+**/node_modules
+frontend/dist
+
+# Generated frontend build copied into the backend at image build time
+frontend_dist
+**/frontend_dist
+
+# Python virtualenvs and caches
+.venv
+**/.venv
+__pycache__
+**/__pycache__
+*.py[cod]
+**/*.py[cod]
+.pytest_cache
+**/.pytest_cache
+.ruff_cache
+**/.ruff_cache
+
+# Collected static files
+staticfiles
+**/staticfiles
+
+# Local databases
+*.sqlite
+**/*.sqlite
+*.sqlite3
+**/*.sqlite3
+
+# Coverage
+.coverage
+**/.coverage
+coverage
+**/coverage
+htmlcov
+**/htmlcov
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Local notes
+.claude
+**/.claude
+.hermes
+**/.hermes
+*.local
+**/*.local

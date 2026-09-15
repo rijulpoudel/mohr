@@ -18,3 +18,6 @@ htmlcov/
 *.sqlite
 *.sqlite3
 staticfiles/
+
+# Frontend build copied into the backend at image build time
+frontend_dist/
