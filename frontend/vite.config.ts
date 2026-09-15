@@ -1,7 +1,10 @@
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vitest/config'
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
+  // Compiled assets must sit under the Django static prefix in production;
+  // the dev server keeps serving from the root.
+  base: command === 'build' ? '/static/' : '/',
   plugins: [react()],
   server: {
     proxy: {
@@ -13,4 +16,4 @@ export default defineConfig({
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],
   },
-})
+}))

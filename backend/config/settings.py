@@ -98,6 +98,7 @@ REST_FRAMEWORK = {
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -164,6 +165,9 @@ if PRODUCTION:
     # Django enforce HTTPS and secure cookies itself.
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
     SECURE_SSL_REDIRECT = True
+    # Render's health check must not depend on a redirect, and this endpoint
+    # exposes only {"status": "ok"}.
+    SECURE_REDIRECT_EXEMPT = [r"^api/health/$"]
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
     # Short initial HSTS window while the deployment settles in.
@@ -206,7 +210,31 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
-STATIC_URL = "static/"
+# Absolute so the SPA works at nested routes such as /accounts.
+STATIC_URL = "/static/"
+
+STATIC_ROOT = BASE_DIR / "staticfiles"
+
+# The compiled React app is copied here at image build time. Local development
+# and CI have no frontend build, so only include it when it exists.
+FRONTEND_DIST_DIR = BASE_DIR / "frontend_dist"
+if FRONTEND_DIST_DIR.is_dir():
+    STATICFILES_DIRS = [FRONTEND_DIST_DIR]
+
+STORAGES = {
+    "default": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+    },
+    "staticfiles": {
+        # Vite already content-hashes filenames; manifest rewriting would
+        # risk failing the build on Vite output.
+        "BACKEND": "whitenoise.storage.CompressedStaticFilesStorage",
+    },
+}
+
+# Local and test environments may not have a compiled static root; production
+# must scan the real collected directory instead.
+WHITENOISE_AUTOREFRESH = not PRODUCTION
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field

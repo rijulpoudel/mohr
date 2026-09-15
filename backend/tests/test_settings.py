@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 from unittest import TestCase
 
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -71,6 +72,30 @@ DUMP_PRODUCTION = textwrap.dedent(
                     "CONN_HEALTH_CHECKS"
                 ),
                 "debug": settings.DEBUG,
+            }
+        )
+    )
+    """
+)
+
+DUMP_STATIC_CONFIG = textwrap.dedent(
+    """\
+    print(
+        json.dumps(
+            {
+                "static_url": settings.STATIC_URL,
+                "static_root": str(settings.STATIC_ROOT),
+                "middleware": settings.MIDDLEWARE,
+                "staticfiles_storage": settings.STORAGES["staticfiles"][
+                    "BACKEND"
+                ],
+                "default_storage": settings.STORAGES["default"]["BACKEND"],
+                "secure_redirect_exempt": getattr(
+                    settings, "SECURE_REDIRECT_EXEMPT", None
+                ),
+                "whitenoise_autorefresh": getattr(
+                    settings, "WHITENOISE_AUTOREFRESH", None
+                ),
             }
         )
     )
@@ -250,6 +275,53 @@ class ProductionSettingsTests(TestCase):
         self.assertNotIn("mysql://", result.stderr)
         self.assertNotIn("settings-test-pass", result.stderr)
 
+    def test_production_uses_absolute_static_url_and_static_root(self):
+        result = run_settings(PRODUCTION_ENV, body=DUMP_STATIC_CONFIG)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["static_url"], "/static/")
+        self.assertEqual(payload["static_root"], str(Path(BACKEND_DIR) / "staticfiles"))
+
+    def test_production_places_whitenoise_after_security_middleware(self):
+        result = run_settings(PRODUCTION_ENV, body=DUMP_STATIC_CONFIG)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(
+            payload["middleware"].index("whitenoise.middleware.WhiteNoiseMiddleware"),
+            payload["middleware"].index("django.middleware.security.SecurityMiddleware")
+            + 1,
+        )
+
+    def test_production_uses_compressed_staticfiles_storage(self):
+        result = run_settings(PRODUCTION_ENV, body=DUMP_STATIC_CONFIG)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(
+            payload["staticfiles_storage"],
+            "whitenoise.storage.CompressedStaticFilesStorage",
+        )
+        self.assertEqual(
+            payload["default_storage"],
+            "django.core.files.storage.FileSystemStorage",
+        )
+
+    def test_production_does_not_use_whitenoise_autorefresh(self):
+        result = run_settings(PRODUCTION_ENV, body=DUMP_STATIC_CONFIG)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertIs(payload["whitenoise_autorefresh"], False)
+
+    def test_production_exempts_health_check_from_ssl_redirect(self):
+        result = run_settings(PRODUCTION_ENV, body=DUMP_STATIC_CONFIG)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertIn(r"^api/health/$", payload["secure_redirect_exempt"])
+
 
 class NonProductionSettingsTests(TestCase):
     def test_component_based_database_config_remains_correct(self):
@@ -277,6 +349,49 @@ class NonProductionSettingsTests(TestCase):
         self.assertEqual(payload["hsts_seconds"], 0)
         self.assertEqual(payload["conn_max_age"], 0)
         self.assertIs(payload["conn_health_checks"], False)
+
+    def test_non_production_uses_absolute_static_url_and_static_root(self):
+        result = run_settings(COMPONENT_ENV, body=DUMP_STATIC_CONFIG)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["static_url"], "/static/")
+        self.assertEqual(payload["static_root"], str(Path(BACKEND_DIR) / "staticfiles"))
+
+    def test_non_production_places_whitenoise_after_security_middleware(self):
+        result = run_settings(COMPONENT_ENV, body=DUMP_STATIC_CONFIG)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(
+            payload["middleware"].index("whitenoise.middleware.WhiteNoiseMiddleware"),
+            payload["middleware"].index("django.middleware.security.SecurityMiddleware")
+            + 1,
+        )
+
+    def test_non_production_uses_compressed_staticfiles_storage(self):
+        result = run_settings(COMPONENT_ENV, body=DUMP_STATIC_CONFIG)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(
+            payload["staticfiles_storage"],
+            "whitenoise.storage.CompressedStaticFilesStorage",
+        )
+
+    def test_non_production_uses_whitenoise_autorefresh(self):
+        result = run_settings(COMPONENT_ENV, body=DUMP_STATIC_CONFIG)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertIs(payload["whitenoise_autorefresh"], True)
+
+    def test_non_production_does_not_exempt_health_check_from_ssl_redirect(self):
+        result = run_settings(COMPONENT_ENV, body=DUMP_STATIC_CONFIG)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertIsNone(payload["secure_redirect_exempt"])
 
     def test_csrf_cookie_is_not_httponly(self):
         body = textwrap.dedent(
