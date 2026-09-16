@@ -1,12 +1,11 @@
 """Strict request serializers for the authenticated Plaid Link endpoints.
 
-The exchange boundary accepts exactly ``{public_token, exchange_handle}``.
-Every rejection is normalized by the endpoint to one fixed generic 400 that
-never reveals which check failed, so the serializer only needs to decide
-valid versus invalid; it never exposes the reason to the client. Bodies
-that are syntactically valid JSON but not a mapping (arrays, strings,
-numbers, booleans, null) are rejected as invalid by the serializer boundary
-without ever constructing a gateway, claiming a handle, or calling Plaid.
+The exchange serializer accepts exactly ``{public_token, exchange_handle}``.
+Every serializer rejection is normalized by the endpoint to one fixed generic
+400 that never reveals which check failed. Bodies that are syntactically valid
+JSON but not a mapping (arrays, strings, numbers, booleans, null) are rejected
+without constructing a gateway, claiming a handle, or calling Plaid. Malformed
+JSON and unsupported media types are rejected by DRF before this serializer.
 """
 
 import re
