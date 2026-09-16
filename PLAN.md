@@ -1,6 +1,14 @@
-# Mohr v0.1 MVP Plan
+# Mohr Product Plan
 
 > A focused personal-finance app that tells users where their money went and what they can safely spend this month.
+
+## Status
+
+- v0.1 (manual tracking MVP) is complete and preserved unchanged below as
+  the historical contract. The live preview runbook is in
+  `docs/deployment.md`.
+- Active work is the bounded v0.2 Plaid Sandbox milestone, defined in the
+  v0.2 section below and frozen in `docs/plaid.md`.
 
 ## Product promise
 
@@ -264,3 +272,42 @@ Issue → issue-N branch → logical commits → PR → checks → squash merge 
 ```
 
 Never develop directly on `main`.
+
+## v0.2 Plaid Sandbox milestone (planned)
+
+Goal: read-only bank synchronization through Plaid Sandbox using the
+Transactions product only, without weakening any v0.1 ownership, ledger, or
+testing rule. The full architecture contract is frozen in `docs/plaid.md`;
+this section bounds the milestone.
+
+Included:
+
+- Sandbox-only Link flow (authenticated link token, React Link, one-time
+  public token, server-side exchange into an encrypted access token).
+- Checking, savings, and credit-card import with an explicit Plaid to Mohr
+  type map.
+- Ninety-day initial history plus idempotent `/transactions/sync` updates
+  (added, modified, removed; pending-to-posted replacement; atomic cursor
+  commits; per-Item serialization).
+- One-time opening-balance seeding that subtracts imported history from the
+  provider current balance, so history is never double-counted, with linked
+  accounts and their synced rows excluded from balances, budgets, and the
+  dashboard until the anchor is applied.
+- Automatic Uncategorized income/expense categories with user category and
+  note overrides that survive sync.
+- Verified public server-to-server HTTPS webhooks (ES256
+  `Plaid-Verification`, two-sided five-minute age bound, raw-body hash)
+  driving a durable inbox plus cursor polling,
+  with no Celery, Redis, or Kubernetes on the single-process Render Free
+  service.
+- Update mode, relink, consent-revoked handling, and disconnect that
+  revokes access, archives linked accounts, and preserves history.
+
+Excluded (unchanged non-goals for this milestone): Auth/account numbers,
+Transfer/money movement, investments, loans, liabilities,
+recurring-transactions and Refresh add-ons, multiple currencies, and
+Production bank access.
+
+Delivery: five focused follow-up issues (configuration and persistence;
+Link and exchange; account import and sync; webhook and lifecycle; React
+UI and Sandbox end-to-end), each on one issue branch with one reviewed PR.
