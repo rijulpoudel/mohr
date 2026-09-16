@@ -29,6 +29,7 @@ urlpatterns = [
     path("api/", include("transactions.urls")),
     path("api/", include("budgets.urls")),
     path("api/", include("dashboard.urls")),
+    path("api/plaid/", include("plaid_integration.urls")),
     # SPA fallback: anything that is not API, admin, or static serves the
     # built shell. Unknown /api/... paths stay real 404s.
     re_path(
