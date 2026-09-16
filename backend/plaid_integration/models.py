@@ -92,6 +92,41 @@ class PlaidConnection(models.Model):
         return f"<PlaidConnection id={self.pk} status={self.status!r}>"
 
 
+class PlaidExchangeHandle(models.Model):
+    """Single-use Link exchange capability, stored as a SHA-256 digest only.
+
+    The raw handle is returned to the browser once at link-token creation and
+    never persisted; only the digest is stored. The row is bound to the
+    authenticated user and expires 30 minutes after issuance or at the Plaid
+    link-token expiration when that is earlier.
+    """
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="plaid_exchange_handles",
+    )
+    digest = models.CharField(max_length=64)
+    expires_at = models.DateTimeField()
+    consumed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("created_at", "id")
+        constraints = [
+            models.UniqueConstraint(
+                fields=["digest"],
+                name="plaid_exchange_handle_digest_unique",
+            ),
+        ]
+
+    def __str__(self):
+        return f"PlaidExchangeHandle user_id={self.user_id}"
+
+    def __repr__(self):
+        return f"<PlaidExchangeHandle id={self.pk} user_id={self.user_id}>"
+
+
 class PlaidAccountLink(models.Model):
     connection = models.ForeignKey(
         "PlaidConnection",
