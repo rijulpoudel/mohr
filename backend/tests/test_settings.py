@@ -183,11 +183,7 @@ def run_settings(env_overrides, body="pass"):
         "PYTHONPATH": BACKEND_DIR,
         "DJANGO_SETTINGS_MODULE": "config.settings",
         "DJANGO_SECRET_KEY": DUMMY_SECRET_KEY,
-        "DJANGO_PRODUCTION": "False",
-        "DJANGO_DEBUG": "False",
-        "DJANGO_ALLOWED_HOSTS": "localhost,127.0.0.1",
-        "DJANGO_CSRF_TRUSTED_ORIGINS": "",
-        "DATABASE_URL": "",
+        **COMPONENT_ENV,
     }
     env.update(env_overrides)
     return subprocess.run(
