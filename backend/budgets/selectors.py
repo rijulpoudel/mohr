@@ -13,10 +13,15 @@ from django.db.models.functions import Coalesce, ExtractMonth, ExtractYear
 
 from budgets.models import MonthlyBudget
 from transactions.models import Transaction, TransactionType
+from transactions.selectors import ledger_transactions_q
 
 
 def budget_spent_subquery():
-    """Per-budget expense sum following the shared monthly budget formula."""
+    """Per-budget expense sum following the shared monthly budget formula.
+
+    Applies the shared ledger predicate so provider lifecycle rows and rows
+    on not-yet-anchored linked accounts never count as spending.
+    """
     return Coalesce(
         Subquery(
             Transaction.objects.filter(
@@ -26,6 +31,7 @@ def budget_spent_subquery():
                 date__year=ExtractYear(OuterRef("month")),
                 date__month=ExtractMonth(OuterRef("month")),
             )
+            .filter(ledger_transactions_q())
             .values("user")
             .annotate(total=Sum("amount"))
             .values("total"),

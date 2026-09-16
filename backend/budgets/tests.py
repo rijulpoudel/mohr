@@ -1,3 +1,4 @@
+import itertools
 from datetime import date, timedelta
 from decimal import Decimal
 from unittest import mock
@@ -19,6 +20,7 @@ from budgets.models import MonthlyBudget
 from budgets.serializers import DUPLICATE_BUDGET_MESSAGE
 from budgets.views import BudgetViewSet
 from categories.models import Category, CategoryType
+from plaid_integration.models import PlaidAccountLink, PlaidConnection
 from transactions.models import Transaction, TransactionType
 
 
@@ -1737,3 +1739,223 @@ class BudgetDetailAPITests(APITestCase):
         self.assertEqual(with_params.status_code, status.HTTP_200_OK)
         self.assertEqual(plain.data, with_params.data)
         self.assertEqual(with_params.data["spent"], "25.50")
+
+
+class BudgetProviderVisibilityTests(APITestCase):
+    """Slice A budget gate: spent counts only rows that pass the shared
+    ledger predicate, so unanchored linked accounts and provider lifecycle
+    rows never reduce remaining budget."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = get_user_model().objects.create_user(
+            email="budget-provider-visibility-owner@example.com",
+            password="TestOnlyPassword123!",
+        )
+        cls.other_user = get_user_model().objects.create_user(
+            email="budget-provider-visibility-other@example.com",
+            password="TestOnlyPassword123!",
+        )
+        cls.account = Account.objects.create(
+            user=cls.user,
+            name="Manual Checking",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("100.00"),
+        )
+        cls.linked_account = Account.objects.create(
+            user=cls.user,
+            name="Linked Checking",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("0.00"),
+        )
+        cls.expense_category = Category.objects.create(
+            user=cls.user,
+            name="Groceries",
+            category_type=CategoryType.EXPENSE,
+        )
+        cls.connection = PlaidConnection.objects.create(
+            user=cls.user,
+            item_id="item-sandbox-budget-gate-00001",
+            institution_name="Budget Gate Bank",
+        )
+        cls.link = PlaidAccountLink.objects.create(
+            connection=cls.connection,
+            user=cls.user,
+            account=cls.linked_account,
+            plaid_account_id="plaid-account-budget-gate-00001",
+            plaid_type="depository",
+            plaid_subtype="checking",
+            mask="1111",
+        )
+        cls.other_account = Account.objects.create(
+            user=cls.other_user,
+            name="Their Linked Checking",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("0.00"),
+        )
+        cls.other_connection = PlaidConnection.objects.create(
+            user=cls.other_user,
+            item_id="item-sandbox-budget-gate-00002",
+            institution_name="Other Budget Gate Bank",
+        )
+        cls.other_category = Category.objects.create(
+            user=cls.other_user,
+            name="Their Groceries",
+            category_type=CategoryType.EXPENSE,
+        )
+        PlaidAccountLink.objects.create(
+            connection=cls.other_connection,
+            user=cls.other_user,
+            account=cls.other_account,
+            plaid_account_id="plaid-account-budget-gate-00002",
+            plaid_type="depository",
+            plaid_subtype="checking",
+            mask="2222",
+        )
+        cls._plaid_seq = itertools.count(1)
+        cls.budget = MonthlyBudget.objects.create(
+            user=cls.user,
+            category=cls.expense_category,
+            month=date(2026, 9, 1),
+            amount=Decimal("500.00"),
+        )
+
+    def create_plaid(self, **overrides):
+        values = {
+            "user": self.user,
+            "account": self.linked_account,
+            "category": self.expense_category,
+            "transaction_type": TransactionType.EXPENSE,
+            "amount": Decimal("10.00"),
+            "date": date(2026, 9, 15),
+            "source": "plaid",
+            "connection": self.connection,
+            "plaid_transaction_id": (
+                f"plaid-transaction-budget-gate-{next(self._plaid_seq)}"
+            ),
+        }
+        values.update(overrides)
+        return Transaction.objects.create(**values)
+
+    def fetch_budget(self):
+        self.client.force_login(self.user)
+        response = self.client.get(reverse("budget-list"))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        return next(item for item in response.data if item["id"] == self.budget.id)
+
+    def test_spent_excludes_unanchored_linked_account_rows(self):
+        self.create_plaid(amount=Decimal("100.00"))
+
+        item = self.fetch_budget()
+
+        self.assertEqual(item["spent"], "0.00")
+        self.assertEqual(item["remaining"], "500.00")
+
+    def test_spent_counts_posted_rows_once_account_anchored(self):
+        self.create_plaid(amount=Decimal("100.00"))
+        PlaidAccountLink.objects.filter(pk=self.link.pk).update(
+            anchor_applied_at=timezone.now()
+        )
+
+        item = self.fetch_budget()
+
+        self.assertEqual(item["spent"], "100.00")
+        self.assertEqual(item["remaining"], "400.00")
+
+    def test_spent_excludes_pending_removed_superseded_rows_even_when_anchored(
+        self,
+    ):
+        posted = self.create_plaid(amount=Decimal("100.00"))
+        self.create_plaid(amount=Decimal("20.00"), is_pending=True)
+        self.create_plaid(amount=Decimal("30.00"), is_provider_removed=True)
+        self.create_plaid(
+            amount=Decimal("40.00"),
+            is_superseded=True,
+            superseded_by=posted,
+        )
+        PlaidAccountLink.objects.filter(pk=self.link.pk).update(
+            anchor_applied_at=timezone.now()
+        )
+
+        item = self.fetch_budget()
+
+        self.assertEqual(item["spent"], "100.00")
+        self.assertEqual(item["remaining"], "400.00")
+
+    def test_spent_keeps_manual_rows_on_manual_accounts(self):
+        Transaction.objects.create(
+            user=self.user,
+            account=self.account,
+            category=self.expense_category,
+            transaction_type=TransactionType.EXPENSE,
+            amount=Decimal("75.25"),
+            date=date(2026, 9, 10),
+        )
+
+        item = self.fetch_budget()
+
+        self.assertEqual(item["spent"], "75.25")
+        self.assertEqual(item["remaining"], "424.75")
+
+    def test_spent_ignores_foreign_linked_rows(self):
+        Transaction.objects.create(
+            user=self.other_user,
+            account=self.other_account,
+            category=self.other_category,
+            transaction_type=TransactionType.EXPENSE,
+            amount=Decimal("200.00"),
+            date=date(2026, 9, 10),
+            source="plaid",
+            connection=self.other_connection,
+            plaid_transaction_id="plaid-transaction-budget-gate-other-00001",
+        )
+
+        item = self.fetch_budget()
+
+        self.assertEqual(item["spent"], "0.00")
+        self.assertEqual(item["remaining"], "500.00")
+
+    def test_duplicate_cross_user_links_do_not_double_spent(self):
+        account = Account.objects.create(
+            user=self.user,
+            name="Doubly Linked",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("0.00"),
+        )
+        PlaidAccountLink.objects.create(
+            connection=self.connection,
+            user=self.user,
+            account=account,
+            plaid_account_id="plaid-account-budget-gate-dup-00001",
+            plaid_type="depository",
+            plaid_subtype="checking",
+            mask="4444",
+            anchor_applied_at=timezone.now(),
+        )
+        PlaidAccountLink.objects.create(
+            connection=PlaidConnection.objects.create(
+                user=self.other_user,
+                item_id="item-sandbox-budget-gate-dup-00001",
+                institution_name="Their Dup Bank",
+            ),
+            user=self.other_user,
+            account=account,
+            plaid_account_id="plaid-account-budget-gate-dup-foreign-00001",
+            plaid_type="depository",
+            plaid_subtype="checking",
+            mask="5555",
+            anchor_applied_at=timezone.now(),
+        )
+        Transaction.objects.create(
+            user=self.user,
+            account=account,
+            category=self.expense_category,
+            transaction_type=TransactionType.EXPENSE,
+            amount=Decimal("100.00"),
+            date=date(2026, 9, 10),
+        )
+
+        item = self.fetch_budget()
+
+        self.assertEqual(item["spent"], "100.00")
+        self.assertEqual(item["remaining"], "400.00")

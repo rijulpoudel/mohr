@@ -1,3 +1,4 @@
+import itertools
 from datetime import date, timedelta
 from decimal import Decimal
 from unittest import mock
@@ -19,6 +20,7 @@ from accounts.models import Account, AccountType
 from budgets.models import MonthlyBudget
 from categories.models import Category, CategoryType
 from dashboard.views import DashboardSummaryView
+from plaid_integration.models import PlaidAccountLink, PlaidConnection
 from transactions.models import Transaction, TransactionType
 
 SUMMARY_URL_NAME = "dashboard-summary"
@@ -807,6 +809,10 @@ class DashboardRecentTransactionsTests(APITestCase):
                 "amount": "1.00",
                 "date": "2026-09-20",
                 "note": "",
+                "source": "manual",
+                "provider_name": "",
+                "is_pending": False,
+                "is_pending_initial_import": False,
                 "created_at": format_datetime(expected[0].created_at),
                 "updated_at": format_datetime(expected[0].updated_at),
             },
@@ -821,6 +827,10 @@ class DashboardRecentTransactionsTests(APITestCase):
                 "amount",
                 "date",
                 "note",
+                "source",
+                "provider_name",
+                "is_pending",
+                "is_pending_initial_import",
                 "created_at",
                 "updated_at",
             ],
@@ -984,6 +994,67 @@ class DashboardQueryCountTests(APITestCase):
         self.assertEqual(response.data["remaining_budget"], "490.00")
         self.assertEqual(len(response.data["recent_transactions"]), 2)
 
+    def test_linked_account_rows_keep_query_count_constant(self):
+        linked_account = Account.objects.create(
+            user=self.user,
+            name="Linked Checking",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("0.00"),
+        )
+        connection = PlaidConnection.objects.create(
+            user=self.user,
+            item_id="item-sandbox-dashboard-query-00001",
+            institution_name="Query Bank",
+        )
+        link = PlaidAccountLink.objects.create(
+            connection=connection,
+            user=self.user,
+            account=linked_account,
+            plaid_account_id="plaid-account-dashboard-query-00001",
+            plaid_type="depository",
+            plaid_subtype="checking",
+            mask="1111",
+        )
+        for index in range(3):
+            Transaction.objects.create(
+                user=self.user,
+                account=linked_account,
+                category=self.income_category,
+                transaction_type=TransactionType.INCOME,
+                amount=Decimal("10.00"),
+                date=date(2026, 9, 1) + timedelta(days=index),
+                source="plaid",
+                connection=connection,
+                plaid_transaction_id=f"plaid-transaction-dashboard-query-{index + 1}",
+            )
+            Transaction.objects.create(
+                user=self.user,
+                account=linked_account,
+                category=self.income_category,
+                transaction_type=TransactionType.INCOME,
+                amount=Decimal("1.00"),
+                date=date(2026, 9, 1) + timedelta(days=index),
+                source="plaid",
+                connection=connection,
+                plaid_transaction_id=(
+                    f"plaid-transaction-dashboard-query-pending-{index + 1}"
+                ),
+                is_pending=True,
+            )
+        PlaidAccountLink.objects.filter(pk=link.pk).update(
+            anchor_applied_at=timezone.now()
+        )
+
+        response, captured = self.fetch_summary_queries()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(captured.captured_queries), 4)
+        self.assertEqual(response.data["total_balance"], "30.00")
+        self.assertEqual(len(response.data["recent_transactions"]), 3)
+        self.assertFalse(
+            response.data["recent_transactions"][0]["is_pending_initial_import"]
+        )
+
     def test_query_count_stays_constant_as_data_grows(self):
         account = Account.objects.create(
             user=self.user,
@@ -1047,3 +1118,385 @@ class DashboardQueryCountTests(APITestCase):
         self.assertEqual(large_response.data["total_balance"], "230.00")
         self.assertEqual(large_response.data["current_month_expenses"], "55.00")
         self.assertEqual(len(large_response.data["recent_transactions"]), 5)
+
+
+class DashboardProviderVisibilityTests(APITestCase):
+    """Slice A dashboard gate: unanchored linked accounts and provider
+    lifecycle rows contribute nothing to any aggregate, and recent rows use
+    the same ledger predicate."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = get_user_model().objects.create_user(
+            email="dashboard-provider-visibility-owner@example.com",
+            password="TestOnlyPassword123!",
+        )
+        cls.other_user = get_user_model().objects.create_user(
+            email="dashboard-provider-visibility-other@example.com",
+            password="TestOnlyPassword123!",
+        )
+        cls.manual_account = Account.objects.create(
+            user=cls.user,
+            name="Manual Checking",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("100.00"),
+        )
+        cls.linked_account = Account.objects.create(
+            user=cls.user,
+            name="Linked Checking",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("0.00"),
+        )
+        cls.income_category = Category.objects.create(
+            user=cls.user,
+            name="Salary",
+            category_type=CategoryType.INCOME,
+        )
+        cls.expense_category = Category.objects.create(
+            user=cls.user,
+            name="Groceries",
+            category_type=CategoryType.EXPENSE,
+        )
+        cls.connection = PlaidConnection.objects.create(
+            user=cls.user,
+            item_id="item-sandbox-dashboard-gate-00001",
+            institution_name="Dashboard Gate Bank",
+        )
+        cls.link = PlaidAccountLink.objects.create(
+            connection=cls.connection,
+            user=cls.user,
+            account=cls.linked_account,
+            plaid_account_id="plaid-account-dashboard-gate-00001",
+            plaid_type="depository",
+            plaid_subtype="checking",
+            mask="1111",
+        )
+        cls._plaid_seq = itertools.count(1)
+        cls.unlinked_anchored_account = Account.objects.create(
+            user=cls.user,
+            name="Second Linked Checking",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("0.00"),
+        )
+        PlaidAccountLink.objects.create(
+            connection=cls.connection,
+            user=cls.user,
+            account=cls.unlinked_anchored_account,
+            plaid_account_id="plaid-account-dashboard-gate-00002",
+            plaid_type="depository",
+            plaid_subtype="checking",
+            mask="2222",
+        )
+        cls.budget = MonthlyBudget.objects.create(
+            user=cls.user,
+            category=cls.expense_category,
+            month=date(2026, 9, 1),
+            amount=Decimal("500.00"),
+        )
+
+    def create_plaid(self, **overrides):
+        values = {
+            "user": self.user,
+            "account": self.linked_account,
+            "category": self.income_category,
+            "transaction_type": TransactionType.INCOME,
+            "amount": Decimal("25.50"),
+            "date": date(2026, 9, 15),
+            "source": "plaid",
+            "connection": self.connection,
+            "plaid_transaction_id": (
+                f"plaid-transaction-dashboard-gate-{next(self._plaid_seq)}"
+            ),
+        }
+        values.update(overrides)
+        return Transaction.objects.create(**values)
+
+    def create_plaid_on_second_account(self, **overrides):
+        values = {
+            "user": self.user,
+            "account": self.unlinked_anchored_account,
+            "category": self.income_category,
+            "transaction_type": TransactionType.INCOME,
+            "amount": Decimal("25.50"),
+            "date": date(2026, 9, 15),
+            "source": "plaid",
+            "connection": self.connection,
+            "plaid_transaction_id": (
+                f"plaid-transaction-dashboard-gate-{next(self._plaid_seq)}"
+            ),
+        }
+        values.update(overrides)
+        return Transaction.objects.create(**values)
+
+    def fetch_summary(self, today=date(2026, 9, 15)):
+        self.client.force_login(self.user)
+        with mock.patch("django.utils.timezone.localdate", return_value=today):
+            response = self.client.get(reverse(SUMMARY_URL_NAME))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        return response.data
+
+    def test_total_balance_ignores_unanchored_linked_account_entirely(self):
+        self.create_plaid(amount=Decimal("50.00"))
+        self.create_plaid(
+            category=self.expense_category,
+            transaction_type=TransactionType.EXPENSE,
+            amount=Decimal("10.00"),
+        )
+
+        self.assertEqual(self.fetch_summary()["total_balance"], "100.00")
+
+    def test_total_balance_ignores_unanchored_linked_nonzero_opening_account(self):
+        account = Account.objects.create(
+            user=self.user,
+            name="Nonzero Unanchored",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("500.00"),
+        )
+        PlaidAccountLink.objects.create(
+            connection=self.connection,
+            user=self.user,
+            account=account,
+            plaid_account_id="plaid-account-dashboard-gate-nonzero-00001",
+            plaid_type="depository",
+            plaid_subtype="checking",
+            mask="3333",
+        )
+        Transaction.objects.create(
+            user=self.user,
+            account=account,
+            category=self.income_category,
+            transaction_type=TransactionType.INCOME,
+            amount=Decimal("50.00"),
+            date=date(2026, 9, 15),
+        )
+
+        self.assertEqual(self.fetch_summary()["total_balance"], "100.00")
+
+    def test_total_balance_counts_anchored_linked_nonzero_opening_account(self):
+        account = Account.objects.create(
+            user=self.user,
+            name="Nonzero Anchored",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("500.00"),
+        )
+        PlaidAccountLink.objects.create(
+            connection=self.connection,
+            user=self.user,
+            account=account,
+            plaid_account_id="plaid-account-dashboard-gate-nonzero-00002",
+            plaid_type="depository",
+            plaid_subtype="checking",
+            mask="3334",
+            anchor_applied_at=timezone.now(),
+        )
+        Transaction.objects.create(
+            user=self.user,
+            account=account,
+            category=self.income_category,
+            transaction_type=TransactionType.INCOME,
+            amount=Decimal("50.00"),
+            date=date(2026, 9, 15),
+        )
+
+        self.assertEqual(self.fetch_summary()["total_balance"], "650.00")
+
+    def test_duplicate_cross_user_links_do_not_double_total_balance(self):
+        account = Account.objects.create(
+            user=self.user,
+            name="Doubly Linked",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("100.00"),
+        )
+        PlaidAccountLink.objects.create(
+            connection=self.connection,
+            user=self.user,
+            account=account,
+            plaid_account_id="plaid-account-dashboard-gate-dup-00001",
+            plaid_type="depository",
+            plaid_subtype="checking",
+            mask="4444",
+            anchor_applied_at=timezone.now(),
+        )
+        PlaidAccountLink.objects.create(
+            connection=PlaidConnection.objects.create(
+                user=self.other_user,
+                item_id="item-sandbox-dashboard-gate-dup-00001",
+                institution_name="Their Dup Bank",
+            ),
+            user=self.other_user,
+            account=account,
+            plaid_account_id="plaid-account-dashboard-gate-dup-foreign-00001",
+            plaid_type="depository",
+            plaid_subtype="checking",
+            mask="5555",
+            anchor_applied_at=timezone.now(),
+        )
+        Transaction.objects.create(
+            user=self.user,
+            account=account,
+            category=self.income_category,
+            transaction_type=TransactionType.INCOME,
+            amount=Decimal("50.00"),
+            date=date(2026, 9, 15),
+        )
+
+        self.assertEqual(self.fetch_summary()["total_balance"], "250.00")
+
+    def test_malformed_foreign_user_link_does_not_hide_owner_month_totals(self):
+        account = Account.objects.create(
+            user=self.user,
+            name="Foreign Link Only",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("100.00"),
+        )
+        PlaidAccountLink.objects.create(
+            connection=PlaidConnection.objects.create(
+                user=self.other_user,
+                item_id="item-sandbox-dashboard-gate-foreign-00001",
+                institution_name="Their Foreign Bank",
+            ),
+            user=self.other_user,
+            account=account,
+            plaid_account_id="plaid-account-dashboard-gate-foreign-00001",
+            plaid_type="depository",
+            plaid_subtype="checking",
+            mask="6666",
+        )
+        Transaction.objects.create(
+            user=self.user,
+            account=account,
+            category=self.income_category,
+            transaction_type=TransactionType.INCOME,
+            amount=Decimal("25.50"),
+            date=date(2026, 9, 15),
+        )
+
+        summary = self.fetch_summary()
+
+        self.assertEqual(summary["current_month_income"], "25.50")
+        self.assertEqual(summary["total_balance"], "225.50")
+
+    def test_total_balance_counts_anchored_linked_accounts(self):
+        self.create_plaid(amount=Decimal("50.00"))
+        self.create_plaid(
+            category=self.expense_category,
+            transaction_type=TransactionType.EXPENSE,
+            amount=Decimal("10.00"),
+        )
+        PlaidAccountLink.objects.filter(pk=self.link.pk).update(
+            anchor_applied_at=timezone.now()
+        )
+
+        self.assertEqual(self.fetch_summary()["total_balance"], "140.00")
+
+    def test_current_month_totals_exclude_unanchored_rows(self):
+        self.create_plaid(amount=Decimal("25.50"))
+        self.create_plaid(
+            category=self.expense_category,
+            transaction_type=TransactionType.EXPENSE,
+            amount=Decimal("5.00"),
+        )
+
+        summary = self.fetch_summary()
+
+        self.assertEqual(summary["current_month_income"], "0.00")
+        self.assertEqual(summary["current_month_expenses"], "0.00")
+
+    def test_current_month_totals_count_anchored_posted_rows(self):
+        self.create_plaid(amount=Decimal("25.50"))
+        self.create_plaid(
+            category=self.expense_category,
+            transaction_type=TransactionType.EXPENSE,
+            amount=Decimal("5.00"),
+        )
+        PlaidAccountLink.objects.filter(pk=self.link.pk).update(
+            anchor_applied_at=timezone.now()
+        )
+
+        summary = self.fetch_summary()
+
+        self.assertEqual(summary["current_month_income"], "25.50")
+        self.assertEqual(summary["current_month_expenses"], "5.00")
+
+    def test_current_month_totals_exclude_pending_removed_superseded_when_anchored(
+        self,
+    ):
+        posted = self.create_plaid(amount=Decimal("25.50"))
+        self.create_plaid(amount=Decimal("10.00"), is_pending=True)
+        self.create_plaid(amount=Decimal("7.00"), is_provider_removed=True)
+        self.create_plaid(
+            amount=Decimal("3.00"),
+            is_superseded=True,
+            superseded_by=posted,
+        )
+        PlaidAccountLink.objects.filter(pk=self.link.pk).update(
+            anchor_applied_at=timezone.now()
+        )
+
+        summary = self.fetch_summary()
+
+        self.assertEqual(summary["current_month_income"], "25.50")
+        self.assertEqual(summary["current_month_expenses"], "0.00")
+
+    def test_recent_transactions_exclude_rows_not_yet_countable(self):
+        manual = Transaction.objects.create(
+            user=self.user,
+            account=self.manual_account,
+            category=self.income_category,
+            transaction_type=TransactionType.INCOME,
+            amount=Decimal("1.00"),
+            date=date(2026, 9, 20),
+        )
+        posted = self.create_plaid(
+            amount=Decimal("2.00"),
+            date=date(2026, 9, 19),
+        )
+        self.create_plaid(
+            amount=Decimal("3.00"),
+            is_pending=True,
+            date=date(2026, 9, 21),
+        )
+        self.create_plaid(
+            amount=Decimal("4.00"),
+            is_provider_removed=True,
+            date=date(2026, 9, 22),
+        )
+        self.create_plaid(
+            amount=Decimal("5.00"),
+            is_superseded=True,
+            superseded_by=posted,
+            date=date(2026, 9, 23),
+        )
+        self.create_plaid_on_second_account(
+            amount=Decimal("6.00"),
+            date=date(2026, 9, 24),
+        )
+        PlaidAccountLink.objects.filter(pk=self.link.pk).update(
+            anchor_applied_at=timezone.now()
+        )
+
+        summary = self.fetch_summary()
+
+        self.assertEqual(
+            [item["id"] for item in summary["recent_transactions"]],
+            [manual.id, posted.id],
+        )
+
+    def test_recent_transactions_never_include_unanchored_rows(self):
+        self.create_plaid(amount=Decimal("6.00"), date=date(2026, 9, 24))
+
+        summary = self.fetch_summary()
+
+        self.assertEqual(summary["recent_transactions"], [])
+
+    def test_remaining_budget_excludes_unanchored_linked_rows(self):
+        self.create_plaid(
+            category=self.expense_category,
+            transaction_type=TransactionType.EXPENSE,
+            amount=Decimal("100.00"),
+        )
+
+        summary = self.fetch_summary()
+
+        self.assertEqual(summary["total_budgeted"], "500.00")
+        self.assertEqual(summary["remaining_budget"], "500.00")

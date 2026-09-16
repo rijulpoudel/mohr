@@ -1,14 +1,19 @@
+from collections.abc import Mapping
 from decimal import Decimal
 
 from rest_framework import serializers
 
 from accounts.models import Account
 from categories.models import Category
-from transactions.models import Transaction, TransactionType
+from transactions.models import Transaction, TransactionSource, TransactionType
 
 ARCHIVED_ACCOUNT_MESSAGE = "Archived accounts cannot be used for new transactions."
 ARCHIVED_CATEGORY_MESSAGE = "Archived categories cannot be used for new transactions."
 CATEGORY_TYPE_MISMATCH_MESSAGE = "Category type must match the transaction type."
+SYNCED_PATCH_MESSAGE = "Synced transactions accept only category and note edits."
+SYNCED_DELETE_MESSAGE = (
+    "Synced transactions are retained for audit and cannot be deleted."
+)
 
 
 # DRF treats an explicit blank value for an optional field in QueryDict/HTML
@@ -97,6 +102,10 @@ class TransactionSerializer(serializers.ModelSerializer):
         min_value=Decimal("0.01"),
     )
     note = serializers.CharField(required=False, allow_blank=True, trim_whitespace=True)
+    source = serializers.CharField(read_only=True)
+    provider_name = serializers.CharField(read_only=True)
+    is_pending = serializers.BooleanField(read_only=True)
+    is_pending_initial_import = serializers.SerializerMethodField()
 
     class Meta:
         model = Transaction
@@ -108,16 +117,30 @@ class TransactionSerializer(serializers.ModelSerializer):
             "amount",
             "date",
             "note",
+            "source",
+            "provider_name",
+            "is_pending",
+            "is_pending_initial_import",
             "created_at",
             "updated_at",
         )
-        read_only_fields = ("id", "created_at", "updated_at")
+        read_only_fields = (
+            "id",
+            "created_at",
+            "updated_at",
+            "source",
+            "provider_name",
+            "is_pending",
+        )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         request = self.context["request"]
         self.fields["account"].queryset = Account.objects.filter(user=request.user)
         self.fields["category"].queryset = Category.objects.filter(user=request.user)
+
+    def get_is_pending_initial_import(self, transaction):
+        return transaction.is_pending_initial_import
 
     def validate(self, attrs):
         account = attrs.get("account")
@@ -139,4 +162,26 @@ class TransactionSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"category": [CATEGORY_TYPE_MISMATCH_MESSAGE]}
             )
+        if getattr(
+            self.instance, "source", None
+        ) == TransactionSource.PLAID and isinstance(self.initial_data, Mapping):
+            blocked = set(self.initial_data) - {"category", "note"}
+            if blocked:
+                raise serializers.ValidationError(
+                    {"non_field_errors": [SYNCED_PATCH_MESSAGE]}
+                )
         return attrs
+
+    def update(self, instance, validated_data):
+        if instance.source == TransactionSource.PLAID:
+            category = validated_data.pop("category", None)
+            note = validated_data.pop("note", None)
+            if category is not None:
+                instance.category = category
+                instance.category_customized = True
+            if note is not None:
+                instance.note = note
+                instance.note_customized = True
+            instance.save()
+            return instance
+        return super().update(instance, validated_data)
