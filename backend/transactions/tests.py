@@ -220,17 +220,22 @@ class TransactionModelTests(TestCase):
         self.assertFalse(Transaction.objects.exists())
 
     def test_check_constraints_have_stable_names(self):
-        constraint_names = {
-            constraint.name for constraint in Transaction._meta.constraints
+        check_constraint_names = {
+            constraint.name
+            for constraint in Transaction._meta.constraints
+            if isinstance(constraint, models.CheckConstraint)
         }
 
-        self.assertIn("transactions_transaction_type_valid", constraint_names)
-        self.assertIn("transactions_amount_positive", constraint_names)
-        self.assertTrue(
-            any(
-                isinstance(constraint, models.CheckConstraint)
-                for constraint in Transaction._meta.constraints
-            )
+        self.assertEqual(
+            check_constraint_names,
+            {
+                "transactions_transaction_type_valid",
+                "transactions_amount_positive",
+                "transactions_source_valid",
+                "transactions_manual_row_no_provider_state",
+                "transactions_plaid_row_requires_provider_identity",
+                "transactions_superseded_requires_superseded_by",
+            },
         )
 
     def test_user_date_index_has_stable_name(self):
