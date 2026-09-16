@@ -3,7 +3,8 @@
 This document freezes the product, security, ownership, persistence,
 reconciliation, retention, webhook, and delivery contracts for Mohr's first
 bank-synchronization milestone. It is documentation only: it proposes exact
-routes and models but implements no endpoint and creates no migration.
+routes and models and creates no migration itself, and it records which
+routes the current delivery slice implements.
 
 - Product scope: Plaid **Transactions** product, **Sandbox** only.
 - Full milestone plan: [`PLAN.md`](../PLAN.md) (v0.2 section).
@@ -98,10 +99,12 @@ Rules:
 - Missing or invalid enabled-integration configuration fails closed: Link,
   exchange, sync, and webhook processing return errors and mutate nothing.
 
-## 3. Proposed API routes and response boundaries
+## 3. API routes and response boundaries
 
-No endpoint is implemented in this milestone. Names below are frozen so
-follow-up issues can implement them without renegotiation.
+`POST /api/plaid/link-token/` and `POST /api/plaid/exchange/` are implemented
+in delivery slice 2 (issue #37). The remaining routes below stay frozen
+future contracts for follow-up slices; they are not implemented yet and their
+names remain fixed so those issues can implement them without renegotiation.
 
 ```text
 POST   /api/plaid/link-token/        authenticated, CSRF protected
