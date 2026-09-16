@@ -13,12 +13,31 @@ from rest_framework.test import APIClient, APITestCase
 
 from accounts.models import Account, AccountType
 from categories.models import Category, CategoryType
+from plaid_integration.models import PlaidConnection
 from transactions.models import Transaction, TransactionType
 
 TRANSACTION_TYPE_CHOICES = [
     ("income", "Income"),
     ("expense", "Expense"),
 ]
+
+
+def constraint_name_of(integrity_error):
+    """Return the database constraint name behind a Django IntegrityError, or
+    None when the backend does not expose one."""
+    cause = integrity_error.__cause__
+    if cause is None:
+        return None
+    return getattr(getattr(cause, "diag", None), "constraint_name", None)
+
+
+def assert_constraint_violation(test_case, operation, constraint_name):
+    with test_case.assertRaises(IntegrityError) as raised:
+        with transaction.atomic():
+            operation()
+    reported_name = constraint_name_of(raised.exception)
+    if reported_name is not None:
+        test_case.assertEqual(reported_name, constraint_name)
 
 
 class TransactionModelTests(TestCase):
@@ -201,17 +220,22 @@ class TransactionModelTests(TestCase):
         self.assertFalse(Transaction.objects.exists())
 
     def test_check_constraints_have_stable_names(self):
-        constraint_names = {
-            constraint.name for constraint in Transaction._meta.constraints
+        check_constraint_names = {
+            constraint.name
+            for constraint in Transaction._meta.constraints
+            if isinstance(constraint, models.CheckConstraint)
         }
 
-        self.assertIn("transactions_transaction_type_valid", constraint_names)
-        self.assertIn("transactions_amount_positive", constraint_names)
-        self.assertTrue(
-            all(
-                isinstance(constraint, models.CheckConstraint)
-                for constraint in Transaction._meta.constraints
-            )
+        self.assertEqual(
+            check_constraint_names,
+            {
+                "transactions_transaction_type_valid",
+                "transactions_amount_positive",
+                "transactions_source_valid",
+                "transactions_manual_row_no_provider_state",
+                "transactions_plaid_row_requires_provider_identity",
+                "transactions_superseded_requires_superseded_by",
+            },
         )
 
     def test_user_date_index_has_stable_name(self):
@@ -2135,3 +2159,343 @@ class TransactionFilterAPITests(APITestCase):
 
         self.assertEqual(head_response.status_code, status.HTTP_200_OK)
         self.assertEqual(options_response.status_code, status.HTTP_200_OK)
+
+
+class TransactionProviderModelTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = get_user_model().objects.create_user(
+            email="transaction-provider-owner@example.com",
+            password="TestOnlyPassword123!",
+        )
+        cls.other_user = get_user_model().objects.create_user(
+            email="transaction-provider-other@example.com",
+            password="TestOnlyPassword123!",
+        )
+        cls.account = Account.objects.create(
+            user=cls.user,
+            name="Provider Checking",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("100.00"),
+        )
+        cls.category = Category.objects.create(
+            user=cls.user,
+            name="Provider Salary",
+            category_type=CategoryType.INCOME,
+        )
+        cls.connection = PlaidConnection.objects.create(
+            user=cls.user,
+            item_id="item-sandbox-provider-00001",
+            institution_name="Provider Bank",
+        )
+        cls.other_connection = PlaidConnection.objects.create(
+            user=cls.other_user,
+            item_id="item-sandbox-provider-00002",
+            institution_name="Other Provider Bank",
+        )
+
+    def create_manual(self, **overrides):
+        values = {
+            "user": self.user,
+            "account": self.account,
+            "category": self.category,
+            "transaction_type": TransactionType.INCOME,
+            "amount": Decimal("25.50"),
+            "date": date(2026, 9, 1),
+        }
+        values.update(overrides)
+        return Transaction.objects.create(**values)
+
+    def create_plaid(self, **overrides):
+        values = {
+            "user": self.user,
+            "account": self.account,
+            "category": self.category,
+            "transaction_type": TransactionType.INCOME,
+            "amount": Decimal("25.50"),
+            "date": date(2026, 9, 1),
+            "source": "plaid",
+            "connection": self.connection,
+            "plaid_transaction_id": "plaid-transaction-00001",
+        }
+        values.update(overrides)
+        return Transaction.objects.create(**values)
+
+    def test_manual_row_defaults(self):
+        transaction = self.create_manual()
+
+        transaction.refresh_from_db()
+
+        self.assertEqual(transaction.source, "manual")
+        self.assertEqual(transaction.provider_name, "")
+        self.assertIsNone(transaction.plaid_transaction_id)
+        self.assertIsNone(transaction.plaid_pending_transaction_id)
+        self.assertFalse(transaction.is_pending)
+        self.assertFalse(transaction.is_provider_removed)
+        self.assertFalse(transaction.is_superseded)
+        self.assertFalse(transaction.category_customized)
+        self.assertFalse(transaction.note_customized)
+        self.assertIsNone(transaction.superseded_by)
+        self.assertIsNone(transaction.connection)
+
+    def test_plaid_row_persists_provider_fields_and_decimal_amount(self):
+        superseded_row = self.create_plaid(
+            plaid_transaction_id="plaid-transaction-00002",
+        )
+        transaction = self.create_plaid(
+            plaid_transaction_id="plaid-transaction-00003",
+            provider_name="Coffee Corner",
+            plaid_pending_transaction_id="plaid-transaction-00002",
+            is_pending=True,
+            is_provider_removed=True,
+            is_superseded=True,
+            superseded_by=superseded_row,
+            category_customized=True,
+            note_customized=True,
+            amount=Decimal("9.99"),
+        )
+
+        transaction.refresh_from_db()
+
+        self.assertEqual(transaction.connection, self.connection)
+        self.assertEqual(transaction.provider_name, "Coffee Corner")
+        self.assertEqual(
+            transaction.plaid_pending_transaction_id, "plaid-transaction-00002"
+        )
+        self.assertTrue(transaction.is_pending)
+        self.assertTrue(transaction.is_provider_removed)
+        self.assertTrue(transaction.is_superseded)
+        self.assertEqual(transaction.superseded_by, superseded_row)
+        self.assertTrue(transaction.category_customized)
+        self.assertTrue(transaction.note_customized)
+        self.assertEqual(transaction.amount, Decimal("9.99"))
+
+    def test_source_check_rejects_invalid_source(self):
+        assert_constraint_violation(
+            self,
+            lambda: self.create_manual(source="bank"),
+            "transactions_source_valid",
+        )
+
+        self.assertFalse(Transaction.objects.exists())
+
+    def test_manual_row_rejects_connection(self):
+        assert_constraint_violation(
+            self,
+            lambda: self.create_manual(connection=self.connection),
+            "transactions_manual_row_no_provider_state",
+        )
+
+        self.assertFalse(Transaction.objects.exists())
+
+    def test_manual_row_rejects_plaid_transaction_id(self):
+        assert_constraint_violation(
+            self,
+            lambda: self.create_manual(
+                plaid_transaction_id="plaid-transaction-00004",
+            ),
+            "transactions_manual_row_no_provider_state",
+        )
+
+        self.assertFalse(Transaction.objects.exists())
+
+    def test_manual_row_rejects_pending_transaction_id(self):
+        assert_constraint_violation(
+            self,
+            lambda: self.create_manual(
+                plaid_pending_transaction_id="plaid-transaction-00005",
+            ),
+            "transactions_manual_row_no_provider_state",
+        )
+
+        self.assertFalse(Transaction.objects.exists())
+
+    def test_manual_row_rejects_provider_name(self):
+        assert_constraint_violation(
+            self,
+            lambda: self.create_manual(provider_name="Coffee Corner"),
+            "transactions_manual_row_no_provider_state",
+        )
+
+        self.assertFalse(Transaction.objects.exists())
+
+    def test_manual_row_rejects_provider_lifecycle_flags(self):
+        for overrides in (
+            {"is_pending": True},
+            {"is_provider_removed": True},
+            {"is_superseded": True},
+        ):
+            with self.subTest(overrides=overrides):
+                assert_constraint_violation(
+                    self,
+                    lambda: self.create_manual(**overrides),
+                    "transactions_manual_row_no_provider_state",
+                )
+
+        self.assertFalse(Transaction.objects.exists())
+
+    def test_plaid_row_requires_connection(self):
+        assert_constraint_violation(
+            self,
+            lambda: self.create_plaid(connection=None),
+            "transactions_plaid_row_requires_provider_identity",
+        )
+
+        self.assertFalse(Transaction.objects.exists())
+
+    def test_plaid_row_requires_plaid_transaction_id(self):
+        assert_constraint_violation(
+            self,
+            lambda: self.create_plaid(plaid_transaction_id=None),
+            "transactions_plaid_row_requires_provider_identity",
+        )
+
+        self.assertFalse(Transaction.objects.exists())
+
+    def test_plaid_transaction_id_is_unique_per_user(self):
+        self.create_plaid()
+
+        assert_constraint_violation(
+            self,
+            lambda: self.create_plaid(
+                plaid_transaction_id="plaid-transaction-00001",
+            ),
+            "transactions_user_plaid_transaction_id_unique",
+        )
+
+        self.assertEqual(Transaction.objects.count(), 1)
+
+    def test_same_plaid_transaction_id_allowed_for_different_users(self):
+        own = self.create_plaid()
+        other = Transaction.objects.create(
+            user=self.other_user,
+            account=Account.objects.create(
+                user=self.other_user,
+                name="Their Provider Checking",
+                account_type=AccountType.CHECKING,
+                opening_balance=Decimal("0.00"),
+            ),
+            category=Category.objects.create(
+                user=self.other_user,
+                name="Their Salary",
+                category_type=CategoryType.INCOME,
+            ),
+            transaction_type=TransactionType.INCOME,
+            amount=Decimal("10.00"),
+            date=date(2026, 9, 2),
+            source="plaid",
+            connection=self.other_connection,
+            plaid_transaction_id="plaid-transaction-00001",
+        )
+
+        self.assertEqual(
+            Transaction.objects.filter(
+                plaid_transaction_id="plaid-transaction-00001"
+            ).count(),
+            2,
+        )
+        self.assertEqual(own.plaid_transaction_id, other.plaid_transaction_id)
+
+    def test_is_superseded_requires_superseded_by(self):
+        assert_constraint_violation(
+            self,
+            lambda: self.create_plaid(
+                plaid_transaction_id="plaid-transaction-00006",
+                is_superseded=True,
+            ),
+            "transactions_superseded_requires_superseded_by",
+        )
+
+        self.assertFalse(Transaction.objects.exists())
+
+    def test_superseded_by_requires_is_superseded(self):
+        superseded_row = self.create_plaid(
+            plaid_transaction_id="plaid-transaction-00007",
+        )
+
+        assert_constraint_violation(
+            self,
+            lambda: self.create_plaid(
+                plaid_transaction_id="plaid-transaction-00008",
+                superseded_by=superseded_row,
+            ),
+            "transactions_superseded_requires_superseded_by",
+        )
+
+        self.assertEqual(Transaction.objects.count(), 1)
+
+    def test_full_clean_rejects_self_supersession(self):
+        transaction = self.create_plaid(
+            plaid_transaction_id="plaid-transaction-00009",
+        )
+        transaction.superseded_by = transaction
+        transaction.is_superseded = True
+
+        with self.assertRaises(ValidationError) as context:
+            transaction.full_clean()
+
+        self.assertIn("superseded_by", context.exception.message_dict)
+
+    def test_full_clean_rejects_cross_user_superseded_row(self):
+        other_user_superseded = Transaction.objects.create(
+            user=self.other_user,
+            account=Account.objects.create(
+                user=self.other_user,
+                name="Their Provider Checking 2",
+                account_type=AccountType.CHECKING,
+                opening_balance=Decimal("0.00"),
+            ),
+            category=Category.objects.create(
+                user=self.other_user,
+                name="Their Expense",
+                category_type=CategoryType.EXPENSE,
+            ),
+            transaction_type=TransactionType.EXPENSE,
+            amount=Decimal("5.00"),
+            date=date(2026, 9, 3),
+            source="plaid",
+            connection=self.other_connection,
+            plaid_transaction_id="plaid-transaction-00010",
+        )
+        superseding = self.create_plaid(
+            plaid_transaction_id="plaid-transaction-00011",
+        )
+        transaction = self.create_plaid(
+            plaid_transaction_id="plaid-transaction-00012",
+            is_superseded=True,
+            superseded_by=superseding,
+        )
+
+        transaction.superseded_by = other_user_superseded
+
+        with self.assertRaises(ValidationError) as context:
+            transaction.full_clean()
+
+        self.assertIn("superseded_by", context.exception.message_dict)
+
+    def test_full_clean_rejects_cross_user_connection(self):
+        transaction = self.create_plaid(
+            plaid_transaction_id="plaid-transaction-00012",
+            connection=self.other_connection,
+        )
+
+        with self.assertRaises(ValidationError) as context:
+            transaction.full_clean()
+
+        self.assertIn("connection", context.exception.message_dict)
+
+    def test_check_constraints_have_stable_names(self):
+        constraint_names = {
+            constraint.name for constraint in Transaction._meta.constraints
+        }
+
+        self.assertIn("transactions_source_valid", constraint_names)
+        self.assertIn("transactions_manual_row_no_provider_state", constraint_names)
+        self.assertIn(
+            "transactions_plaid_row_requires_provider_identity",
+            constraint_names,
+        )
+        self.assertIn(
+            "transactions_superseded_requires_superseded_by", constraint_names
+        )
+        self.assertIn("transactions_user_plaid_transaction_id_unique", constraint_names)

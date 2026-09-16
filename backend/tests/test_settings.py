@@ -6,6 +6,18 @@ import textwrap
 from pathlib import Path
 from unittest import TestCase
 
+from cryptography.fernet import Fernet
+
+PLAID_TEST_KEYS = [Fernet.generate_key().decode() for _ in range(2)]
+PLAID_VALID_TOKEN_KEYS = f"key-a:{PLAID_TEST_KEYS[0]},key-b:{PLAID_TEST_KEYS[1]}"
+PLAID_ENABLED_ENV = {
+    "PLAID_ENABLED": "True",
+    "PLAID_ENV": "sandbox",
+    "PLAID_CLIENT_ID": "settings-test-client-id",
+    "PLAID_SECRET": "settings-test-secret",
+    "PLAID_TOKEN_KEYS": PLAID_VALID_TOKEN_KEYS,
+}
+
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 DUMMY_SECRET_KEY = "django-insecure-settings-test-key"
@@ -132,6 +144,37 @@ DUMP_NON_PRODUCTION = textwrap.dedent(
     """
 )
 
+DUMP_PLAID_DISABLED = textwrap.dedent(
+    """\
+    print(
+        json.dumps(
+            {
+                "plaid_enabled": getattr(settings, "PLAID_ENABLED", None),
+                "plaid_env": getattr(settings, "PLAID_ENV", None),
+                "plaid_token_ring": getattr(settings, "PLAID_TOKEN_RING", None),
+            }
+        )
+    )
+    """
+)
+
+DUMP_PLAID_ENABLED = textwrap.dedent(
+    """\
+    print(
+        json.dumps(
+            {
+                "plaid_enabled": settings.PLAID_ENABLED,
+                "plaid_env": settings.PLAID_ENV,
+                "client_id_set": bool(settings.PLAID_CLIENT_ID),
+                "secret_set": bool(settings.PLAID_SECRET),
+                "key_ids": settings.PLAID_TOKEN_RING.key_ids(),
+                "primary_key_id": settings.PLAID_TOKEN_RING.primary_key_id,
+            }
+        )
+    )
+    """
+)
+
 
 def run_settings(env_overrides, body="pass"):
     env = {
@@ -140,11 +183,7 @@ def run_settings(env_overrides, body="pass"):
         "PYTHONPATH": BACKEND_DIR,
         "DJANGO_SETTINGS_MODULE": "config.settings",
         "DJANGO_SECRET_KEY": DUMMY_SECRET_KEY,
-        "DJANGO_PRODUCTION": "False",
-        "DJANGO_DEBUG": "False",
-        "DJANGO_ALLOWED_HOSTS": "localhost,127.0.0.1",
-        "DJANGO_CSRF_TRUSTED_ORIGINS": "",
-        "DATABASE_URL": "",
+        **COMPONENT_ENV,
     }
     env.update(env_overrides)
     return subprocess.run(
@@ -438,3 +477,168 @@ class NonProductionSettingsTests(TestCase):
         self.assertEqual(payload["db_engine"], "django.db.backends.postgresql")
         self.assertEqual(payload["db_sslmode"], "require")
         self.assertIs(payload["secure_ssl_redirect"], False)
+
+
+class PlaidSettingsTests(TestCase):
+    def test_plaid_disabled_is_default_and_requires_no_credentials(self):
+        result = run_settings({}, body=DUMP_PLAID_DISABLED)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertIs(payload["plaid_enabled"], False)
+        self.assertEqual(payload["plaid_env"], "sandbox")
+        self.assertIsNone(payload["plaid_token_ring"])
+
+    def test_plaid_disabled_ignores_incomplete_or_foreign_credentials(self):
+        env = {
+            "PLAID_ENABLED": "",
+            "PLAID_ENV": "production",
+            "PLAID_CLIENT_ID": "",
+            "PLAID_SECRET": "",
+            "PLAID_TOKEN_KEYS": "",
+        }
+        result = run_settings(env, body=DUMP_PLAID_DISABLED)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertIs(payload["plaid_enabled"], False)
+        self.assertIsNone(payload["plaid_token_ring"])
+
+    def test_plaid_enabled_accepts_complete_sandbox_configuration(self):
+        result = run_settings(PLAID_ENABLED_ENV, body=DUMP_PLAID_ENABLED)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertIs(payload["plaid_enabled"], True)
+        self.assertEqual(payload["plaid_env"], "sandbox")
+        self.assertIs(payload["client_id_set"], True)
+        self.assertIs(payload["secret_set"], True)
+        self.assertEqual(payload["key_ids"], ["key-a", "key-b"])
+        self.assertEqual(payload["primary_key_id"], "key-a")
+
+        combined_output = result.stdout + result.stderr
+        for key in PLAID_TEST_KEYS:
+            self.assertNotIn(key, combined_output)
+        self.assertNotIn("settings-test-client-id", combined_output)
+        self.assertNotIn("settings-test-secret", combined_output)
+
+    def test_plaid_enabled_rejects_non_sandbox_env(self):
+        env = {**PLAID_ENABLED_ENV, "PLAID_ENV": "development"}
+        result = run_settings(env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ImproperlyConfigured", result.stderr)
+        self.assertIn("PLAID_ENV must be exactly 'sandbox'", result.stderr)
+        self.assertNotIn("development", result.stderr)
+
+    def test_plaid_enabled_rejects_empty_client_id(self):
+        env = {**PLAID_ENABLED_ENV, "PLAID_CLIENT_ID": ""}
+        result = run_settings(env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ImproperlyConfigured", result.stderr)
+        self.assertIn("PLAID_CLIENT_ID must be non-empty", result.stderr)
+
+    def test_plaid_enabled_rejects_empty_secret(self):
+        env = {**PLAID_ENABLED_ENV, "PLAID_SECRET": ""}
+        result = run_settings(env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ImproperlyConfigured", result.stderr)
+        self.assertIn("PLAID_SECRET must be non-empty", result.stderr)
+
+    def test_plaid_enabled_rejects_whitespace_only_client_id(self):
+        env = {**PLAID_ENABLED_ENV, "PLAID_CLIENT_ID": " \t "}
+        result = run_settings(env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ImproperlyConfigured", result.stderr)
+        self.assertIn("PLAID_CLIENT_ID must be non-empty", result.stderr)
+        self.assertNotIn("\t", result.stderr)
+
+    def test_plaid_enabled_rejects_whitespace_only_secret(self):
+        env = {**PLAID_ENABLED_ENV, "PLAID_SECRET": " \t "}
+        result = run_settings(env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ImproperlyConfigured", result.stderr)
+        self.assertIn("PLAID_SECRET must be non-empty", result.stderr)
+        self.assertNotIn("\t", result.stderr)
+
+    def test_plaid_enabled_preserves_exact_non_empty_credential_strings(self):
+        env = {
+            **PLAID_ENABLED_ENV,
+            "PLAID_CLIENT_ID": "  exact-client-id  ",
+            "PLAID_SECRET": "  exact-secret  ",
+        }
+        body = textwrap.dedent(
+            """\
+            print(
+                json.dumps(
+                    {
+                        "client_id": settings.PLAID_CLIENT_ID,
+                        "secret": settings.PLAID_SECRET,
+                    }
+                )
+            )
+            """
+        )
+        result = run_settings(env, body=body)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["client_id"], "  exact-client-id  ")
+        self.assertEqual(payload["secret"], "  exact-secret  ")
+
+    def test_plaid_enabled_rejects_empty_token_keys(self):
+        env = {**PLAID_ENABLED_ENV, "PLAID_TOKEN_KEYS": ""}
+        result = run_settings(env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ImproperlyConfigured", result.stderr)
+        self.assertIn("PLAID_TOKEN_KEYS", result.stderr)
+
+    def test_plaid_enabled_rejects_malformed_token_keys(self):
+        env = {**PLAID_ENABLED_ENV, "PLAID_TOKEN_KEYS": "key-a"}
+        result = run_settings(env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ImproperlyConfigured", result.stderr)
+        self.assertIn("PLAID_TOKEN_KEYS", result.stderr)
+
+    def test_plaid_enabled_rejects_duplicate_key_ids(self):
+        env = {
+            **PLAID_ENABLED_ENV,
+            "PLAID_TOKEN_KEYS": (
+                f"key-a:{PLAID_TEST_KEYS[0]},key-a:{PLAID_TEST_KEYS[1]}"
+            ),
+        }
+        result = run_settings(env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ImproperlyConfigured", result.stderr)
+        self.assertIn("duplicate key id", result.stderr)
+
+    def test_plaid_enabled_rejects_unsafe_key_id(self):
+        env = {
+            **PLAID_ENABLED_ENV,
+            "PLAID_TOKEN_KEYS": f"bad id!:{PLAID_TEST_KEYS[0]}",
+        }
+        result = run_settings(env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ImproperlyConfigured", result.stderr)
+        self.assertIn("unsafe key id", result.stderr)
+        self.assertNotIn("bad id!", result.stderr)
+
+    def test_plaid_enabled_rejects_invalid_fernet_key(self):
+        env = {
+            **PLAID_ENABLED_ENV,
+            "PLAID_TOKEN_KEYS": "key-a:not-a-fernet-key",
+        }
+        result = run_settings(env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ImproperlyConfigured", result.stderr)
+        self.assertIn("invalid Fernet key", result.stderr)
+        self.assertNotIn("not-a-fernet-key", result.stderr)

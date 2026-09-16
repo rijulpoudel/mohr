@@ -148,7 +148,7 @@ and a synced row is a provider-owned audit record that must be retained
 provider-reported removals (`is_provider_removed`) and supersession
 (`is_superseded`). Manual rows keep full v0.1 delete behavior.
 
-## 4. Persistence model proposal (no migration in this issue)
+## 4. Persistence model
 
 ### New tables
 
@@ -205,7 +205,7 @@ provider-reported removals (`is_provider_removed`) and supersession
   bounded management sweep, and the table is capped (oldest processed rows
   evicted first) so a flood cannot grow it without limit.
 
-### Extensions to existing tables (future migration, not this issue)
+### Extensions to existing tables
 
 `Transaction` gains nullable provider columns; manual rows keep them null:
 
@@ -221,12 +221,25 @@ provider-reported removals (`is_provider_removed`) and supersession
 - `category_customized`, `note_customized` (bools preserving overrides).
 - `connection` FK (nullable, `on_delete=RESTRICT` for audit retention).
 
-Deletion graph: `PlaidConnection.user` is proposed as `CASCADE` while
-`Transaction.connection` is `RESTRICT`, so deleting a user would cascade
-to connections and collide with transactions that restrict them. The full
-deletion graph must be decided and verified with the repository migration
-workflow before the migration is written; do not change v0.1 user-deletion
-behavior by accident.
+Deletion graph (final, verified with the repository migration workflow):
+
+- `PlaidConnection.user`: `CASCADE`.
+- `PlaidAccountLink.connection`: `CASCADE`.
+- `PlaidAccountLink.user`: `CASCADE`.
+- `PlaidAccountLink.account`: `RESTRICT` so provider history survives.
+- `PlaidWebhookEvent.connection`: `CASCADE`, nullable for the bounded
+  unmatched quarantine shape only.
+- `PlaidWebhookEvent.user`: `CASCADE`, nullable likewise.
+- `Transaction.connection`: `RESTRICT`, nullable for manual rows.
+- `Transaction.superseded_by`: `RESTRICT`, nullable self-reference.
+
+Direct deletion of a connection that still has synced transactions raises
+`RestrictedError` and preserves every row. Full user deletion preserves
+v0.1 behavior: Django collects and deletes the user's transactions, links,
+webhook events, connections, accounts, categories, and budgets together,
+and RESTRICT edges inside the same collected graph never block it; other
+users' rows survive. Disconnect is not deletion and is covered by its own
+lifecycle slice.
 
 ### Database constraints
 

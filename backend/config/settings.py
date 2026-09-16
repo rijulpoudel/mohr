@@ -16,6 +16,8 @@ from typing import cast
 import environ
 from django.core.exceptions import ImproperlyConfigured
 
+from plaid_integration.token_encryption import TokenKeyRing
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 env = environ.Env(
@@ -24,6 +26,11 @@ env = environ.Env(
     DJANGO_ALLOWED_HOSTS=(list, []),
     DJANGO_CSRF_TRUSTED_ORIGINS=(list, []),
     DATABASE_URL=(str, ""),
+    PLAID_ENABLED=(bool, False),
+    PLAID_ENV=(str, "sandbox"),
+    PLAID_CLIENT_ID=(str, ""),
+    PLAID_SECRET=(str, ""),
+    PLAID_TOKEN_KEYS=(str, ""),
 )
 
 environ.Env.read_env(BASE_DIR / ".env")
@@ -71,6 +78,35 @@ if PRODUCTION:
         )
 
 
+# Plaid Sandbox integration (v0.2). See docs/plaid.md sections 2 and 4.
+# Disabled by default: the settings import succeeds without any Plaid
+# credentials or token keys. When enabled, the import fails closed unless
+# every requirement below is met.
+
+PLAID_ENABLED = env("PLAID_ENABLED")
+PLAID_ENV = env("PLAID_ENV")
+PLAID_CLIENT_ID = env("PLAID_CLIENT_ID")
+PLAID_SECRET = env("PLAID_SECRET")
+
+if PLAID_ENABLED:
+    if PLAID_ENV != "sandbox":
+        raise ImproperlyConfigured(
+            "PLAID_ENV must be exactly 'sandbox' when PLAID_ENABLED is "
+            "enabled. Production Plaid access is not supported in v0.2."
+        )
+    if not PLAID_CLIENT_ID or not PLAID_CLIENT_ID.strip():
+        raise ImproperlyConfigured(
+            "PLAID_CLIENT_ID must be non-empty when PLAID_ENABLED is enabled."
+        )
+    if not PLAID_SECRET or not PLAID_SECRET.strip():
+        raise ImproperlyConfigured(
+            "PLAID_SECRET must be non-empty when PLAID_ENABLED is enabled."
+        )
+    PLAID_TOKEN_RING = TokenKeyRing.from_config(env("PLAID_TOKEN_KEYS"))
+else:
+    PLAID_TOKEN_RING = None
+
+
 # Application definition
 
 INSTALLED_APPS = [
@@ -87,6 +123,7 @@ INSTALLED_APPS = [
     "transactions.apps.TransactionsConfig",
     "budgets.apps.BudgetsConfig",
     "dashboard.apps.DashboardConfig",
+    "plaid_integration.apps.PlaidIntegrationConfig",
 ]
 
 AUTH_USER_MODEL = "users.User"
