@@ -7,6 +7,7 @@ import { resetDashboardRequest } from '../api/dashboard'
 import { resetCategoriesRequest } from '../api/categories'
 import { resetTransactionsRequest } from '../api/transactions'
 import { resetBudgetsRequest } from '../api/budgets'
+import { resetPlaidConnectionsRequest } from '../api/plaid'
 import App from '../App'
 
 export const CSRF_TOKEN = 'test-csrf-token'
@@ -85,6 +86,7 @@ beforeEach(() => {
   resetCategoriesRequest()
   resetTransactionsRequest()
   resetBudgetsRequest()
+  resetPlaidConnectionsRequest()
   clearCookies()
   localStorage.clear()
   sessionStorage.clear()
