@@ -111,6 +111,7 @@ POST   /api/plaid/link-token/        authenticated, CSRF protected
 POST   /api/plaid/exchange/          authenticated, CSRF protected
 GET    /api/plaid/connections/       authenticated list of user's connections
 POST   /api/plaid/connections/<id>/sync/      authenticated manual sync trigger
+POST   /api/plaid/connections/<id>/link-token/ authenticated update-mode Link token
 POST   /api/plaid/connections/<id>/disconnect/ authenticated disconnect
 POST   /api/plaid/webhooks/transactions/      public, signature-verified, CSRF-exempt
 ```
@@ -133,6 +134,10 @@ Response boundaries:
   removed}` only once the opening-balance anchor is set (section 5), or
   `202 {connection_id, status: "processing"}` while the requested history
   window is still incomplete. Manual trigger only; see section 7.
+- `POST .../link-token/` -> `200 {link_token, expiration}` for update mode.
+  The server decrypts the owned connection's existing access token only for
+  Plaid's request; it creates no exchange handle because update mode does not
+  replace or exchange the permanent access token.
 - `POST .../disconnect/` -> `200 {connection_id, status: "disconnected"}`.
 - Webhook endpoint returns `200` on verified receipt (even if processing is
   deferred) and `4xx` without mutation on verification failure. It returns
@@ -623,9 +628,11 @@ No Celery, Redis, or Kubernetes in this milestone. The design therefore is:
   leftovers converge on the next trigger.
 - Update mode: provider `ITEM_LOGIN_REQUIRED` (or equivalent Item error)
   flips the connection to `updating`, surfaces "reconnect needed" in the
-  connection list, and pauses sync writes; Link update mode reuses the
-  existing connection row (same `item_id`, token re-encrypted, cursor
-  preserved), then resumes.
+  connection list, and pauses sync writes. The authenticated owner requests
+  `POST /api/plaid/connections/<id>/link-token/`; Link update mode reuses the
+  existing connection row and permanent access token (same `item_id`, cursor,
+  account links, history, and user overrides), then resumes without another
+  public-token exchange.
 - Revoked consent / `ITEM_ERROR` unrecoverable: connection -> `revoked`;
   sync stops; history stays; relink creates or heals per `item_id` match.
 - Relink: same `item_id` heals the existing connection (new token,

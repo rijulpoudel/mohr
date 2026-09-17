@@ -64,6 +64,7 @@ from plaid_integration.services import (
     WebhookDuplicateEvent,
     WebhookInboxFull,
     claim_exchange_handle,
+    decrypt_connection_access_token,
     issue_exchange_handle,
     perform_sync,
     persist_exchange_connection,
@@ -461,6 +462,64 @@ def connection_list(request):
     )
     serializer = ConnectionSerializer(connections, many=True)
     return Response(serializer.data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def connection_link_token(request, pk):
+    """Owner-scoped update-mode Link token for ONE connection.
+
+    The lookup is scoped to ``request.user`` before anything is decrypted
+    or called, so a missing id and a foreign id are the same
+    indistinguishable 404 with zero decrypt and provider work. The
+    disabled-integration 503 check mirrors the link-token, exchange, and
+    sync routes and returns before any lookup, decrypt, or provider call.
+    The stored access token is decrypted with the configured key ring; a
+    missing, cleared, wrong-key, malformed, or undecryptable token fails
+    closed with the fixed 503 and no provider call. Any owned connection
+    that still has decryptable token material is allowed, including
+    active/updating/error/revoked; a disconnected/cleared connection
+    naturally fails fixed-safe because no token exists. The update-mode
+    request reuses the stored token with the same Mohr client settings and
+    no ``products`` or Transactions-days window. The response is exactly
+    ``200 {link_token, expiration}`` with no exchange handle, and issuing
+    the token changes no database row: status, cursor, links, history, and
+    user overrides stay intact.
+    """
+    if not settings.PLAID_ENABLED:
+        return Response(
+            {"detail": PLAID_UNAVAILABLE_DETAIL},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+    connection = get_object_or_404(
+        PlaidConnection.objects.filter(user=request.user),
+        pk=pk,
+    )
+    access_token = decrypt_connection_access_token(connection)
+    if access_token is None:
+        return Response(
+            {"detail": PLAID_UNAVAILABLE_DETAIL},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+    try:
+        gateway = PlaidGateway.from_settings()
+        response = gateway.create_update_link_token(
+            plaid_client_user_id(request.user), access_token
+        )
+    except PlaidGatewayError:
+        return Response(
+            {"detail": PLAID_UNAVAILABLE_DETAIL},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+    return Response(
+        {
+            "link_token": response.link_token,
+            "expiration": response.expiration,
+        }
+    )
 
 
 @api_view(["POST"])

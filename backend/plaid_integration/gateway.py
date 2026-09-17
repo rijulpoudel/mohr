@@ -243,6 +243,36 @@ class PlaidGateway:
             logger.warning("Plaid link token creation failed.")
             raise PlaidGatewayError(PLAID_UNAVAILABLE_DETAIL) from None
 
+    def create_update_link_token(self, client_user_id, access_token):
+        """Create a server-only update-mode Link token for ONE existing Item.
+
+        Update mode reuses the stored permanent ``access_token`` and sends
+        the same Mohr client/language/country/user settings as initial Link
+        creation, but requests NO ``products`` and NO Transactions-days
+        window (the 90-day history is fixed at the initial Link). The
+        ``access_token`` is never logged or interpolated and the raw
+        provider response never leaves this boundary. Every provider,
+        transport, or timeout condition raises the fixed safe
+        :class:`PlaidGatewayError` after the bounded request timeout.
+        """
+        request = LinkTokenCreateRequest(
+            client_id=self._client_id,
+            secret=self._secret,
+            client_name="Mohr",
+            language="en",
+            country_codes=[CountryCode("US")],
+            user=LinkTokenCreateRequestUser(client_user_id=client_user_id),
+            access_token=access_token,
+        )
+        try:
+            return self._plaid_api.link_token_create(
+                link_token_create_request=request,
+                _request_timeout=PLAID_REQUEST_TIMEOUT_SECONDS,
+            )
+        except (ApiException, HTTPError, TimeoutError):
+            logger.warning("Plaid update-mode link token creation failed.")
+            raise PlaidGatewayError(PLAID_UNAVAILABLE_DETAIL) from None
+
     def exchange_public_token(self, public_token):
         """Exchange a server-only one-time public token for an access token.
 

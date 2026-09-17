@@ -989,6 +989,19 @@ def _decrypt_access_token(connection):
     return decrypted.plaintext.decode()
 
 
+def decrypt_connection_access_token(connection):
+    """Return the decrypted stored access token for ONE owned connection.
+
+    Narrow safe accessor for server-only flows that must reuse a stored
+    Item's permanent token (update-mode Link token issuance). A missing,
+    cleared, wrong-key, malformed, or undecryptable token returns None so
+    the caller fails closed; the plaintext is held in memory only for the
+    outgoing gateway call and is never logged, stored, interpolated, or
+    returned.
+    """
+    return _decrypt_access_token(connection)
+
+
 def _record_owned_error(connection, message):
     """Record ``message`` through the owned-error convention, nothing else.
 

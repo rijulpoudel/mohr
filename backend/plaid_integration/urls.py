@@ -1,6 +1,7 @@
 from django.urls import path
 
 from plaid_integration.views import (
+    connection_link_token,
     connection_list,
     connection_sync,
     exchange,
@@ -16,6 +17,11 @@ urlpatterns = [
         "connections/<int:pk>/sync/",
         connection_sync,
         name="plaid-connection-sync",
+    ),
+    path(
+        "connections/<int:pk>/link-token/",
+        connection_link_token,
+        name="plaid-connection-link-token",
     ),
     path(
         "webhooks/transactions/",
