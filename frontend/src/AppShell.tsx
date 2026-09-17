@@ -19,6 +19,7 @@ export function AppShell() {
                 Dashboard
               </NavLink>
               <NavLink to="/accounts">Accounts</NavLink>
+              <NavLink to="/connections">Connections</NavLink>
               <NavLink to="/categories">Categories</NavLink>
               <NavLink to="/transactions">Transactions</NavLink>
               <NavLink to="/budgets">Budgets</NavLink>

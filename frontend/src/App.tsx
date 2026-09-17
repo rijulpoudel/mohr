@@ -5,6 +5,7 @@ import { GuestRoute, ProtectedRoute } from './routes/guards'
 import { LoginScreen } from './screens/LoginScreen'
 import { NotFoundScreen } from './screens/NotFoundScreen'
 import { AccountsScreen } from './screens/AccountsScreen'
+import { ConnectionsScreen } from './screens/ConnectionsScreen'
 import { CategoriesScreen } from './screens/CategoriesScreen'
 import { TransactionsScreen } from './screens/TransactionsScreen'
 import { BudgetsScreen } from './screens/BudgetsScreen'
@@ -46,6 +47,14 @@ function App() {
               element={
                 <ProtectedRoute>
                   <AccountsScreen />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/connections"
+              element={
+                <ProtectedRoute>
+                  <ConnectionsScreen />
                 </ProtectedRoute>
               }
             />
