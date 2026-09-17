@@ -92,6 +92,63 @@ class PlaidConnection(models.Model):
         return f"<PlaidConnection id={self.pk} status={self.status!r}>"
 
 
+class PlaidItemRemovalRequest(models.Model):
+    """Bounded outbox for a relocated Plaid access-token package.
+
+    ``docs/plaid.md`` section 9 requires disconnect to null the encrypted
+    access token locally and retry ``/item/remove`` later, but the remote
+    call requires the token. The ciphertext is therefore RELOCATED here
+    verbatim (never re-encrypted) so the connection row holds nothing while
+    the retry driver can still decrypt the moved package. The row carries
+    only counts and a fixed redacted error; never plaintext or provider
+    detail.
+    """
+
+    connection = models.OneToOneField(
+        "PlaidConnection",
+        on_delete=models.CASCADE,
+        related_name="item_removal_request",
+    )
+    access_token_encrypted = models.TextField()
+    encryption_key_id = models.CharField(max_length=64)
+    status = models.CharField(
+        max_length=16,
+        choices=(("pending", "Pending"), ("failed", "Failed")),
+        default="pending",
+    )
+    attempts = models.PositiveIntegerField(default=0)
+    next_retry_at = models.DateTimeField(null=True, blank=True)
+    last_attempt_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("id",)
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(status__in=("pending", "failed")),
+                name="plaid_item_removal_request_status_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(attempts__gte=0),
+                name="plaid_item_removal_request_attempts_non_negative",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["status", "next_retry_at"],
+                name="plaid_removal_status_retry_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return f"<PlaidItemRemovalRequest id={self.pk} status={self.status!r}>"
+
+    def __repr__(self):
+        return f"<PlaidItemRemovalRequest id={self.pk} status={self.status!r}>"
+
+
 class PlaidExchangeHandle(models.Model):
     """Single-use Link exchange capability, stored as a SHA-256 digest only.
 
