@@ -11,8 +11,13 @@ import { useAuth } from '../auth/AuthContext'
 const GENERIC_ERROR_MESSAGE = 'Something went wrong. Please try again.'
 const INVALID_LINK_TOKEN_MESSAGE =
   'Your bank connection link expired. Please try again.'
+const LINK_EXIT_ERROR_MESSAGE =
+  'The bank connection could not be completed. Please try again.'
+const LINK_LOAD_ERROR_MESSAGE =
+  'We could not start the bank connection. Please try again.'
 const CONNECT_LABEL = 'Connect a bank'
 const PREPARING_LABEL = 'Preparing your bank connection…'
+const PREPARING_MESSAGE = 'Preparing a secure connection to your bank…'
 const IMPORTING_MESSAGE = 'Importing your bank data. This may take a few minutes.'
 const STILL_IMPORTING_MESSAGE =
   'Still importing. Your bank connection will appear once the first import finishes.'
@@ -201,12 +206,16 @@ export function ConnectBankButton({
     (error: PlaidLinkError | null) => {
       if (flowStatusRef.current !== 'linking') return
       clearTokenState()
-      if (error !== null && error.error_code === 'INVALID_LINK_TOKEN') {
-        updateFlowStatus('error')
-        setErrorMessage(INVALID_LINK_TOKEN_MESSAGE)
+      if (error === null) {
+        updateFlowStatus('idle')
         return
       }
-      updateFlowStatus('idle')
+      updateFlowStatus('error')
+      setErrorMessage(
+        error.error_code === 'INVALID_LINK_TOKEN'
+          ? INVALID_LINK_TOKEN_MESSAGE
+          : LINK_EXIT_ERROR_MESSAGE,
+      )
     },
     [clearTokenState, updateFlowStatus],
   )
@@ -220,11 +229,32 @@ export function ConnectBankButton({
     void prepareLinkToken()
   }, [clearTokenState, prepareLinkToken, updateFlowStatus])
 
-  const { open, ready } = usePlaidLink({
+  const { open, ready, error } = usePlaidLink({
     token: linkToken,
     onSuccess: handleSuccess,
     onExit: handleExit,
   })
+
+  useEffect(() => {
+    if (flowStatus !== 'linking') return
+    if (error === null) return
+    // The Plaid script failed to load: fail the flow with a retryable message
+    // instead of leaving the button stuck disabled. The state transition runs
+    // in a microtask callback, the same shape as a subscription callback, so
+    // the effect stays free of synchronous setState calls. The ref is
+    // re-checked inside the callback because every other continuation in this
+    // component re-validates the live flow before writing state, and a newer
+    // flow must not be clobbered by this one. That re-check is defensive: no
+    // test can observe it, because a load failure leaves the flow unable to
+    // advance on its own.
+    queueMicrotask(() => {
+      if (!mountedRef.current) return
+      if (flowStatusRef.current !== 'linking') return
+      clearTokenState()
+      updateFlowStatus('error')
+      setErrorMessage(LINK_LOAD_ERROR_MESSAGE)
+    })
+  }, [clearTokenState, error, flowStatus, updateFlowStatus])
 
   useEffect(() => {
     if (flowStatus !== 'linking') return
@@ -235,6 +265,9 @@ export function ConnectBankButton({
     open()
   }, [flowStatus, linkToken, open, ready])
 
+  // A still-processing first import intentionally leaves the connect button
+  // enabled: the user may connect another bank, and the pending connection
+  // reports its own import status on its card.
   const inFlight = IN_FLIGHT_STATUSES.has(flowStatus)
 
   return (
@@ -247,6 +280,11 @@ export function ConnectBankButton({
       >
         {flowStatus === 'preparing' ? PREPARING_LABEL : CONNECT_LABEL}
       </button>
+      {flowStatus === 'preparing' && (
+        <p role="status" className="notice">
+          {PREPARING_MESSAGE}
+        </p>
+      )}
       {flowStatus === 'syncing' && (
         <p role="status" className="notice">
           {IMPORTING_MESSAGE}

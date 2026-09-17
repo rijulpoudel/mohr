@@ -28,9 +28,13 @@ const plaidLink = vi.hoisted(() => {
   const exit = vi.fn()
   const submit = vi.fn()
   let options: CapturedLinkOptions | null = null
+  let result: { ready: boolean; error: ErrorEvent | null } = {
+    ready: true,
+    error: null,
+  }
   const usePlaidLink = vi.fn((next: CapturedLinkOptions) => {
     options = next
-    return { open, exit, ready: true, error: null, submit }
+    return { open, exit, ready: result.ready, error: result.error, submit }
   })
   return {
     open,
@@ -38,8 +42,12 @@ const plaidLink = vi.hoisted(() => {
     submit,
     usePlaidLink,
     latestOptions: () => options,
+    setResult: (next: { ready: boolean; error: ErrorEvent | null }) => {
+      result = next
+    },
     reset: () => {
       options = null
+      result = { ready: true, error: null }
       open.mockClear()
       exit.mockClear()
       submit.mockClear()
@@ -218,6 +226,20 @@ describe('connect bank button states', () => {
     expect(calls(mock, '/api/plaid/link-token/', 'POST')).toHaveLength(1)
   })
 
+  it('announces preparation with a status region while the link-token request is pending', async () => {
+    const pending = deferred<Response>()
+    installFetchMock(
+      authenticatedHandler({ linkToken: () => pending.promise }),
+    )
+    renderApp('/connections')
+    await screen.findByText(/No bank connections yet/)
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Connect a bank' }))
+
+    expect(await screen.findByRole('status')).toHaveTextContent(/Preparing/)
+  })
+
   it('opens Link exactly once per live token and never again while that token is live', async () => {
     const mock = installFetchMock(authenticatedHandler())
     renderApp('/connections')
@@ -389,9 +411,86 @@ describe('connect bank exchange and first sync', () => {
     ).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Connect a bank' })).toBeEnabled()
   })
+
+  it('keeps the connect button enabled while the first import is still processing', async () => {
+    installFetchMock(
+      authenticatedHandler({
+        sync: () => jsonResponse(processingFixture(), 202),
+      }),
+    )
+    renderApp('/connections')
+    await screen.findByText(/No bank connections yet/)
+
+    await openLinkViaButton()
+    linkSuccess()
+
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      /Still importing/,
+    )
+    expect(screen.getByRole('button', { name: 'Connect a bank' })).toBeEnabled()
+  })
+
+  it('ignores a trailing onExit after success so nothing restarts or doubles', async () => {
+    const mock = installFetchMock(authenticatedHandler())
+    renderApp('/connections')
+    await screen.findByText(/No bank connections yet/)
+
+    await openLinkViaButton()
+    linkSuccess()
+    await screen.findByText('Bank connected. 3 added, 1 updated.')
+
+    linkDismiss()
+
+    expect(calls(mock, '/api/plaid/link-token/', 'POST')).toHaveLength(1)
+    expect(calls(mock, '/api/plaid/exchange/', 'POST')).toHaveLength(1)
+    expect(calls(mock, '/api/plaid/connections/5/sync/', 'POST')).toHaveLength(1)
+    expect(plaidLink.open).toHaveBeenCalledTimes(1)
+    expect(
+      screen.getByText('Bank connected. 3 added, 1 updated.'),
+    ).toBeInTheDocument()
+  })
+
+  it('reconnects after a completed connect with a fresh token and a single new open', async () => {
+    const mock = installFetchMock(authenticatedHandler())
+    renderApp('/connections')
+    await screen.findByText(/No bank connections yet/)
+
+    await openLinkViaButton()
+    linkSuccess()
+    await screen.findByText('Bank connected. 3 added, 1 updated.')
+
+    await openLinkViaButton()
+    expect(plaidLink.open).toHaveBeenCalledTimes(2)
+    expect(calls(mock, '/api/plaid/link-token/', 'POST')).toHaveLength(2)
+  })
 })
 
 describe('connect bank failure handling', () => {
+  it('recovers with a retryable alert when the Plaid script fails to load while linking', async () => {
+    plaidLink.setResult({
+      ready: false,
+      error: {
+        message: 'Plaid script failed to load',
+      } as unknown as ErrorEvent,
+    })
+    const mock = installFetchMock(authenticatedHandler())
+    renderApp('/connections')
+    await screen.findByText(/No bank connections yet/)
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Connect a bank' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(/could not start/i)
+    expect(screen.getByRole('button', { name: 'Connect a bank' })).toBeEnabled()
+    expect(plaidLink.open).not.toHaveBeenCalled()
+
+    await user.click(within(alert).getByRole('button', { name: 'Retry' }))
+    await waitFor(() =>
+      expect(calls(mock, '/api/plaid/link-token/', 'POST')).toHaveLength(2),
+    )
+  })
+
   it('shows a retryable alert when the link-token request fails', async () => {
     let linkTokenCalls = 0
     const mock = installFetchMock(
@@ -603,6 +702,29 @@ describe('connect bank onExit behavior', () => {
     await waitFor(() => expect(plaidLink.open).toHaveBeenCalledTimes(2))
     expect(calls(mock, '/api/plaid/link-token/', 'POST')).toHaveLength(2)
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('shows a retryable alert for any other onExit error without reopening Link', async () => {
+    const mock = installFetchMock(authenticatedHandler())
+    renderApp('/connections')
+    await screen.findByText(/No bank connections yet/)
+
+    await openLinkViaButton()
+    linkExitWith({
+      error_type: 'RATE_LIMIT_EXCEEDED',
+      error_code: 'RATE_LIMIT_EXCEEDED',
+      error_message: 'Too many attempts.',
+      display_message: null,
+    })
+
+    const alert = screen.getByRole('alert')
+    expect(alert).toHaveTextContent(/could not be completed/i)
+    expect(plaidLink.open).toHaveBeenCalledTimes(1)
+
+    const user = userEvent.setup()
+    await user.click(within(alert).getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(plaidLink.open).toHaveBeenCalledTimes(2))
+    expect(calls(mock, '/api/plaid/link-token/', 'POST')).toHaveLength(2)
   })
 })
 
