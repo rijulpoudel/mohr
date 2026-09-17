@@ -139,6 +139,9 @@ Response boundaries:
   Plaid's request; it creates no exchange handle because update mode does not
   replace or exchange the permanent access token.
 - `POST .../disconnect/` -> `200 {connection_id, status: "disconnected"}`.
+  The response never varies with remote Plaid success, because the user is
+  locally disconnected either way, and never carries the token, key id,
+  `item_id`, cursor, or provider detail.
 - Webhook endpoint returns `200` on verified receipt (even if processing is
   deferred) and `4xx` without mutation on verification failure. It returns
   no financial data.
@@ -213,6 +216,28 @@ provider-reported removals (`is_provider_removed`) and supersession
   bounded management sweep, and the table is capped (oldest processed rows
   evicted first) so a flood cannot grow it without limit.
 
+`PlaidItemRemovalRequest` (bounded outbox for a relocated token package):
+
+- `id`, `connection` FK (`OneToOneField`, `CASCADE`), the moved
+  `access_token_encrypted` package and `encryption_key_id` **verbatim**
+  (never re-encrypted), `status` (`pending | failed`), `attempts`,
+  `next_retry_at`, `last_attempt_at`, `last_error` (fixed redacted reason
+  only), timestamps.
+- Section 9 requires disconnect to null the encrypted access token locally
+  AND retry `/item/remove` later, but the remote call requires that token.
+  The disconnect transaction therefore relocates the ciphertext here
+  instead of destroying it, so the connection row holds no credential while
+  the bounded retry driver can still decrypt the moved package. Decryption
+  on retry uses the same key-ring and key-rotation path as any stored
+  token; the package is never rewritten.
+- One row per connection, so no second disconnect can orphan a row. A
+  successful remote removal deletes the row (ciphertext gone). A
+  `pending` row becomes `failed` only when the package is undecryptable or
+  the attempt budget is exhausted; a `failed` row is never retried again.
+- The outbox is server-only: it is excluded from every serializer,
+  response, and log line, and only counts or a fixed redacted reason may
+  ever be surfaced.
+
 ### Extensions to existing tables
 
 `Transaction` gains nullable provider columns; manual rows keep them null:
@@ -240,6 +265,9 @@ Deletion graph (final, verified with the repository migration workflow):
 - `PlaidWebhookEvent.user`: `CASCADE`, nullable likewise.
 - `Transaction.connection`: `RESTRICT`, nullable for manual rows.
 - `Transaction.superseded_by`: `RESTRICT`, nullable self-reference.
+- `PlaidItemRemovalRequest.connection`: `CASCADE` on the connection, which
+  the `RESTRICT` edges above already make non-deletable while imported
+  history exists, so a relocated package is never silently orphaned.
 
 Direct deletion of a connection that still has synced transactions raises
 `RestrictedError` and preserves every row. Full user deletion preserves
@@ -638,12 +666,20 @@ No Celery, Redis, or Kubernetes in this milestone. The design therefore is:
 - Relink: same `item_id` heals the existing connection (new token,
   preserved cursor and links); new `item_id` is a new connection.
 - Disconnect (`POST .../disconnect/`) is local-first: in one transaction,
-  null `access_token_encrypted`, mark the connection `disconnected`, and
-  set linked Mohr accounts `is_archived=true`; every imported transaction
-  is preserved for history. Only after the local teardown succeeds, attempt
-  Plaid `/item/remove` as best effort; a failed remote revocation is
-  recorded in `last_sync_error` and retried later, but it never traps the
-  user in a connected state. Disconnect never hard-deletes financial rows.
+  relocate the encrypted access-token package and its key id verbatim into
+  `PlaidItemRemovalRequest`, null both columns on the connection, mark the
+  connection `disconnected`, and set linked Mohr accounts
+  `is_archived=true`; the cursor, readiness status, `last_sync_error`, link
+  rows, and every imported transaction are preserved for history. Only
+  after the local teardown commits, attempt Plaid `/item/remove` outside
+  the transaction as best effort. Success deletes the outbox row, so no
+  ciphertext remains at rest; a failed remote revocation leaves the row
+  `pending` with only a fixed redacted reason and is retried by the bounded
+  `process_plaid_removals` driver (exponential backoff from 1 hour capped
+  at 24 hours, then `failed` after 5 attempts). A remote failure never
+  traps the user in a connected state and never changes the `200` response.
+  Disconnect never hard-deletes financial rows, and the disconnected state
+  is terminal against later Item webhooks.
 - Provider outage: Plaid API errors map to `last_sync_error` + `error`
   status with exponential-backoff manual retry; no cursor is advanced on
   failure, so retry is always safe.
@@ -665,6 +701,10 @@ Store and log the minimum needed to reconcile:
   webhook type/code, counts of added/modified/removed, sync duration, and
   error codes without payloads. Verification failures log reason + key id,
   never the body or token.
+- The `PlaidItemRemovalRequest` outbox holds the relocated ciphertext and
+  is server-only: no serializer, response, or log line ever includes it.
+  Only counts (`removed`, `retried`, `failed`, `skipped`) or the fixed
+  redacted failure reason may be surfaced.
 
 ## 11. Threat table
 
