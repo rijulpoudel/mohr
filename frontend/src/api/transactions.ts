@@ -16,6 +16,10 @@ export interface Transaction {
   amount: string
   date: string
   note: string
+  source: 'manual' | 'plaid'
+  provider_name: string
+  is_pending: boolean
+  is_pending_initial_import: boolean
   created_at: string
   updated_at: string
 }
@@ -46,6 +50,7 @@ export interface TransactionPatch {
   note?: string
 }
 
+// Mirrors backend/transactions/serializers.py TransactionSerializer.Meta.fields.
 const TRANSACTION_KEYS = [
   'id',
   'account',
@@ -54,11 +59,16 @@ const TRANSACTION_KEYS = [
   'amount',
   'date',
   'note',
+  'source',
+  'provider_name',
+  'is_pending',
+  'is_pending_initial_import',
   'created_at',
   'updated_at',
 ] as const
 
 const TRANSACTION_TYPES: ReadonlySet<string> = new Set(['income', 'expense'])
+const TRANSACTION_SOURCES: ReadonlySet<string> = new Set(['manual', 'plaid'])
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/
 const TIMESTAMP_PATTERN =
@@ -121,6 +131,10 @@ function parseTransaction(value: unknown): Transaction | null {
     amount,
     date,
     note,
+    source,
+    provider_name,
+    is_pending,
+    is_pending_initial_import,
     created_at,
     updated_at,
   } = value
@@ -136,6 +150,16 @@ function parseTransaction(value: unknown): Transaction | null {
   if (!isStrictPositiveAmount(amount)) return null
   if (!isCalendarDate(date)) return null
   if (typeof note !== 'string') return null
+  if (typeof source !== 'string' || !TRANSACTION_SOURCES.has(source)) return null
+  if (typeof provider_name !== 'string' || provider_name.length > 200) {
+    return null
+  }
+  if (typeof is_pending !== 'boolean') return null
+  if (typeof is_pending_initial_import !== 'boolean') return null
+  if (source === 'manual' && (provider_name !== '' || is_pending !== false)) {
+    return null
+  }
+  if (is_pending_initial_import && source !== 'plaid') return null
   if (!isTimestamp(created_at) || !isTimestamp(updated_at)) return null
   return {
     id,
@@ -145,6 +169,10 @@ function parseTransaction(value: unknown): Transaction | null {
     amount,
     date,
     note,
+    source: source as 'manual' | 'plaid',
+    provider_name,
+    is_pending,
+    is_pending_initial_import,
     created_at,
     updated_at,
   }

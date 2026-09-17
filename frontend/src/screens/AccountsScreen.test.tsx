@@ -20,6 +20,7 @@ function accountFixture(overrides: Record<string, unknown> = {}) {
     account_type: 'checking',
     opening_balance: '100.00',
     current_balance: '100.00',
+    sync_pending: false,
     is_archived: false,
     created_at: '2026-09-11T14:52:48.008850Z',
     updated_at: '2026-09-11T14:52:48.008850Z',

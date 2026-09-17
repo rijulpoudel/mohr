@@ -14,6 +14,10 @@ export interface DashboardTransaction {
   amount: string
   date: string
   note: string
+  source: 'manual' | 'plaid'
+  provider_name: string
+  is_pending: boolean
+  is_pending_initial_import: boolean
   created_at: string
   updated_at: string
 }
@@ -36,6 +40,8 @@ const SUMMARY_KEYS = [
   'recent_transactions',
 ] as const
 
+// Mirrors backend/transactions/serializers.py TransactionSerializer.Meta.fields,
+// which dashboard/serializers.py reuses for recent_transactions.
 const TRANSACTION_KEYS = [
   'id',
   'account',
@@ -44,6 +50,10 @@ const TRANSACTION_KEYS = [
   'amount',
   'date',
   'note',
+  'source',
+  'provider_name',
+  'is_pending',
+  'is_pending_initial_import',
   'created_at',
   'updated_at',
 ] as const
@@ -52,6 +62,7 @@ const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/
 const TIMESTAMP_PATTERN =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/
 const POSITIVE_DECIMAL_PATTERN = /^(?!0+\.0+$)\d+\.\d{2}$/
+const TRANSACTION_SOURCES: ReadonlySet<string> = new Set(['manual', 'plaid'])
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -92,6 +103,10 @@ function parseTransaction(value: unknown): DashboardTransaction | null {
     amount,
     date,
     note,
+    source,
+    provider_name,
+    is_pending,
+    is_pending_initial_import,
     created_at,
     updated_at,
   } = value
@@ -106,6 +121,16 @@ function parseTransaction(value: unknown): DashboardTransaction | null {
   }
   if (!isCalendarDate(date)) return null
   if (typeof note !== 'string') return null
+  if (typeof source !== 'string' || !TRANSACTION_SOURCES.has(source)) return null
+  if (typeof provider_name !== 'string' || provider_name.length > 200) {
+    return null
+  }
+  if (typeof is_pending !== 'boolean') return null
+  if (typeof is_pending_initial_import !== 'boolean') return null
+  if (source === 'manual' && (provider_name !== '' || is_pending !== false)) {
+    return null
+  }
+  if (is_pending_initial_import && source !== 'plaid') return null
   if (!isTimestamp(created_at) || !isTimestamp(updated_at)) return null
   return {
     id,
@@ -115,6 +140,10 @@ function parseTransaction(value: unknown): DashboardTransaction | null {
     amount,
     date,
     note,
+    source: source as 'manual' | 'plaid',
+    provider_name,
+    is_pending,
+    is_pending_initial_import,
     created_at,
     updated_at,
   }
