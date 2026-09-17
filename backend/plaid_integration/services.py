@@ -493,6 +493,118 @@ def quarantine_verified_webhook(
     return True
 
 
+ITEM_LOGIN_REQUIRED_CODE = "ITEM_LOGIN_REQUIRED"
+
+
+def _next_item_connection_state(current_status, *, webhook_code, error_code):
+    """Return (new_status, set_sync_due) for one verified Item event.
+
+    Terminal monotonicity for issue #39 D2: ``revoked`` and ``disconnected``
+    never resurrect on LOGIN_REPAIRED, login-required, or generic errors;
+    ``disconnected`` is terminal even for USER_PERMISSION_REVOKED; generic
+    errors preserve ``updating`` so the actionable repair state is not lost.
+    Only LOGIN_REPAIRED sets ``sync_due``, including on an already-active
+    connection. Never touches cursor, tokens, readiness, or history.
+    """
+    if webhook_code == "USER_PERMISSION_REVOKED":
+        if current_status == PlaidConnectionStatus.DISCONNECTED:
+            return current_status, False
+        return PlaidConnectionStatus.REVOKED, False
+    if webhook_code == "LOGIN_REPAIRED":
+        if current_status in (
+            PlaidConnectionStatus.UPDATING,
+            PlaidConnectionStatus.ERROR,
+        ):
+            return PlaidConnectionStatus.ACTIVE, True
+        if current_status == PlaidConnectionStatus.ACTIVE:
+            return current_status, True
+        return current_status, False
+    # ITEM + ERROR.
+    if error_code == ITEM_LOGIN_REQUIRED_CODE:
+        if current_status in (
+            PlaidConnectionStatus.ACTIVE,
+            PlaidConnectionStatus.ERROR,
+        ):
+            return PlaidConnectionStatus.UPDATING, False
+        return current_status, False
+    if current_status == PlaidConnectionStatus.ACTIVE:
+        return PlaidConnectionStatus.ERROR, False
+    return current_status, False
+
+
+def persist_verified_item_webhook(
+    connection,
+    claims,
+    *,
+    webhook_type,
+    webhook_code,
+    error_code=None,
+):
+    """Persist one verified Item lifecycle event and apply its transition.
+
+    Dedicated Item path for issue #39 D2: does not reuse transaction
+    persistence semantics. In ONE ``transaction.atomic()`` block under the
+    shared ingest lock, the durable inbox row is inserted with
+    ``processed_at`` set (the state transition completes inline) and the
+    connection's lifecycle ``status`` (and ``sync_due`` for LOGIN_REPAIRED)
+    advances per ``_next_item_connection_state``; cursor, tokens,
+    ``transactions_update_status``, ``last_sync_error``, ``last_synced_at``,
+    accounts, and transactions are never touched. The same block enforces
+    ``PLAID_WEBHOOK_INBOX_CAP`` with the existing priority; a full cap of
+    unprocessed matched rows raises :class:`WebhookInboxFull` with nothing
+    mutated. An exact re-delivery raises :class:`WebhookDuplicateEvent`
+    with no repeat mutation. ``PlaidConnection.DoesNotExist`` propagates
+    for the caller to treat as unmatched. Unrelated ``IntegrityError``
+    propagates; no body or provider message is stored.
+    """
+    with _WEBHOOK_INGEST_LOCK:
+        try:
+            with transaction.atomic():
+                conn = PlaidConnection.objects.select_for_update().get(pk=connection.pk)
+                new_status, set_sync_due = _next_item_connection_state(
+                    conn.status,
+                    webhook_code=webhook_code,
+                    error_code=error_code,
+                )
+                now = timezone.now()
+                event = PlaidWebhookEvent.objects.create(
+                    connection=conn,
+                    user=conn.user,
+                    webhook_type=webhook_type,
+                    webhook_code=webhook_code,
+                    item_id=conn.item_id,
+                    idempotency_key=claims.idempotency_key,
+                    initial_update_complete=False,
+                    historical_update_complete=False,
+                    received_at=now,
+                    processed_at=now,
+                )
+                update_fields = []
+                if new_status != conn.status:
+                    conn.status = new_status
+                    update_fields.append("status")
+                if set_sync_due and not conn.sync_due:
+                    conn.sync_due = True
+                    update_fields.append("sync_due")
+                if update_fields:
+                    conn.save(update_fields=update_fields)
+                if not _enforce_webhook_inbox_cap(event.pk):
+                    raise _InboxCapExceeded()
+        except _InboxCapExceeded:
+            raise WebhookInboxFull() from None
+        except IntegrityError as exc:
+            constraint_name = _constraint_name(exc)
+            if constraint_name is not None:
+                if constraint_name == _WEBHOOK_EVENT_IDEMPOTENCY_UNIQUE:
+                    raise WebhookDuplicateEvent() from None
+                raise
+            if PlaidWebhookEvent.objects.filter(
+                idempotency_key=claims.idempotency_key
+            ).exists():
+                raise WebhookDuplicateEvent() from None
+            raise
+
+
 @dataclass(frozen=True)
 class SyncPageResult:
     """Safe outcome of one page application; counts only, repr-safe.

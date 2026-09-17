@@ -68,6 +68,7 @@ from plaid_integration.services import (
     issue_exchange_handle,
     perform_sync,
     persist_exchange_connection,
+    persist_verified_item_webhook,
     persist_verified_webhook,
     plaid_client_user_id,
     quarantine_verified_webhook,
@@ -89,9 +90,14 @@ _WEBHOOK_TYPE_TRANSACTIONS = "TRANSACTIONS"
 _WEBHOOK_TRANSACTIONS_SUPPORTED_CODES = frozenset(
     {"SYNC_UPDATES_AVAILABLE", "DEFAULT_UPDATE"}
 )
+_WEBHOOK_TYPE_ITEM = "ITEM"
+_WEBHOOK_ITEM_SUPPORTED_CODES = frozenset(
+    {"ERROR", "LOGIN_REPAIRED", "USER_PERMISSION_REVOKED"}
+)
 _WEBHOOK_TYPE_MAX_LENGTH = 50
 _WEBHOOK_CODE_MAX_LENGTH = 50
 _WEBHOOK_ITEM_ID_MAX_LENGTH = 100
+_WEBHOOK_ERROR_CODE_MAX_LENGTH = 50
 
 
 class PlaidWebhookRateThrottle(SimpleRateThrottle):
@@ -224,6 +230,31 @@ def _quarantine_fields(raw_body):
     )
 
 
+def _parse_item_error_code(raw_body):
+    """Return the bounded ``error.error_code`` for ITEM+ERROR, or None.
+
+    Runs only after verification and only for ``webhook_type`` ITEM plus
+    ``webhook_code`` ERROR. The verified bytes are decoded and parsed; the
+    ``error`` value must be a JSON object (never a bool, list, string, null,
+    or other nesting) whose ``error_code`` is a bounded nonempty string.
+    Any deviation returns None and the caller quarantines the delivery.
+    Never returns provider messages, request ids, bodies, or digests.
+    """
+    try:
+        data = json.loads(raw_body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    error = data.get("error")
+    if not isinstance(error, dict):
+        return None
+    error_code = error.get("error_code")
+    if not _is_bounded_nonempty_string(error_code, _WEBHOOK_ERROR_CODE_MAX_LENGTH):
+        return None
+    return error_code
+
+
 @api_view(["POST"])
 @authentication_classes([])
 @permission_classes([AllowAny])
@@ -268,38 +299,72 @@ def webhook_transactions(request):
     if payload is None:
         return _quarantine_response(raw_body, claims)
     if (
-        payload.webhook_type != _WEBHOOK_TYPE_TRANSACTIONS
-        or payload.webhook_code not in _WEBHOOK_TRANSACTIONS_SUPPORTED_CODES
+        payload.webhook_type == _WEBHOOK_TYPE_TRANSACTIONS
+        and payload.webhook_code in _WEBHOOK_TRANSACTIONS_SUPPORTED_CODES
     ):
-        logger.warning(
-            "Ignoring unsupported Plaid webhook (type=%r code=%r).",
-            payload.webhook_type,
-            payload.webhook_code,
-        )
+        connection = PlaidConnection.objects.filter(item_id=payload.item_id).first()
+        if connection is None:
+            return Response(WEBHOOK_RECEIVED_RESPONSE)
+        try:
+            persist_verified_webhook(
+                connection,
+                claims,
+                webhook_type=payload.webhook_type,
+                webhook_code=payload.webhook_code,
+                initial_update_complete=payload.initial_update_complete,
+                historical_update_complete=payload.historical_update_complete,
+            )
+        except WebhookDuplicateEvent:
+            logger.info(
+                "Duplicate Plaid webhook ignored (type=%r code=%r).",
+                payload.webhook_type,
+                payload.webhook_code,
+            )
+        except WebhookInboxFull:
+            return Response(
+                {"detail": WEBHOOK_INBOX_FULL_DETAIL},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         return Response(WEBHOOK_RECEIVED_RESPONSE)
-    connection = PlaidConnection.objects.filter(item_id=payload.item_id).first()
-    if connection is None:
+    if (
+        payload.webhook_type == _WEBHOOK_TYPE_ITEM
+        and payload.webhook_code in _WEBHOOK_ITEM_SUPPORTED_CODES
+    ):
+        error_code = None
+        if payload.webhook_code == "ERROR":
+            error_code = _parse_item_error_code(raw_body)
+            if error_code is None:
+                return _quarantine_response(raw_body, claims)
+        connection = PlaidConnection.objects.filter(item_id=payload.item_id).first()
+        if connection is None:
+            return Response(WEBHOOK_RECEIVED_RESPONSE)
+        try:
+            persist_verified_item_webhook(
+                connection,
+                claims,
+                webhook_type=payload.webhook_type,
+                webhook_code=payload.webhook_code,
+                error_code=error_code,
+            )
+        except WebhookDuplicateEvent:
+            logger.info(
+                "Duplicate Plaid webhook ignored (type=%r code=%r).",
+                payload.webhook_type,
+                payload.webhook_code,
+            )
+        except WebhookInboxFull:
+            return Response(
+                {"detail": WEBHOOK_INBOX_FULL_DETAIL},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        except PlaidConnection.DoesNotExist:
+            return Response(WEBHOOK_RECEIVED_RESPONSE)
         return Response(WEBHOOK_RECEIVED_RESPONSE)
-    try:
-        persist_verified_webhook(
-            connection,
-            claims,
-            webhook_type=payload.webhook_type,
-            webhook_code=payload.webhook_code,
-            initial_update_complete=payload.initial_update_complete,
-            historical_update_complete=payload.historical_update_complete,
-        )
-    except WebhookDuplicateEvent:
-        logger.info(
-            "Duplicate Plaid webhook ignored (type=%r code=%r).",
-            payload.webhook_type,
-            payload.webhook_code,
-        )
-    except WebhookInboxFull:
-        return Response(
-            {"detail": WEBHOOK_INBOX_FULL_DETAIL},
-            status=status.HTTP_503_SERVICE_UNAVAILABLE,
-        )
+    logger.warning(
+        "Ignoring unsupported Plaid webhook (type=%r code=%r).",
+        payload.webhook_type,
+        payload.webhook_code,
+    )
     return Response(WEBHOOK_RECEIVED_RESPONSE)
 
 

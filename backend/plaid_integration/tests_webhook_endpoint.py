@@ -826,3 +826,474 @@ class WebhookIngestServiceTests(WebhookEndpointBase):
                 )
 
         self.assertEqual(PlaidWebhookEvent.objects.count(), 0)
+
+
+def item_body(
+    webhook_code, *, item_id=ITEM_ID, error=None, include_error=False, **overrides
+):
+    payload = {
+        "webhook_type": "ITEM",
+        "webhook_code": webhook_code,
+        "item_id": item_id,
+    }
+    if include_error:
+        payload["error"] = error
+    payload.update(overrides)
+    return json.dumps(payload).encode()
+
+
+def item_error_body(*, item_id=ITEM_ID, error_code="ITEM_LOGIN_REQUIRED", **overrides):
+    return item_body(
+        "ERROR",
+        item_id=item_id,
+        include_error=True,
+        error={"error_code": error_code},
+        **overrides,
+    )
+
+
+class WebhookItemLifecycleTests(WebhookEndpointBase):
+    def post_item(self, body):
+        header = signed_header(body)
+        with patched_gateway():
+            return self.post_webhook(body, header=header)
+
+    def test_error_login_required_active_to_updating(self):
+        body = item_error_body(error_code="ITEM_LOGIN_REQUIRED")
+        response = self.post_item(body)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json(), WEBHOOK_RECEIVED_RESPONSE)
+        self.connection.refresh_from_db()
+        self.assertEqual(self.connection.status, PlaidConnectionStatus.UPDATING)
+        event = PlaidWebhookEvent.objects.get()
+        self.assertEqual(event.webhook_type, "ITEM")
+        self.assertEqual(event.webhook_code, "ERROR")
+        self.assertIsNotNone(event.processed_at)
+
+    def test_error_login_required_error_to_updating(self):
+        self.connection.status = PlaidConnectionStatus.ERROR
+        self.connection.save(update_fields=["status"])
+        body = item_error_body(error_code="ITEM_LOGIN_REQUIRED")
+        response = self.post_item(body)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.connection.refresh_from_db()
+        self.assertEqual(self.connection.status, PlaidConnectionStatus.UPDATING)
+        self.assertIsNotNone(PlaidWebhookEvent.objects.get().processed_at)
+
+    def test_login_repaired_updating_to_active_and_sync_due(self):
+        self.connection.status = PlaidConnectionStatus.UPDATING
+        self.connection.sync_due = False
+        self.connection.save(update_fields=["status", "sync_due"])
+        body = item_body("LOGIN_REPAIRED")
+        response = self.post_item(body)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.connection.refresh_from_db()
+        self.assertEqual(self.connection.status, PlaidConnectionStatus.ACTIVE)
+        self.assertTrue(self.connection.sync_due)
+        self.assertIsNotNone(PlaidWebhookEvent.objects.get().processed_at)
+
+    def test_login_repaired_error_to_active_and_sync_due(self):
+        self.connection.status = PlaidConnectionStatus.ERROR
+        self.connection.sync_due = False
+        self.connection.save(update_fields=["status", "sync_due"])
+        body = item_body("LOGIN_REPAIRED")
+        response = self.post_item(body)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.connection.refresh_from_db()
+        self.assertEqual(self.connection.status, PlaidConnectionStatus.ACTIVE)
+        self.assertTrue(self.connection.sync_due)
+
+    def test_login_repaired_already_active_still_sets_sync_due(self):
+        self.connection.sync_due = False
+        self.connection.save(update_fields=["sync_due"])
+        body = item_body("LOGIN_REPAIRED")
+        response = self.post_item(body)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.connection.refresh_from_db()
+        self.assertEqual(self.connection.status, PlaidConnectionStatus.ACTIVE)
+        self.assertTrue(self.connection.sync_due)
+
+    def test_user_permission_revoked_active_to_revoked(self):
+        body = item_body("USER_PERMISSION_REVOKED")
+        response = self.post_item(body)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.connection.refresh_from_db()
+        self.assertEqual(self.connection.status, PlaidConnectionStatus.REVOKED)
+
+    def test_user_permission_revoked_updating_and_error_to_revoked(self):
+        for start in (PlaidConnectionStatus.UPDATING, PlaidConnectionStatus.ERROR):
+            with self.subTest(start=start):
+                PlaidWebhookEvent.objects.all().delete()
+                self.connection.status = start
+                self.connection.save(update_fields=["status"])
+                body = item_body("USER_PERMISSION_REVOKED")
+                # Unique body per subtest for idempotency isolation.
+                body = body[:-1] + f', "nonce": "{start}"'.encode() + b"}"
+                # Re-sign because body changed.
+                header = signed_header(body)
+                with patched_gateway():
+                    response = self.post_webhook(body, header=header)
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.connection.refresh_from_db()
+                self.assertEqual(self.connection.status, PlaidConnectionStatus.REVOKED)
+
+    def test_user_permission_revoked_disconnected_stays_disconnected(self):
+        self.connection.status = PlaidConnectionStatus.DISCONNECTED
+        self.connection.save(update_fields=["status"])
+        body = item_body("USER_PERMISSION_REVOKED")
+        response = self.post_item(body)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.connection.refresh_from_db()
+        self.assertEqual(self.connection.status, PlaidConnectionStatus.DISCONNECTED)
+
+    def test_generic_error_active_to_error(self):
+        body = item_error_body(error_code="INVALID_CREDENTIALS")
+        response = self.post_item(body)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.connection.refresh_from_db()
+        self.assertEqual(self.connection.status, PlaidConnectionStatus.ERROR)
+
+    def test_generic_error_preserves_updating(self):
+        self.connection.status = PlaidConnectionStatus.UPDATING
+        self.connection.save(update_fields=["status"])
+        body = item_error_body(error_code="INVALID_CREDENTIALS")
+        response = self.post_item(body)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.connection.refresh_from_db()
+        self.assertEqual(self.connection.status, PlaidConnectionStatus.UPDATING)
+
+    def test_terminal_revoked_never_resurrected(self):
+        self.connection.status = PlaidConnectionStatus.REVOKED
+        self.connection.save(update_fields=["status"])
+        cases = [
+            item_error_body(error_code="ITEM_LOGIN_REQUIRED"),
+            item_body("LOGIN_REPAIRED"),
+            item_error_body(error_code="INVALID_CREDENTIALS"),
+        ]
+        for body in cases:
+            with self.subTest(body=body[:60]):
+                PlaidWebhookEvent.objects.all().delete()
+                # Unique idempotency per subtest.
+                unique = hashlib.sha256(body).hexdigest()[:8].encode()
+                body_u = body[:-1] + b', "nonce": "' + unique + b'"}'
+                header = signed_header(body_u)
+                with patched_gateway():
+                    response = self.post_webhook(body_u, header=header)
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.connection.refresh_from_db()
+                self.assertEqual(self.connection.status, PlaidConnectionStatus.REVOKED)
+
+    def test_terminal_disconnected_never_resurrected(self):
+        self.connection.status = PlaidConnectionStatus.DISCONNECTED
+        self.connection.save(update_fields=["status"])
+        cases = [
+            item_error_body(error_code="ITEM_LOGIN_REQUIRED"),
+            item_body("LOGIN_REPAIRED"),
+            item_error_body(error_code="INVALID_CREDENTIALS"),
+            item_body("USER_PERMISSION_REVOKED"),
+        ]
+        for body in cases:
+            with self.subTest(body=body[:60]):
+                PlaidWebhookEvent.objects.all().delete()
+                unique = hashlib.sha256(body).hexdigest()[:8].encode()
+                body_u = body[:-1] + b', "nonce": "' + unique + b'"}'
+                header = signed_header(body_u)
+                with patched_gateway():
+                    response = self.post_webhook(body_u, header=header)
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.connection.refresh_from_db()
+                self.assertEqual(
+                    self.connection.status, PlaidConnectionStatus.DISCONNECTED
+                )
+
+    def test_matched_item_sets_processed_at_and_touches_nothing_else(self):
+        body = item_error_body(error_code="ITEM_LOGIN_REQUIRED")
+        response = self.post_item(body)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        event = PlaidWebhookEvent.objects.get()
+        self.assertEqual(event.connection, self.connection)
+        self.assertEqual(event.user, self.user)
+        self.assertEqual(event.item_id, self.connection.item_id)
+        self.assertEqual(event.idempotency_key, hashlib.sha256(body).hexdigest())
+        self.assertIsNotNone(event.received_at)
+        self.assertIsNotNone(event.processed_at)
+        self.assertFalse(event.initial_update_complete)
+        self.assertFalse(event.historical_update_complete)
+        self.connection.refresh_from_db()
+        self.assertIsNone(self.connection.sync_cursor)
+        self.assertIsNone(self.connection.last_synced_at)
+        self.assertIsNone(self.connection.transactions_update_status)
+        self.assertEqual(self.connection.last_sync_error, "")
+        self.assertEqual(Transaction.objects.count(), 0)
+
+    def test_exact_duplicate_returns_200_no_repeat_mutation(self):
+        body = item_body("LOGIN_REPAIRED")
+        self.connection.status = PlaidConnectionStatus.UPDATING
+        self.connection.save(update_fields=["status"])
+        header = signed_header(body)
+        with patched_gateway():
+            first = self.post_webhook(body, header=header)
+            self.connection.refresh_from_db()
+            updated_at_after_first = self.connection.updated_at
+            second = self.post_webhook(body, header=header)
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(PlaidWebhookEvent.objects.count(), 1)
+        self.connection.refresh_from_db()
+        self.assertEqual(self.connection.status, PlaidConnectionStatus.ACTIVE)
+        self.assertEqual(self.connection.updated_at, updated_at_after_first)
+
+    def test_unmatched_item_returns_200_no_row_no_mutation(self):
+        body = item_error_body(item_id=UNKNOWN_ITEM_ID)
+        response = self.post_item(body)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json(), WEBHOOK_RECEIVED_RESPONSE)
+        self.assertEqual(PlaidWebhookEvent.objects.count(), 0)
+        self.connection.refresh_from_db()
+        self.assertEqual(self.connection.status, PlaidConnectionStatus.ACTIVE)
+        self.assertFalse(self.connection.sync_due)
+
+    def test_unsupported_item_codes_return_200_no_row_not_quarantine(self):
+        for code in ("PENDING_EXPIRATION", "NEW_ACCOUNTS_AVAILABLE"):
+            with self.subTest(code=code):
+                PlaidWebhookEvent.objects.all().delete()
+                body = item_body(code)
+                response = self.post_item(body)
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertEqual(response.json(), WEBHOOK_RECEIVED_RESPONSE)
+                self.assertEqual(PlaidWebhookEvent.objects.count(), 0)
+                self.connection.refresh_from_db()
+                self.assertEqual(self.connection.status, PlaidConnectionStatus.ACTIVE)
+                self.assertFalse(self.connection.sync_due)
+
+    def test_malformed_item_error_missing_error_quarantined(self):
+        body = item_body("ERROR", include_error=False)
+        header = signed_header(body)
+        with patched_gateway():
+            response = self.post_webhook(body, header=header)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        event = PlaidWebhookEvent.objects.get()
+        self.assertIsNone(event.connection)
+        self.assertIsNone(event.user)
+        self.assertEqual(event.processed_at, event.received_at)
+        self.connection.refresh_from_db()
+        self.assertEqual(self.connection.status, PlaidConnectionStatus.ACTIVE)
+
+    def test_malformed_item_error_bad_error_code_quarantined(self):
+        bad_errors = [
+            None,
+            "ITEM_LOGIN_REQUIRED",
+            123,
+            True,
+            [],
+            {},
+            {"error_code": ""},
+            {"error_code": None},
+            {"error_code": 123},
+            {"error_code": True},
+            {"error_code": []},
+            {"error_code": {}},
+            {"error_code": "x" * 51},
+        ]
+        for bad in bad_errors:
+            with self.subTest(bad=bad):
+                PlaidWebhookEvent.objects.all().delete()
+                body = item_body("ERROR", include_error=True, error=bad)
+                header = signed_header(body)
+                with patched_gateway():
+                    response = self.post_webhook(body, header=header)
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                event = PlaidWebhookEvent.objects.get()
+                self.assertIsNone(event.connection)
+                self.assertIsNone(event.user)
+                self.assertEqual(event.processed_at, event.received_at)
+                self.connection.refresh_from_db()
+                self.assertEqual(self.connection.status, PlaidConnectionStatus.ACTIVE)
+
+    def test_malformed_item_bad_item_id_quarantined(self):
+        for bad_item in ("", 123, None, [], {}, True, "i" * 101):
+            with self.subTest(bad_item=bad_item):
+                PlaidWebhookEvent.objects.all().delete()
+                if bad_item == "ITEM_LOGIN_REQUIRED_SPECIAL":
+                    continue
+                body = item_error_body(item_id=bad_item)
+                header = signed_header(body)
+                with patched_gateway():
+                    response = self.post_webhook(body, header=header)
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                event = PlaidWebhookEvent.objects.get()
+                self.assertIsNone(event.connection)
+                self.connection.refresh_from_db()
+                self.assertEqual(self.connection.status, PlaidConnectionStatus.ACTIVE)
+
+    def test_item_quarantine_never_stores_or_logs_body_or_provider_message(self):
+        secret = "PROVIDER-SECRET-MESSAGE-12345"
+        # Force malformed by making item_id invalid while keeping secret in body.
+        bad_body = json.dumps(
+            {
+                "webhook_type": "ITEM",
+                "webhook_code": "ERROR",
+                "item_id": "",
+                "error": {
+                    "error_code": "ITEM_LOGIN_REQUIRED",
+                    "error_message": secret,
+                },
+            }
+        ).encode()
+        header = signed_header(bad_body)
+        with patched_gateway():
+            with self.assertLogs(
+                "plaid_integration", level=logging.WARNING
+            ) as captured:
+                response = self.post_webhook(bad_body, header=header)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        raw = response.content.decode()
+        self.assertNotIn(secret, raw)
+        self.assertNotIn(hashlib.sha256(bad_body).hexdigest(), raw)
+        log_text = "\n".join(captured.output)
+        self.assertNotIn(secret, log_text)
+        self.assertNotIn(hashlib.sha256(bad_body).hexdigest(), log_text)
+        event = PlaidWebhookEvent.objects.get()
+        self.assertIsNone(event.connection)
+
+    def test_item_invalid_signature_fails_with_zero_mutation(self):
+        body = item_error_body()
+        with patched_gateway():
+            response = self.post_webhook(body, header="not-a-jwt")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(PlaidWebhookEvent.objects.count(), 0)
+        self.connection.refresh_from_db()
+        self.assertEqual(self.connection.status, PlaidConnectionStatus.ACTIVE)
+
+    def test_item_invalid_signature_performs_zero_database_queries(self):
+        body = item_error_body()
+        with patched_gateway():
+            with self.assertNumQueries(0):
+                response = self.post_webhook(body, header="not-a-jwt")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_item_verification_precedes_orm(self):
+        body = item_error_body()
+        header = signed_header(body)
+        events = []
+
+        def recording_verify(raw_body, verification_header, *, gateway, now=None):
+            events.append("verify")
+            from plaid_integration.webhook_verification import VerifiedWebhookClaims
+
+            return VerifiedWebhookClaims(
+                kid=SYNTHETIC_KID,
+                iat=int(time.time()),
+                idempotency_key=hashlib.sha256(raw_body).hexdigest(),
+            )
+
+        real_filter = PlaidConnection.objects.filter
+
+        def recording_filter(*args, **kwargs):
+            events.append("match")
+            return real_filter(*args, **kwargs)
+
+        with (
+            patch(
+                "plaid_integration.views.verify_plaid_webhook",
+                side_effect=recording_verify,
+            ),
+            patch.object(
+                PlaidConnection.objects, "filter", side_effect=recording_filter
+            ),
+        ):
+            response = self.post_webhook(body, header=header)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(events[0], "verify")
+        self.assertIn("match", events)
+
+    def test_item_connection_disappears_between_lookup_and_lock(self):
+        body = item_error_body()
+        header = signed_header(body)
+        real_filter = PlaidConnection.objects.filter
+
+        def disappearing_filter(*args, **kwargs):
+            qs = real_filter(*args, **kwargs)
+            conn = qs.first()
+            if conn is not None:
+                conn.delete()
+
+            # Return an empty queryset so view treats as unmatched, or
+            # return a stale object to exercise DoesNotExist path.
+            # Here we return stale via a mock queryset.
+            class StaleQS:
+                def first(self):
+                    return conn
+
+            return StaleQS()
+
+        with patched_gateway():
+            with patch.object(
+                PlaidConnection.objects, "filter", side_effect=disappearing_filter
+            ):
+                response = self.post_webhook(body, header=header)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json(), WEBHOOK_RECEIVED_RESPONSE)
+        self.assertEqual(PlaidWebhookEvent.objects.count(), 0)
+
+    def test_item_inbox_full_returns_503_without_mutation(self):
+        from datetime import timedelta
+
+        from django.test import override_settings
+        from django.utils import timezone
+
+        from plaid_integration.views import WEBHOOK_INBOX_FULL_DETAIL
+
+        existing = PlaidWebhookEvent.objects.create(
+            connection=self.connection,
+            user=self.user,
+            webhook_type="TRANSACTIONS",
+            webhook_code="SYNC_UPDATES_AVAILABLE",
+            item_id=self.connection.item_id,
+            idempotency_key="1" * 64,
+            received_at=timezone.now() - timedelta(hours=1),
+            processed_at=None,
+        )
+        body = item_error_body(error_code="ITEM_LOGIN_REQUIRED")
+        header = signed_header(body)
+        with override_settings(PLAID_WEBHOOK_INBOX_CAP=1):
+            with patched_gateway():
+                response = self.post_webhook(body, header=header)
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(response.json(), {"detail": WEBHOOK_INBOX_FULL_DETAIL})
+        self.assertEqual(PlaidWebhookEvent.objects.count(), 1)
+        self.assertTrue(PlaidWebhookEvent.objects.filter(pk=existing.pk).exists())
+        self.connection.refresh_from_db()
+        self.assertEqual(self.connection.status, PlaidConnectionStatus.ACTIVE)
+
+    def test_item_unrelated_integrity_error_propagates(self):
+        from plaid_integration.services import persist_verified_item_webhook
+
+        claims = VerifiedWebhookClaims(
+            kid=SYNTHETIC_KID,
+            iat=int(time.time()),
+            idempotency_key="b" * 64,
+        )
+
+        def unrelated_save(*args, **kwargs):
+            class Diag:
+                constraint_name = "plaid_webhook_event_connection_user_null_pair"
+
+            cause = IntegrityError("synthetic provider cause")
+            cause.diag = Diag()
+            raise IntegrityError("unrelated constraint") from cause
+
+        with patch.object(
+            PlaidWebhookEvent.objects, "create", side_effect=unrelated_save
+        ):
+            with self.assertRaises(IntegrityError):
+                persist_verified_item_webhook(
+                    self.connection,
+                    claims,
+                    webhook_type="ITEM",
+                    webhook_code="ERROR",
+                    error_code="ITEM_LOGIN_REQUIRED",
+                )
+        self.assertEqual(PlaidWebhookEvent.objects.count(), 0)
+        self.connection.refresh_from_db()
+        self.assertEqual(self.connection.status, PlaidConnectionStatus.ACTIVE)
