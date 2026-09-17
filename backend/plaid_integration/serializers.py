@@ -104,11 +104,13 @@ class ConnectionSerializer(serializers.ModelSerializer):
     """Read-only connection shape for the authenticated connections list.
 
     Connection-level ``sync_pending`` derives from the frozen
-    ``docs/plaid.md`` section 3 rule: ``transactions_update_status !=
-    HISTORICAL_UPDATE_COMPLETE`` (a null status is still pending). Explicit
-    fields only, never ``__all__``: the connection row also stores the
-    encrypted access token, the key id, and the opaque cursor, all of which
-    must never reach a response.
+    ``docs/plaid.md`` section 3 rule: true when a verified webhook awaits the
+    explicit bounded sync path (``sync_due``) or when
+    ``transactions_update_status != HISTORICAL_UPDATE_COMPLETE`` (a null
+    status is still pending). The raw ``sync_due`` flag is never exposed as
+    its own field. Explicit fields only, never ``__all__``: the connection
+    row also stores the encrypted access token, the key id, and the opaque
+    cursor, all of which must never reach a response.
     """
 
     sync_pending = serializers.SerializerMethodField()
@@ -131,7 +133,7 @@ class ConnectionSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
     def get_sync_pending(self, connection):
-        return (
+        return connection.sync_due or (
             connection.transactions_update_status
             != TransactionsUpdateStatus.HISTORICAL_UPDATE_COMPLETE
         )

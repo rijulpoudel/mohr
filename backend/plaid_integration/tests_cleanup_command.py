@@ -22,6 +22,8 @@ from plaid_integration.models import (
     PlaidExchangeHandle,
     PlaidWebhookEvent,
 )
+from plaid_integration.services import persist_verified_webhook
+from plaid_integration.webhook_verification import VerifiedWebhookClaims
 
 RETENTION_DAYS = 30
 
@@ -160,6 +162,32 @@ class CleanupRetentionTests(CleanupCommandBase):
         self.run_cleanup("--batch-size", "500")
 
         self.assertTrue(PlaidWebhookEvent.objects.filter(pk=unprocessed.pk).exists())
+
+    def test_accepted_matched_event_is_deleted_after_retention_expires(self):
+        claims = VerifiedWebhookClaims(
+            kid="synthetic-kid",
+            iat=1,
+            idempotency_key=key_for(2),
+        )
+        with patch(
+            "django.utils.timezone.now",
+            return_value=self.frozen - timedelta(days=40),
+        ):
+            persist_verified_webhook(
+                self.connection,
+                claims,
+                webhook_type="TRANSACTIONS",
+                webhook_code="SYNC_UPDATES_AVAILABLE",
+                initial_update_complete=False,
+                historical_update_complete=False,
+            )
+        event = PlaidWebhookEvent.objects.get()
+        self.assertEqual(event.processed_at, event.received_at)
+        self.assertIsNotNone(event.processed_at)
+
+        self.run_cleanup("--batch-size", "500")
+
+        self.assertFalse(PlaidWebhookEvent.objects.filter(pk=event.pk).exists())
 
 
 class CleanupHandleTests(CleanupCommandBase):

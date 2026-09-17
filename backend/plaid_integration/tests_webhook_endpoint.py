@@ -148,7 +148,7 @@ class WebhookEndpointSuccessTests(WebhookEndpointBase):
         self.assertEqual(event.webhook_code, "SYNC_UPDATES_AVAILABLE")
         self.assertEqual(event.idempotency_key, hashlib.sha256(body).hexdigest())
         self.assertIsNotNone(event.received_at)
-        self.assertIsNone(event.processed_at)
+        self.assertEqual(event.processed_at, event.received_at)
         self.assertFalse(event.initial_update_complete)
         self.assertFalse(event.historical_update_complete)
         self.connection.refresh_from_db()
@@ -792,6 +792,20 @@ class WebhookIngestServiceTests(WebhookEndpointBase):
         self.assertEqual(event.idempotency_key, self.claims.idempotency_key)
         self.assertTrue(event.initial_update_complete)
         self.assertFalse(event.historical_update_complete)
+
+    def test_persist_marks_accepted_matched_event_processed_inline(self):
+        persist_verified_webhook(
+            self.connection,
+            self.claims,
+            webhook_type="TRANSACTIONS",
+            webhook_code="SYNC_UPDATES_AVAILABLE",
+            initial_update_complete=False,
+            historical_update_complete=False,
+        )
+
+        event = PlaidWebhookEvent.objects.get()
+        self.assertIsNotNone(event.received_at)
+        self.assertEqual(event.processed_at, event.received_at)
 
     def test_exact_duplicate_constraint_translates_to_duplicate_event(self):
         supported_event(self.connection, self.claims.idempotency_key)

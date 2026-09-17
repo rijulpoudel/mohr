@@ -125,6 +125,38 @@ class ItemRemovalRetryTests(TestCase):
         self.assertEqual(row.attempts, 0)
         self.assertEqual((result.removed, result.retried, result.failed), (0, 0, 0))
 
+    def test_lost_claim_race_counts_skipped_and_touches_nothing(self):
+        row = self.make_row()
+        fake_api = FakeRemovalApi()
+
+        def losing_claim(*args, **kwargs):
+            # Simulate the concurrent winner: the conditional claim UPDATE
+            # matched zero rows (the row was already claimed or failed by
+            # another process), so this driver must count skipped only.
+            return 0
+
+        with (
+            patch("django.db.models.query.QuerySet.update", side_effect=losing_claim),
+            patch.object(
+                SYNTHETIC_RING, "decrypt", wraps=SYNTHETIC_RING.decrypt
+            ) as decrypt_spy,
+            self.patched(fake_api),
+        ):
+            result = process_plaid_item_removals(10, now=self.now)
+
+        self.assertEqual(
+            (result.removed, result.retried, result.failed, result.skipped),
+            (0, 0, 0, 1),
+        )
+        decrypt_spy.assert_not_called()
+        self.assertEqual(fake_api.calls, [])
+        row.refresh_from_db()
+        self.assertEqual(row.status, "pending")
+        self.assertEqual(row.attempts, 0)
+        self.assertIsNone(row.last_attempt_at)
+        self.assertEqual(row.last_error, "")
+        self.assertEqual(row.next_retry_at, self.now - timedelta(minutes=1))
+
     def test_failure_schedules_exponential_backoff_and_increments(self):
         row = self.make_row()
         fake_api = FakeRemovalApi(error=PlaidGatewayError(PLAID_UNAVAILABLE_DETAIL))

@@ -196,17 +196,19 @@ class WebhookInboxCapTests(WebhookInboxBase):
         self.persist(key_for(5))
 
         self.assertEqual(PlaidWebhookEvent.objects.count(), 3)
+        # The accepted insert is itself processed, so it is the legal eviction
+        # target before any legacy unprocessed matched or quarantine row.
         self.assertFalse(
-            PlaidWebhookEvent.objects.filter(pk=unprocessed_quarantine.pk).exists()
+            PlaidWebhookEvent.objects.filter(idempotency_key=key_for(4)).exists()
+        )
+        self.assertTrue(
+            PlaidWebhookEvent.objects.filter(idempotency_key=key_for(5)).exists()
         )
         self.assertTrue(
             PlaidWebhookEvent.objects.filter(pk=unprocessed_matched.pk).exists()
         )
         self.assertTrue(
-            PlaidWebhookEvent.objects.filter(idempotency_key=key_for(4)).exists()
-        )
-        self.assertTrue(
-            PlaidWebhookEvent.objects.filter(idempotency_key=key_for(5)).exists()
+            PlaidWebhookEvent.objects.filter(pk=unprocessed_quarantine.pk).exists()
         )
 
     @override_settings(PLAID_WEBHOOK_INBOX_CAP=2)
@@ -249,10 +251,11 @@ class WebhookInboxCapTests(WebhookInboxBase):
                 ).exists()
             )
 
-        with self.assertRaises(WebhookInboxFull):
-            self.persist(key_for(103))
-        self.assertLessEqual(PlaidWebhookEvent.objects.count(), 3)
-        self.assertFalse(
+        # A full cap of accepted (processed) events never blocks a later one:
+        # the newest insert evicts the oldest processed row instead of 503.
+        self.persist(key_for(103))
+        self.assertEqual(PlaidWebhookEvent.objects.count(), 3)
+        self.assertTrue(
             PlaidWebhookEvent.objects.filter(idempotency_key=key_for(103)).exists()
         )
 
@@ -270,7 +273,25 @@ class WebhookInboxCapTests(WebhookInboxBase):
         self.assertFalse(PlaidWebhookEvent.objects.filter(pk=oldest.pk).exists())
         event = PlaidWebhookEvent.objects.get()
         self.assertEqual(event.idempotency_key, key_for(2))
-        self.assertIsNone(event.processed_at)
+        self.assertEqual(event.processed_at, event.received_at)
+
+    @override_settings(PLAID_WEBHOOK_INBOX_CAP=2)
+    def test_later_accepted_event_evicts_oldest_accepted_instead_of_503(self):
+        self.persist(key_for(1))
+        self.persist(key_for(2))
+
+        self.persist(key_for(3))
+
+        self.assertEqual(PlaidWebhookEvent.objects.count(), 2)
+        self.assertFalse(
+            PlaidWebhookEvent.objects.filter(idempotency_key=key_for(1)).exists()
+        )
+        self.assertTrue(
+            PlaidWebhookEvent.objects.filter(idempotency_key=key_for(2)).exists()
+        )
+        self.assertTrue(
+            PlaidWebhookEvent.objects.filter(idempotency_key=key_for(3)).exists()
+        )
 
     @override_settings(PLAID_WEBHOOK_INBOX_CAP=2)
     def test_duplicate_at_cap_evicts_nothing_and_mutates_nothing(self):

@@ -127,9 +127,12 @@ Response boundaries:
   `request.user` returns a generic `400` and persists nothing.
 - `GET /api/plaid/connections/` -> `200 [{id, institution_name, status,
   sync_pending, last_synced_at, linked_accounts: [{id, name, account_type,
-  mask, sync_pending}]}]`, where `sync_pending` derives from
-  `transactions_update_status != HISTORICAL_UPDATE_COMPLETE`. No tokens,
-  cursors, raw provider payloads, or other users' data.
+  mask, sync_pending}]}]`, where connection `sync_pending` is true when a
+  verified webhook awaits the explicit bounded sync path (`sync_due`) or
+  when `transactions_update_status != HISTORICAL_UPDATE_COMPLETE` (a null
+  status is still pending); the raw `sync_due` flag is never exposed as a
+  separate field. No tokens, cursors, raw provider payloads, or other
+  users' data.
 - `POST .../sync/` -> `200 {connection_id, status, added, modified,
   removed}` only once the opening-balance anchor is set (section 5), or
   `202 {connection_id, status: "processing"}` while the requested history
@@ -207,8 +210,12 @@ provider-reported removals (`is_provider_removed`) and supersession
   `user` FK (nullable likewise), `webhook_type`, `webhook_code`, provider
   `item_id`, `idempotency_key` (SHA-256 of the verified raw body, never the
   body itself), `initial_update_complete`, `historical_update_complete`,
-  `received_at`, `processed_at` (nullable). The raw payload is excluded;
-  parsed fields only, never secrets.
+  `received_at`, `processed_at` (nullable). Recognized matched rows are
+  accepted with `processed_at` equal to `received_at`: the notification was
+  safely converted into durable sync state, which is not proof that the
+  provider cursor was fully drained (that stays the separate `sync_due`
+  flag); a null `processed_at` remains possible only for legacy rows. The
+  raw payload is excluded; parsed fields only, never secrets.
 - A verified webhook whose `item_id` matches no `PlaidConnection` is not
   stored as a normal inbox row: the endpoint returns `200` without
   persisting, or quarantines it only within the bounded cap below.
@@ -580,14 +587,15 @@ No Celery, Redis, or Kubernetes in this milestone. The design therefore is:
   UI), bounded per request (page cap + statement timeout); large initial
   imports return `202` and resume on the next manual trigger via the
   committed cursor.
-- Webhooks only flip `sync_due` and append the durable inbox row, then
-  attempt a bounded inline sync; anything unfinished converges only
-  through a later verified webhook or an explicit manual `POST .../sync/`.
-  A GET route may report state (for example a stale-`sync_due`/age
-  indicator in `GET /api/plaid/connections/`) but never performs Plaid
-  calls, cursor writes, or any mutation. Read-path reconciliation is out
-  of scope; if it is ever wanted, it needs a separately specified endpoint
-  with its own route, lock, and timeout.
+- Webhooks only flip `sync_due` (plus the lifecycle transition for verified
+  Item events) and append the durable inbox row, marked processed inline;
+  they never synchronize inside the webhook request. Anything unfinished
+  remains visible through `sync_pending` and converges through an explicit
+  manual `POST .../sync/`. A GET route may report state (for example a
+  stale-`sync_due`/age indicator in `GET /api/plaid/connections/`) but
+  never performs Plaid calls, cursor writes, or any mutation. Read-path
+  reconciliation is out of scope; if it is ever wanted, it needs a
+  separately specified endpoint with its own route, lock, and timeout.
 
 ## 8. Webhook verification and endpoint contract
 
@@ -602,6 +610,18 @@ No Celery, Redis, or Kubernetes in this milestone. The design therefore is:
   `historical_update_complete` flags when present to drive the
   sync-pending state of section 7. Ignore unknown codes after logging
   their redacted shape.
+- Handle the `ITEM` lifecycle notifications `ERROR` (using the nested
+  `error.error_code`, notably `ITEM_LOGIN_REQUIRED`), `LOGIN_REPAIRED`,
+  and `USER_PERMISSION_REVOKED`. A verified supported Item event mutates
+  only the monotonic connection lifecycle (`status`, plus `sync_due` where
+  applicable) and never writes ledger facts directly; its inbox row is
+  marked processed inline exactly like every other accepted row.
+  Unsupported Item codes (for example `PENDING_EXPIRATION`,
+  `NEW_ACCOUNTS_AVAILABLE`) are safe fixed `200` no-ops. Malformed
+  recognized Item events (a missing or invalid nested `error.error_code`
+  or a bad `item_id`) go to the bounded quarantine, never to an unprocessed
+  matched row. Terminal `revoked` and `disconnected` states never
+  resurrect on any later Item event.
 - Verification runs **before any mutation**, in this exact order, failing
   closed on the first failure:
 
@@ -625,8 +645,12 @@ No Celery, Redis, or Kubernetes in this milestone. The design therefore is:
      A verified webhook whose `item_id` matches no connection returns
      `200` without persisting an inbox row (or is quarantined only within
      the bounded cap of section 4). A matched event appends the idempotent
-     inbox row, flips `sync_due`, and returns `200` within Plaid's
-     10-second receiver deadline.
+     inbox row with `processed_at` equal to its `received_at` (the
+     notification was safely accepted and converted into durable sync
+     state, not proof that the provider cursor drained; the separate
+     `sync_due` flag stays set until the explicit bounded sync path
+     finishes), applies the connection transition, and returns `200`
+     within Plaid's 10-second receiver deadline.
 
 - The endpoint is rate limited (for example 60 requests per minute per
   source IP), and the inbox is bounded per section 4.
@@ -649,11 +673,13 @@ No Celery, Redis, or Kubernetes in this milestone. The design therefore is:
   replay re-applies already-committed pages of the same update and never
   moves the cursor backward past a committed value.
 - Missing webhooks: covered by manual `POST .../sync/` and by surfacing a
-  stale-`sync_due`/age indicator in `GET /api/plaid/connections/`; the next
-  verified webhook or manual trigger converges state.
-- Slow receiver path: verify first (fast), persist inbox + `sync_due`,
-  return `200`, and finish the bounded inline sync if time remains;
-  leftovers converge on the next trigger.
+  stale-`sync_due` indicator as `sync_pending` in
+  `GET /api/plaid/connections/`; the explicit manual trigger converges state.
+- Slow receiver path: verify first (fast), persist the inbox row and the
+  connection state (`sync_due` and/or lifecycle transition), return `200`.
+  Synchronization never runs inside the webhook request; it runs through
+  the explicit bounded `POST .../sync/` path, and page-capped leftovers
+  converge on the next manual trigger.
 - Update mode: provider `ITEM_LOGIN_REQUIRED` (or equivalent Item error)
   flips the connection to `updating`, surfaces "reconnect needed" in the
   connection list, and pauses sync writes. The authenticated owner requests

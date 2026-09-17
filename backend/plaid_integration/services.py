@@ -28,11 +28,14 @@ run totals), fails closed on outage, token, anchor, and blocked-page
 conditions without ever advancing the cursor past a committed value, and
 heals the ``error`` status back to ``active`` on a later successful run.
 The verified webhook ingest (issue #39 slices B and C) persists the durable
-inbox row and connection flags in one atomic block, enforces the bounded
-``PLAID_WEBHOOK_INBOX_CAP`` inside that same block by evicting only oldest
-processed rows and then oldest quarantine rows (never an unprocessed matched
-event, never the just-created row), raises the fixed repr-safe
-:class:`WebhookInboxFull` when a recognized event cannot fit, and
+inbox row and connection flags in one atomic block; every recognized matched
+row is accepted with ``processed_at`` equal to its own ``received_at`` (the
+notification was safely converted into durable sync state, not proof that the
+provider cursor drained, which remains the separate ``sync_due`` flag), the
+block enforces the bounded ``PLAID_WEBHOOK_INBOX_CAP`` inside that same block
+by evicting only oldest processed rows and then oldest quarantine rows (never
+an unprocessed matched event, never the just-created row), raises the fixed
+repr-safe :class:`WebhookInboxFull` when a recognized event cannot fit, and
 quarantines verified but malformed deliveries as minimized null-pair rows
 without ever retrying poison forever. A module-level process lock serializes
 webhook ingress; this is safe because Render Free runs exactly one web
@@ -440,7 +443,12 @@ def persist_verified_webhook(
     connection's ``sync_due`` is set and ``transactions_update_status``
     advances monotonically (``docs/plaid.md`` sections 4, 7, and 8); the
     status, cursor, token, error, ``last_synced_at``, accounts, and
-    transactions are never touched. The same block then enforces the
+    transactions are never touched. The inserted row carries one captured
+    ``received_at`` and ``processed_at`` equal to it: the notification was
+    safely accepted and converted into durable sync state, which is not proof
+    that the provider cursor was fully drained; ``sync_due`` remains the
+    separate unfinished-sync flag and the explicit bounded sync path does the
+    draining. The same block then enforces the
     ``PLAID_WEBHOOK_INBOX_CAP``: only the oldest processed rows and then the
     oldest quarantine rows are evicted (never an unprocessed matched event,
     never the just-created row), and when no legal eviction makes room the
@@ -459,6 +467,7 @@ def persist_verified_webhook(
         try:
             with transaction.atomic():
                 conn = PlaidConnection.objects.select_for_update().get(pk=connection.pk)
+                received_at = timezone.now()
                 event = PlaidWebhookEvent.objects.create(
                     connection=conn,
                     user=conn.user,
@@ -468,8 +477,8 @@ def persist_verified_webhook(
                     idempotency_key=claims.idempotency_key,
                     initial_update_complete=initial_update_complete,
                     historical_update_complete=historical_update_complete,
-                    received_at=timezone.now(),
-                    processed_at=None,
+                    received_at=received_at,
+                    processed_at=received_at,
                 )
                 conn.sync_due = True
                 conn.transactions_update_status = _advance_transactions_update_status(
