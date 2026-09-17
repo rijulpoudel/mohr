@@ -874,6 +874,30 @@ a {
   margin: 0;
 }
 
+.connection-confirm {
+  margin-block-start: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-1);
+  background: var(--color-surface);
+  font-size: 0.875rem;
+}
+
+.connection-confirm > p {
+  margin: 0 0 var(--space-2);
+}
+
+.connection-confirm > .error-summary {
+  margin-block-end: var(--space-2);
+}
+
+.connection-confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-block-start: var(--space-3);
+}
+
 .connection-accounts {
   list-style: none;
   margin: var(--space-2) 0 0;

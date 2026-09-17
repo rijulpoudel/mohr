@@ -1,6 +1,7 @@
 import { act, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import type { PlaidLinkError } from 'react-plaid-link'
 import {
   calls,
   deferred,
@@ -14,14 +15,53 @@ import {
   CONNECTION_STALE_AFTER_MS,
 } from './ConnectionsScreen'
 
-vi.mock('react-plaid-link', () => ({
-  usePlaidLink: vi.fn(() => ({
-    open: vi.fn(),
-    exit: vi.fn(),
+interface CapturedLinkOptions {
+  token: string | null
+  onSuccess: (publicToken: string | null, metadata: unknown) => void
+  onExit: (error: PlaidLinkError | null, metadata: unknown) => void
+}
+
+const plaidLink = vi.hoisted(() => {
+  const open = vi.fn()
+  const exit = vi.fn()
+  const submit = vi.fn()
+  let options: CapturedLinkOptions | null = null
+  let result: { ready: boolean; error: ErrorEvent | null } = {
     ready: true,
     error: null,
-    submit: vi.fn(),
-  })),
+  }
+  const optionsByToken = new Map<string, CapturedLinkOptions>()
+  const usePlaidLink = vi.fn((next: CapturedLinkOptions) => {
+    options = next
+    if (next.token !== null) {
+      optionsByToken.set(next.token, next)
+    }
+    return { open, exit, ready: result.ready, error: result.error, submit }
+  })
+  return {
+    open,
+    exit,
+    submit,
+    usePlaidLink,
+    latestOptions: () => options,
+    optionsForToken: (token: string) => optionsByToken.get(token) ?? null,
+    setResult: (next: { ready: boolean; error: ErrorEvent | null }) => {
+      result = next
+    },
+    reset: () => {
+      options = null
+      optionsByToken.clear()
+      result = { ready: true, error: null }
+      open.mockClear()
+      exit.mockClear()
+      submit.mockClear()
+      usePlaidLink.mockClear()
+    },
+  }
+})
+
+vi.mock('react-plaid-link', () => ({
+  usePlaidLink: plaidLink.usePlaidLink,
 }))
 
 const TIMESTAMP = '2026-09-11T14:52:48.008850Z'
@@ -79,6 +119,74 @@ function connectionItem(name: string): HTMLElement {
     .find((node) => node.textContent?.includes(name))
   if (item === undefined) throw new Error(`No list item for ${name}`)
   return item
+}
+
+const UPDATE_LINK_TOKEN = 'link-sandbox-update-abcdef1234567890'
+const UPDATE_TOKEN_URL = '/api/plaid/connections/5/link-token/'
+const EXCHANGE_URL = '/api/plaid/exchange/'
+const DISCONNECT_URL = '/api/plaid/connections/5/disconnect/'
+
+function updateLinkTokenFixture(overrides: Record<string, unknown> = {}) {
+  return {
+    link_token: UPDATE_LINK_TOKEN,
+    expiration: '2026-09-18T12:00:00Z',
+    ...overrides,
+  }
+}
+
+function lifecycleHandler(
+  overrides: Partial<{
+    connections: (url: string, init?: RequestInit) => Response | Promise<Response>
+    linkToken: (url: string, init?: RequestInit) => Response | Promise<Response>
+    disconnect: (url: string, init?: RequestInit) => Response | Promise<Response>
+    exchange: (url: string, init?: RequestInit) => Response | Promise<Response>
+    sync: (url: string, init?: RequestInit) => Response | Promise<Response>
+  }> = {},
+) {
+  return (url: string, init?: RequestInit) => {
+    if (url === '/api/auth/me/') {
+      return jsonResponse({ id: 1, email: 'student@example.com' })
+    }
+    if (url === '/api/auth/csrf/') {
+      return jsonResponse({ detail: 'CSRF cookie set.' })
+    }
+    if (url === '/api/dashboard/summary/') return dashboardSummary()
+    if (url === '/api/plaid/connections/' && init?.method !== 'POST') {
+      return overrides.connections
+        ? overrides.connections(url, init)
+        : jsonResponse([
+            connectionFixture({
+              id: 5,
+              institution_name: 'First Plaid Bank',
+              status: 'updating',
+            }),
+          ])
+    }
+    if (url === EXCHANGE_URL && init?.method === 'POST') {
+      return overrides.exchange
+        ? overrides.exchange(url, init)
+        : jsonResponse({}, 404)
+    }
+    if (url === UPDATE_TOKEN_URL && init?.method === 'POST') {
+      return overrides.linkToken
+        ? overrides.linkToken(url, init)
+        : jsonResponse(updateLinkTokenFixture())
+    }
+    if (url.endsWith('/sync/') && init?.method === 'POST') {
+      return overrides.sync
+        ? overrides.sync(url, init)
+        : jsonResponse({}, 404)
+    }
+    if (
+      /^\/api\/plaid\/connections\/\d+\/disconnect\/$/.test(url) &&
+      init?.method === 'POST'
+    ) {
+      return overrides.disconnect
+        ? overrides.disconnect(url, init)
+        : jsonResponse({ connection_id: 5, status: 'disconnected' })
+    }
+    return jsonResponse({}, 404)
+  }
 }
 
 describe('connections navigation', () => {
@@ -1184,5 +1292,1119 @@ describe('connections manual sync', () => {
       warnSpy.mockRestore()
       errorSpy.mockRestore()
     }
+  })
+})
+
+describe('connections reconnect (update mode)', () => {
+  function reconnectLinkOptions() {
+    const captured = plaidLink.optionsForToken(UPDATE_LINK_TOKEN)
+    if (captured === null) {
+      throw new Error('No update-mode Link options captured')
+    }
+    return captured
+  }
+
+  function linkUpdateDismiss() {
+    act(() => {
+      reconnectLinkOptions().onExit(null, {})
+    })
+  }
+
+  function linkUpdateSuccess() {
+    act(() => {
+      reconnectLinkOptions().onSuccess('public-sandbox-update-abc', {})
+    })
+  }
+
+  function linkUpdateExitWith(error: PlaidLinkError) {
+    act(() => {
+      reconnectLinkOptions().onExit(error, {})
+    })
+  }
+
+  beforeEach(() => {
+    setCsrfCookie()
+    plaidLink.reset()
+  })
+
+  it('renders Reconnect only for updating, error, and revoked connections with a distinct accessible name', async () => {
+    installFetchMock(
+      lifecycleHandler({
+        connections: () =>
+          jsonResponse([
+            connectionFixture({ id: 1, institution_name: 'Alpha', status: 'active' }),
+            connectionFixture({ id: 2, institution_name: 'Beta', status: 'updating' }),
+            connectionFixture({ id: 3, institution_name: 'Gamma', status: 'error' }),
+            connectionFixture({ id: 4, institution_name: 'Delta', status: 'revoked' }),
+            connectionFixture({
+              id: 5,
+              institution_name: 'Epsilon',
+              status: 'disconnected',
+            }),
+          ]),
+      }),
+    )
+    renderApp('/connections')
+
+    expect(await screen.findByText('Alpha')).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: /^Reconnect / })).toHaveLength(3)
+    const beta = screen.getByRole('button', { name: 'Reconnect Beta' })
+    expect(beta).toHaveAttribute('type', 'button')
+    expect(beta).toBeEnabled()
+    expect(
+      screen.getByRole('button', { name: 'Reconnect Gamma' }),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Reconnect Delta' }),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Reconnect Alpha' }),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Reconnect Epsilon' }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('issues exactly one link-token POST for the clicked connection and opens Link exactly once for that token', async () => {
+    const mock = installFetchMock(lifecycleHandler())
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole('button', { name: 'Reconnect First Plaid Bank' }),
+    )
+
+    await waitFor(() =>
+      expect(calls(mock, UPDATE_TOKEN_URL, 'POST')).toHaveLength(1),
+    )
+    await waitFor(() => expect(plaidLink.open).toHaveBeenCalledTimes(1))
+    expect(plaidLink.optionsForToken(UPDATE_LINK_TOKEN)).not.toBeNull()
+    expect(calls(mock, UPDATE_TOKEN_URL, 'POST')).toHaveLength(1)
+  })
+
+  it('shows a pending status and disables every mutation control while preparing and while Link is open', async () => {
+    const pendingToken = deferred<Response>()
+    installFetchMock(
+      lifecycleHandler({
+        connections: () =>
+          jsonResponse([
+            connectionFixture({
+              id: 5,
+              institution_name: 'First Plaid Bank',
+              status: 'updating',
+            }),
+            connectionFixture({ id: 6, institution_name: 'Second Bank', status: 'active' }),
+          ]),
+        linkToken: () => pendingToken.promise,
+      }),
+    )
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole('button', { name: 'Reconnect First Plaid Bank' }),
+    )
+
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      /Preparing First Plaid Bank/,
+    )
+    expect(
+      screen.getByRole('button', { name: 'Reconnect First Plaid Bank' }),
+    ).toBeDisabled()
+    expect(
+      screen.getByRole('button', { name: 'Sync now for Second Bank' }),
+    ).toBeDisabled()
+    expect(
+      screen.getByRole('button', { name: 'Disconnect First Plaid Bank' }),
+    ).toBeDisabled()
+    expect(
+      screen.getByRole('button', { name: 'Disconnect Second Bank' }),
+    ).toBeDisabled()
+
+    await act(async () => {
+      pendingToken.resolve(jsonResponse(updateLinkTokenFixture()))
+    })
+    await waitFor(() => expect(plaidLink.open).toHaveBeenCalledTimes(1))
+    expect(screen.getByRole('status')).toHaveTextContent(/bank window/)
+    expect(
+      screen.getByRole('button', { name: 'Reconnect First Plaid Bank' }),
+    ).toBeDisabled()
+
+    linkUpdateDismiss()
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: 'Reconnect First Plaid Bank' }),
+      ).toBeEnabled(),
+    )
+    expect(
+      screen.getByRole('button', { name: 'Sync now for Second Bank' }),
+    ).toBeEnabled()
+    expect(
+      screen.getByRole('button', { name: 'Disconnect First Plaid Bank' }),
+    ).toBeEnabled()
+  })
+
+  it('refetches the list after success and after dismissal with zero exchange calls in the update-mode flow', async () => {
+    let connectionsCalls = 0
+    const mock = installFetchMock(
+      lifecycleHandler({
+        connections: () => {
+          connectionsCalls += 1
+          return jsonResponse([
+            connectionFixture({
+              id: 5,
+              institution_name: 'First Plaid Bank',
+              status: 'updating',
+            }),
+          ])
+        },
+        linkToken: () => {
+          if (connectionsCalls === 1) {
+            return jsonResponse(updateLinkTokenFixture())
+          }
+          return jsonResponse(
+            updateLinkTokenFixture({
+              link_token: `${UPDATE_LINK_TOKEN}-fresh`,
+            }),
+          )
+        },
+      }),
+    )
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+    expect(connectionsCalls).toBe(1)
+
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole('button', { name: 'Reconnect First Plaid Bank' }),
+    )
+    await waitFor(() => expect(plaidLink.open).toHaveBeenCalledTimes(1))
+    expect(plaidLink.optionsForToken(UPDATE_LINK_TOKEN)).not.toBeNull()
+
+    linkUpdateDismiss()
+    await waitFor(() => expect(connectionsCalls).toBe(2))
+    expect(calls(mock, EXCHANGE_URL, 'POST')).toHaveLength(0)
+
+    await user.click(
+      screen.getByRole('button', { name: 'Reconnect First Plaid Bank' }),
+    )
+    await waitFor(() => expect(plaidLink.open).toHaveBeenCalledTimes(2))
+    expect(plaidLink.optionsForToken(`${UPDATE_LINK_TOKEN}-fresh`)).not.toBeNull()
+    linkUpdateSuccess()
+    await waitFor(() => expect(connectionsCalls).toBe(3))
+
+    expect(calls(mock, EXCHANGE_URL, 'POST')).toHaveLength(0)
+    expect(calls(mock, UPDATE_TOKEN_URL, 'POST')).toHaveLength(2)
+  })
+
+  it('issues exactly one link-token request for two Reconnect clicks in the same tick', async () => {
+    const pendingToken = deferred<Response>()
+    const mock = installFetchMock(
+      lifecycleHandler({ linkToken: () => pendingToken.promise }),
+    )
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const button = screen.getByRole('button', {
+      name: 'Reconnect First Plaid Bank',
+    })
+    act(() => {
+      const click = new MouseEvent('click', { bubbles: true, cancelable: true })
+      button.dispatchEvent(click)
+      button.dispatchEvent(click)
+    })
+
+    await waitFor(() =>
+      expect(calls(mock, UPDATE_TOKEN_URL, 'POST')).toHaveLength(1),
+    )
+    expect(screen.getByRole('status')).toHaveTextContent(/Preparing/)
+
+    await act(async () => {
+      pendingToken.resolve(jsonResponse(updateLinkTokenFixture()))
+    })
+    await waitFor(() => expect(plaidLink.open).toHaveBeenCalledTimes(1))
+    expect(calls(mock, UPDATE_TOKEN_URL, 'POST')).toHaveLength(1)
+  })
+
+  it('renders a retryable alert on a 503 link-token request and retries with a fresh token', async () => {
+    let linkTokenCalls = 0
+    const mock = installFetchMock(
+      lifecycleHandler({
+        linkToken: () => {
+          linkTokenCalls += 1
+          if (linkTokenCalls === 1) {
+            return jsonResponse(
+              { detail: 'Plaid service is unavailable. Try again later.' },
+              503,
+            )
+          }
+          return jsonResponse(
+            updateLinkTokenFixture({ link_token: `${UPDATE_LINK_TOKEN}-retry` }),
+          )
+        },
+      }),
+    )
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole('button', { name: 'Reconnect First Plaid Bank' }),
+    )
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(
+      'Plaid service is unavailable. Try again later.',
+    )
+    expect(calls(mock, UPDATE_TOKEN_URL, 'POST')).toHaveLength(1)
+    expect(plaidLink.open).not.toHaveBeenCalled()
+    expect(calls(mock, EXCHANGE_URL, 'POST')).toHaveLength(0)
+
+    await user.click(
+      within(alert).getByRole('button', {
+        name: 'Retry reconnect for First Plaid Bank',
+      }),
+    )
+
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    await waitFor(() =>
+      expect(calls(mock, UPDATE_TOKEN_URL, 'POST')).toHaveLength(2),
+    )
+    await waitFor(() => expect(plaidLink.open).toHaveBeenCalledTimes(1))
+    expect(plaidLink.optionsForToken(`${UPDATE_LINK_TOKEN}-retry`)).not.toBeNull()
+    expect(calls(mock, EXCHANGE_URL, 'POST')).toHaveLength(0)
+  })
+
+  it('renders a retryable alert on a non-token Link exit error and retries the link-token request', async () => {
+    const mock = installFetchMock(lifecycleHandler())
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole('button', { name: 'Reconnect First Plaid Bank' }),
+    )
+    await waitFor(() => expect(plaidLink.open).toHaveBeenCalledTimes(1))
+
+    linkUpdateExitWith({
+      error_type: 'RATE_LIMIT_EXCEEDED',
+      error_code: 'RATE_LIMIT_EXCEEDED',
+      error_message: 'Too many attempts.',
+      display_message: null,
+    })
+
+    const alert = screen.getByRole('alert')
+    expect(alert).toHaveTextContent(/could not be completed/i)
+    expect(plaidLink.open).toHaveBeenCalledTimes(1)
+    expect(calls(mock, EXCHANGE_URL, 'POST')).toHaveLength(0)
+
+    await user.click(
+      within(alert).getByRole('button', {
+        name: 'Retry reconnect for First Plaid Bank',
+      }),
+    )
+    await waitFor(() => expect(plaidLink.open).toHaveBeenCalledTimes(2))
+    expect(calls(mock, UPDATE_TOKEN_URL, 'POST')).toHaveLength(2)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(calls(mock, EXCHANGE_URL, 'POST')).toHaveLength(0)
+  })
+
+  it('shows the link-expired message on an INVALID_LINK_TOKEN exit', async () => {
+    installFetchMock(lifecycleHandler())
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole('button', { name: 'Reconnect First Plaid Bank' }),
+    )
+    await waitFor(() => expect(plaidLink.open).toHaveBeenCalledTimes(1))
+
+    linkUpdateExitWith({
+      error_type: 'INVALID_LINK_TOKEN',
+      error_code: 'INVALID_LINK_TOKEN',
+      error_message: 'The link token has expired.',
+      display_message: null,
+    })
+
+    expect(screen.getByRole('alert')).toHaveTextContent(/link expired/i)
+  })
+
+  it('shows no alert and re-enables the control when Link is dismissed', async () => {
+    installFetchMock(lifecycleHandler())
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole('button', { name: 'Reconnect First Plaid Bank' }),
+    )
+    await waitFor(() => expect(plaidLink.open).toHaveBeenCalledTimes(1))
+
+    linkUpdateDismiss()
+
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: 'Reconnect First Plaid Bank' }),
+      ).toBeEnabled(),
+    )
+  })
+
+  it('fails to a retryable alert when the Plaid script fails to load while reconnecting', async () => {
+    plaidLink.setResult({
+      ready: false,
+      error: {
+        message: 'Plaid script failed to load',
+      } as unknown as ErrorEvent,
+    })
+    const mock = installFetchMock(lifecycleHandler())
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole('button', { name: 'Reconnect First Plaid Bank' }),
+    )
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(/could not start/i)
+    expect(plaidLink.open).not.toHaveBeenCalled()
+    expect(calls(mock, EXCHANGE_URL, 'POST')).toHaveLength(0)
+
+    plaidLink.setResult({ ready: true, error: null })
+    await user.click(
+      within(alert).getByRole('button', {
+        name: 'Retry reconnect for First Plaid Bank',
+      }),
+    )
+    await waitFor(() => expect(plaidLink.open).toHaveBeenCalledTimes(1))
+    expect(calls(mock, UPDATE_TOKEN_URL, 'POST')).toHaveLength(2)
+    expect(calls(mock, EXCHANGE_URL, 'POST')).toHaveLength(0)
+  })
+
+  it('clears the session and shows no alert when the update link-token request returns 401', async () => {
+    const mock = installFetchMock(
+      lifecycleHandler({
+        linkToken: () =>
+          jsonResponse(
+            { detail: 'Authentication credentials were not provided.' },
+            401,
+          ),
+      }),
+    )
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole('button', { name: 'Reconnect First Plaid Bank' }),
+    )
+
+    expect(await screen.findByLabelText('Email')).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/login')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(plaidLink.open).not.toHaveBeenCalled()
+    expect(calls(mock, UPDATE_TOKEN_URL, 'POST')).toHaveLength(1)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  it('disables Reconnect and Disconnect controls while a sync is in flight', async () => {
+    const pendingSync = deferred<Response>()
+    installFetchMock(
+      lifecycleHandler({
+        connections: () =>
+          jsonResponse([
+            connectionFixture({
+              id: 5,
+              institution_name: 'First Plaid Bank',
+              status: 'updating',
+            }),
+            connectionFixture({ id: 6, institution_name: 'Second Bank', status: 'active' }),
+          ]),
+        sync: () => pendingSync.promise,
+      }),
+    )
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole('button', { name: 'Sync now for Second Bank' }),
+    )
+
+    expect(screen.getByRole('status')).toHaveTextContent(/Syncing Second Bank/)
+    expect(
+      screen.getByRole('button', { name: 'Reconnect First Plaid Bank' }),
+    ).toBeDisabled()
+    expect(
+      screen.getByRole('button', { name: 'Disconnect First Plaid Bank' }),
+    ).toBeDisabled()
+    expect(
+      screen.getByRole('button', { name: 'Disconnect Second Bank' }),
+    ).toBeDisabled()
+
+    await act(async () => {
+      pendingSync.resolve(
+        jsonResponse({
+          connection_id: 6,
+          status: 'active',
+          added: 1,
+          modified: 0,
+          removed: 0,
+        }),
+      )
+    })
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: 'Reconnect First Plaid Bank' }),
+      ).toBeEnabled(),
+    )
+  })
+
+  it('blocks a reconnect on another connection while the first Link session is open', async () => {
+    const mock = installFetchMock(
+      lifecycleHandler({
+        connections: () =>
+          jsonResponse([
+            connectionFixture({
+              id: 5,
+              institution_name: 'First Plaid Bank',
+              status: 'updating',
+            }),
+            connectionFixture({ id: 6, institution_name: 'Second Bank', status: 'updating' }),
+          ]),
+      }),
+    )
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole('button', { name: 'Reconnect First Plaid Bank' }),
+    )
+    await waitFor(() => expect(plaidLink.open).toHaveBeenCalledTimes(1))
+    expect(plaidLink.optionsForToken(UPDATE_LINK_TOKEN)).not.toBeNull()
+
+    expect(
+      screen.getByRole('button', { name: 'Reconnect Second Bank' }),
+    ).toBeDisabled()
+
+    const secondButton = screen.getByRole('button', {
+      name: 'Reconnect Second Bank',
+    })
+    act(() => {
+      const click = new MouseEvent('click', { bubbles: true, cancelable: true })
+      secondButton.dispatchEvent(click)
+    })
+
+    expect(
+      calls(mock, '/api/plaid/connections/6/link-token/', 'POST'),
+    ).toHaveLength(0)
+    expect(calls(mock, UPDATE_TOKEN_URL, 'POST')).toHaveLength(1)
+    expect(plaidLink.open).toHaveBeenCalledTimes(1)
+  })
+
+  it('never writes the update-mode token to storage, cookies, or the console', async () => {
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      installFetchMock(lifecycleHandler())
+      renderApp('/connections')
+      expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+      const user = userEvent.setup()
+      await user.click(
+        screen.getByRole('button', { name: 'Reconnect First Plaid Bank' }),
+      )
+      await waitFor(() => expect(plaidLink.open).toHaveBeenCalledTimes(1))
+
+      linkUpdateDismiss()
+      await waitFor(() =>
+        expect(
+          screen.getByRole('button', { name: 'Reconnect First Plaid Bank' }),
+        ).toBeEnabled(),
+      )
+
+      const output = [
+        ...consoleSpy.mock.calls,
+        ...warnSpy.mock.calls,
+        ...errorSpy.mock.calls,
+      ]
+        .flat()
+        .join('\n')
+      expect(output).not.toContain(UPDATE_LINK_TOKEN)
+      expect(localStorage.length).toBe(0)
+      expect(sessionStorage.length).toBe(0)
+      expect(document.cookie).not.toContain(UPDATE_LINK_TOKEN)
+    } finally {
+      consoleSpy.mockRestore()
+      warnSpy.mockRestore()
+      errorSpy.mockRestore()
+    }
+  })
+})
+
+describe('connections disconnect', () => {
+  beforeEach(() => {
+    setCsrfCookie()
+    plaidLink.reset()
+  })
+
+  it('renders Disconnect for every non-disconnected connection with a connection-specific accessible name', async () => {
+    installFetchMock(
+      lifecycleHandler({
+        connections: () =>
+          jsonResponse([
+            connectionFixture({ id: 1, institution_name: 'Alpha', status: 'active' }),
+            connectionFixture({ id: 2, institution_name: 'Beta', status: 'updating' }),
+            connectionFixture({ id: 3, institution_name: 'Gamma', status: 'error' }),
+            connectionFixture({ id: 4, institution_name: 'Delta', status: 'revoked' }),
+            connectionFixture({
+              id: 5,
+              institution_name: 'Epsilon',
+              status: 'disconnected',
+            }),
+          ]),
+      }),
+    )
+    renderApp('/connections')
+
+    expect(await screen.findByText('Alpha')).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: /^Disconnect / })).toHaveLength(4)
+    const alpha = screen.getByRole('button', { name: 'Disconnect Alpha' })
+    expect(alpha).toHaveAttribute('type', 'button')
+    expect(alpha).toBeEnabled()
+    for (const name of ['Beta', 'Gamma', 'Delta']) {
+      expect(
+        screen.getByRole('button', { name: `Disconnect ${name}` }),
+      ).toBeInTheDocument()
+    }
+    expect(
+      screen.queryByRole('button', { name: 'Disconnect Epsilon' }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('opens a labelled confirmation naming the institution and the archive, history, and stop-syncing facts with Cancel first and focused', async () => {
+    installFetchMock(lifecycleHandler())
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole('button', { name: 'Disconnect First Plaid Bank' }),
+    )
+
+    const group = await screen.findByRole('group', {
+      name: 'Disconnect First Plaid Bank confirmation',
+    })
+    expect(group).toHaveTextContent('First Plaid Bank')
+    expect(group).toHaveTextContent(/linked Mohr accounts will be archived/i)
+    expect(group).toHaveTextContent(/imported history is kept/i)
+    expect(group).toHaveTextContent(/stop syncing/i)
+    const cancel = within(group).getByRole('button', { name: 'Cancel' })
+    const confirm = within(group).getByRole('button', { name: 'Disconnect' })
+    expect(
+      cancel.compareDocumentPosition(confirm) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+    expect(cancel).toHaveFocus()
+    // The destructive action carries the app's existing danger affordance while
+    // the safe cancel action does not, matching the transactions and budgets
+    // confirmations. The labels alone are not the only distinction.
+    expect(confirm.classList.contains('btn-danger')).toBe(true)
+    expect(cancel.classList.contains('btn-danger')).toBe(false)
+  })
+
+  it('treats an immediate Enter on the open confirmation as Cancel with no request', async () => {
+    const mock = installFetchMock(lifecycleHandler())
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole('button', { name: 'Disconnect First Plaid Bank' }),
+    )
+    await screen.findByRole('group', {
+      name: 'Disconnect First Plaid Bank confirmation',
+    })
+
+    await user.keyboard('{Enter}')
+
+    expect(calls(mock, DISCONNECT_URL, 'POST')).toHaveLength(0)
+    expect(
+      screen.queryByRole('group', {
+        name: 'Disconnect First Plaid Bank confirmation',
+      }),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Disconnect First Plaid Bank' }),
+    ).toHaveFocus()
+  })
+
+  it('confirms with exactly one disconnect POST, refetches, and renders the disconnected row without controls', async () => {
+    let connectionsCalls = 0
+    const mock = installFetchMock(
+      lifecycleHandler({
+        connections: () => {
+          connectionsCalls += 1
+          if (connectionsCalls === 1) {
+            return jsonResponse([
+              connectionFixture({
+                id: 5,
+                institution_name: 'First Plaid Bank',
+                status: 'updating',
+              }),
+            ])
+          }
+          return jsonResponse([
+            connectionFixture({
+              id: 5,
+              institution_name: 'First Plaid Bank',
+              status: 'disconnected',
+            }),
+          ])
+        },
+      }),
+    )
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole('button', { name: 'Disconnect First Plaid Bank' }),
+    )
+    await user.click(await screen.findByRole('button', { name: 'Disconnect' }))
+
+    await waitFor(() =>
+      expect(calls(mock, DISCONNECT_URL, 'POST')).toHaveLength(1),
+    )
+    await waitFor(() => expect(connectionsCalls).toBe(2))
+
+    const item = connectionItem('First Plaid Bank')
+    expect(within(item).getByText('Disconnected')).toBeInTheDocument()
+    expect(
+      within(item).getByText('Not syncing while disconnected.'),
+    ).toBeInTheDocument()
+    expect(
+      within(item).queryByRole('button', { name: /^Sync now/ }),
+    ).not.toBeInTheDocument()
+    expect(
+      within(item).queryByRole('button', { name: /^Reconnect/ }),
+    ).not.toBeInTheDocument()
+    expect(
+      within(item).queryByRole('button', { name: /^Disconnect/ }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('dedups same-tick double confirm and disables every control while the disconnect is pending', async () => {
+    const pendingDisconnect = deferred<Response>()
+    let connectionsCalls = 0
+    const mock = installFetchMock(
+      lifecycleHandler({
+        connections: () => {
+          connectionsCalls += 1
+          return jsonResponse([
+            connectionFixture({
+              id: 5,
+              institution_name: 'First Plaid Bank',
+              status: 'updating',
+            }),
+            connectionFixture({ id: 6, institution_name: 'Second Bank', status: 'active' }),
+          ])
+        },
+        disconnect: () => pendingDisconnect.promise,
+      }),
+    )
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole('button', { name: 'Disconnect First Plaid Bank' }),
+    )
+    const confirm = await screen.findByRole('button', { name: 'Disconnect' })
+
+    act(() => {
+      const click = new MouseEvent('click', { bubbles: true, cancelable: true })
+      confirm.dispatchEvent(click)
+      confirm.dispatchEvent(click)
+    })
+
+    await waitFor(() =>
+      expect(calls(mock, DISCONNECT_URL, 'POST')).toHaveLength(1),
+    )
+    expect(screen.getByRole('status')).toHaveTextContent(
+      /Disconnecting First Plaid Bank/,
+    )
+    expect(confirm).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled()
+    expect(
+      screen.getByRole('button', { name: 'Sync now for Second Bank' }),
+    ).toBeDisabled()
+    expect(
+      screen.getByRole('button', { name: 'Reconnect First Plaid Bank' }),
+    ).toBeDisabled()
+    expect(
+      screen.getByRole('button', { name: 'Disconnect Second Bank' }),
+    ).toBeDisabled()
+
+    await act(async () => {
+      pendingDisconnect.resolve(
+        jsonResponse({ connection_id: 5, status: 'disconnected' }),
+      )
+    })
+    await waitFor(() => expect(connectionsCalls).toBe(2))
+    expect(calls(mock, DISCONNECT_URL, 'POST')).toHaveLength(1)
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: 'Reconnect First Plaid Bank' }),
+      ).toBeEnabled(),
+    )
+  })
+
+  it('shows a retryable alert on a failed disconnect and a Retry re-issues the same confirmation request', async () => {
+    const retryDisconnect = deferred<Response>()
+    let disconnectCalls = 0
+    const mock = installFetchMock(
+      lifecycleHandler({
+        disconnect: () => {
+          disconnectCalls += 1
+          if (disconnectCalls === 1) {
+            return jsonResponse({ detail: 'Disconnect service down.' }, 500)
+          }
+          return retryDisconnect.promise
+        },
+      }),
+    )
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole('button', { name: 'Disconnect First Plaid Bank' }),
+    )
+    await user.click(await screen.findByRole('button', { name: 'Disconnect' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Disconnect service down.')
+    expect(calls(mock, DISCONNECT_URL, 'POST')).toHaveLength(1)
+    expect(
+      screen.getByRole('group', {
+        name: 'Disconnect First Plaid Bank confirmation',
+      }),
+    ).toBeInTheDocument()
+
+    await user.click(
+      within(alert).getByRole('button', {
+        name: 'Retry disconnect for First Plaid Bank',
+      }),
+    )
+
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    await waitFor(() =>
+      expect(calls(mock, DISCONNECT_URL, 'POST')).toHaveLength(2),
+    )
+    expect(screen.getByRole('status')).toHaveTextContent(
+      /Disconnecting First Plaid Bank/,
+    )
+
+    await act(async () => {
+      retryDisconnect.resolve(
+        jsonResponse({ connection_id: 5, status: 'disconnected' }),
+      )
+    })
+    await waitFor(() => expect(screen.queryByRole('status')).not.toBeInTheDocument())
+  })
+
+  it('cancel returns focus to the Disconnect control that opened the confirmation', async () => {
+    const mock = installFetchMock(lifecycleHandler())
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole('button', { name: 'Disconnect First Plaid Bank' }),
+    )
+    await screen.findByRole('group', {
+      name: 'Disconnect First Plaid Bank confirmation',
+    })
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    expect(
+      screen.getByRole('button', { name: 'Disconnect First Plaid Bank' }),
+    ).toHaveFocus()
+    expect(calls(mock, DISCONNECT_URL, 'POST')).toHaveLength(0)
+  })
+
+  it('clears the session and renders no alert when the disconnect returns 401', async () => {
+    const mock = installFetchMock(
+      lifecycleHandler({
+        disconnect: () =>
+          jsonResponse(
+            { detail: 'Authentication credentials were not provided.' },
+            401,
+          ),
+      }),
+    )
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole('button', { name: 'Disconnect First Plaid Bank' }),
+    )
+    await user.click(await screen.findByRole('button', { name: 'Disconnect' }))
+
+    expect(await screen.findByLabelText('Email')).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/login')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(calls(mock, DISCONNECT_URL, 'POST')).toHaveLength(1)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  it('disables every other mutation control while a confirmation is open and leaves the confirm enabled', async () => {
+    installFetchMock(
+      lifecycleHandler({
+        connections: () =>
+          jsonResponse([
+            connectionFixture({
+              id: 5,
+              institution_name: 'First Plaid Bank',
+              status: 'updating',
+            }),
+            connectionFixture({ id: 6, institution_name: 'Second Bank', status: 'active' }),
+          ]),
+      }),
+    )
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole('button', { name: 'Disconnect First Plaid Bank' }),
+    )
+    await screen.findByRole('group', {
+      name: 'Disconnect First Plaid Bank confirmation',
+    })
+
+    expect(
+      screen.getByRole('button', { name: 'Reconnect First Plaid Bank' }),
+    ).toBeDisabled()
+    expect(
+      screen.getByRole('button', { name: 'Sync now for Second Bank' }),
+    ).toBeDisabled()
+    expect(
+      screen.getByRole('button', { name: 'Disconnect Second Bank' }),
+    ).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Disconnect' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled()
+  })
+
+  it('allows exactly one network request when a sync and a disconnect confirmation are activated in the same tick', async () => {
+    const pendingSync = deferred<Response>()
+    const mock = installFetchMock(
+      lifecycleHandler({
+        connections: () =>
+          jsonResponse([
+            connectionFixture({
+              id: 5,
+              institution_name: 'First Plaid Bank',
+              status: 'updating',
+            }),
+            connectionFixture({ id: 6, institution_name: 'Second Bank', status: 'active' }),
+          ]),
+        sync: () => pendingSync.promise,
+      }),
+    )
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const syncButton = screen.getByRole('button', {
+      name: 'Sync now for Second Bank',
+    })
+    const disconnectButton = screen.getByRole('button', {
+      name: 'Disconnect First Plaid Bank',
+    })
+    act(() => {
+      const click = new MouseEvent('click', { bubbles: true, cancelable: true })
+      syncButton.dispatchEvent(click)
+      disconnectButton.dispatchEvent(click)
+    })
+
+    await waitFor(() =>
+      expect(
+        calls(mock, '/api/plaid/connections/6/sync/', 'POST'),
+      ).toHaveLength(1),
+    )
+    expect(
+      requestLog(mock).filter((entry) => entry.startsWith('POST')),
+    ).toHaveLength(1)
+
+    // The confirmation opened in the same tick; while the sync holds the shared
+    // lock its confirm is disabled, and even a programmatic activation cannot
+    // issue a disconnect request.
+    const confirm = screen.getByRole('button', { name: 'Disconnect' })
+    expect(confirm).toBeDisabled()
+    act(() => {
+      const click = new MouseEvent('click', { bubbles: true, cancelable: true })
+      confirm.dispatchEvent(click)
+    })
+    expect(calls(mock, DISCONNECT_URL, 'POST')).toHaveLength(0)
+    expect(
+      calls(mock, '/api/plaid/connections/6/sync/', 'POST'),
+    ).toHaveLength(1)
+
+    await act(async () => {
+      pendingSync.resolve(
+        jsonResponse({
+          connection_id: 6,
+          status: 'active',
+          added: 1,
+          modified: 0,
+          removed: 0,
+        }),
+      )
+    })
+    // The sync lock is released, but the confirmation opened in the same tick
+    // still locks the screen until it is cancelled.
+    expect(screen.getByRole('button', { name: 'Disconnect' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled()
+    expect(
+      screen.getByRole('button', { name: 'Sync now for Second Bank' }),
+    ).toBeDisabled()
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(
+      screen.getByRole('button', { name: 'Sync now for Second Bank' }),
+    ).toBeEnabled()
+    expect(calls(mock, DISCONNECT_URL, 'POST')).toHaveLength(0)
+  })
+})
+
+describe('connections late mutation responses after navigation', () => {
+  const SYNC_5_URL = '/api/plaid/connections/5/sync/'
+
+  beforeEach(() => {
+    setCsrfCookie()
+    plaidLink.reset()
+  })
+
+  it('ignores a late disconnect 401 after navigating to the dashboard', async () => {
+    const pendingDisconnect = deferred<Response>()
+    const mock = installFetchMock(
+      lifecycleHandler({
+        connections: () =>
+          jsonResponse([
+            connectionFixture({
+              id: 5,
+              institution_name: 'First Plaid Bank',
+              status: 'updating',
+            }),
+          ]),
+        disconnect: () => pendingDisconnect.promise,
+      }),
+    )
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole('button', { name: 'Disconnect First Plaid Bank' }),
+    )
+    await user.click(await screen.findByRole('button', { name: 'Disconnect' }))
+    expect(calls(mock, DISCONNECT_URL, 'POST')).toHaveLength(1)
+
+    const nav = screen.getByRole('navigation', { name: 'Primary' })
+    await user.click(within(nav).getByRole('link', { name: 'Dashboard' }))
+
+    expect(await screen.findByText('$1,234.56')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Overview' })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/')
+
+    await act(async () => {
+      pendingDisconnect.resolve(
+        jsonResponse(
+          { detail: 'Authentication credentials were not provided.' },
+          401,
+        ),
+      )
+    })
+
+    expect(window.location.pathname).toBe('/')
+    expect(screen.getByRole('heading', { name: 'Overview' })).toBeInTheDocument()
+    expect(screen.getByText('$1,234.56')).toBeInTheDocument()
+    expect(
+      screen.getByRole('navigation', { name: 'Primary' }),
+    ).toBeInTheDocument()
+    expect(screen.queryByLabelText('Email')).not.toBeInTheDocument()
+    expect(
+      requestLog(mock).some((entry) => entry.includes('/api/auth/logout/')),
+    ).toBe(false)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+    expect(calls(mock, DISCONNECT_URL, 'POST')).toHaveLength(1)
+  })
+
+  it('ignores a late sync 401 after navigating to the dashboard', async () => {
+    const pendingSync = deferred<Response>()
+    const mock = installFetchMock(
+      lifecycleHandler({
+        connections: () =>
+          jsonResponse([
+            connectionFixture({
+              id: 5,
+              institution_name: 'First Plaid Bank',
+              status: 'active',
+            }),
+          ]),
+        sync: () => pendingSync.promise,
+      }),
+    )
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole('button', { name: 'Sync now for First Plaid Bank' }),
+    )
+    expect(calls(mock, SYNC_5_URL, 'POST')).toHaveLength(1)
+
+    const nav = screen.getByRole('navigation', { name: 'Primary' })
+    await user.click(within(nav).getByRole('link', { name: 'Dashboard' }))
+
+    expect(await screen.findByText('$1,234.56')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Overview' })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/')
+
+    await act(async () => {
+      pendingSync.resolve(
+        jsonResponse(
+          { detail: 'Authentication credentials were not provided.' },
+          401,
+        ),
+      )
+    })
+
+    expect(window.location.pathname).toBe('/')
+    expect(screen.getByRole('heading', { name: 'Overview' })).toBeInTheDocument()
+    expect(screen.getByText('$1,234.56')).toBeInTheDocument()
+    expect(
+      screen.getByRole('navigation', { name: 'Primary' }),
+    ).toBeInTheDocument()
+    expect(screen.queryByLabelText('Email')).not.toBeInTheDocument()
+    expect(
+      requestLog(mock).some((entry) => entry.includes('/api/auth/logout/')),
+    ).toBe(false)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+    expect(calls(mock, SYNC_5_URL, 'POST')).toHaveLength(1)
   })
 })
