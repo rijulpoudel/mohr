@@ -26,6 +26,7 @@ from plaid.model.item_get_request import ItemGetRequest
 from plaid.model.item_public_token_exchange_request import (
     ItemPublicTokenExchangeRequest,
 )
+from plaid.model.item_remove_request import ItemRemoveRequest
 from plaid.model.link_token_create_request import LinkTokenCreateRequest
 from plaid.model.link_token_create_request_user import LinkTokenCreateRequestUser
 from plaid.model.link_token_transactions import LinkTokenTransactions
@@ -350,6 +351,25 @@ class PlaidGateway:
             logger.warning("Plaid item lookup returned malformed data.")
             raise PlaidGatewayError(PLAID_UNAVAILABLE_DETAIL)
         return ItemGetResult(institution_name=institution_name)
+
+    def remove_item(self, access_token):
+        """Revoke the Item for a relocated access token, server-side.
+
+        Mirrors :meth:`get_item` exactly: builds the official
+        ``ItemRemoveRequest`` and calls ``item_remove`` with the bounded
+        request timeout. Every provider, transport, or timeout condition
+        raises the fixed safe :class:`PlaidGatewayError`. The access token
+        is never logged or interpolated.
+        """
+        request = ItemRemoveRequest(access_token=access_token)
+        try:
+            return self._plaid_api.item_remove(
+                item_remove_request=request,
+                _request_timeout=PLAID_REQUEST_TIMEOUT_SECONDS,
+            )
+        except (ApiException, HTTPError, TimeoutError):
+            logger.warning("Plaid item removal failed.")
+            raise PlaidGatewayError(PLAID_UNAVAILABLE_DETAIL) from None
 
     def get_webhook_verification_key(self, key_id):
         """Fetch and validate the ES256 verification key for one ``kid``.

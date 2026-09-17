@@ -65,6 +65,7 @@ from plaid_integration.services import (
     WebhookInboxFull,
     claim_exchange_handle,
     decrypt_connection_access_token,
+    disconnect_connection,
     issue_exchange_handle,
     perform_sync,
     persist_exchange_connection,
@@ -587,6 +588,30 @@ def connection_link_token(request, pk):
             "expiration": response.expiration,
         }
     )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def connection_disconnect(request, pk):
+    """Owner-scoped local-first disconnect for ONE connection.
+
+    The lookup is scoped to ``request.user`` so a missing id and a foreign
+    id are the same indistinguishable 404 with no mutation. The service
+    moves the ciphertext verbatim into the removal outbox, nulls the token
+    columns, marks the connection ``disconnected``, and archives the linked
+    Mohr accounts while preserving cursors, status history inputs,
+    transactions, and link rows; the best-effort remote ``/item/remove``
+    never changes the response. Returns exactly
+    ``200 {connection_id, status: "disconnected"}`` with no token, key id,
+    item id, cursor, or provider detail. A remote Plaid failure still
+    returns 200 because the user is locally disconnected.
+    """
+    connection = get_object_or_404(
+        PlaidConnection.objects.filter(user=request.user),
+        pk=pk,
+    )
+    result = disconnect_connection(connection)
+    return Response({"connection_id": result.connection_id, "status": result.status})
 
 
 @api_view(["POST"])

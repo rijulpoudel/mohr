@@ -63,6 +63,7 @@ from plaid_integration.models import (
     PlaidConnection,
     PlaidConnectionStatus,
     PlaidExchangeHandle,
+    PlaidItemRemovalRequest,
     PlaidWebhookEvent,
     TransactionsUpdateStatus,
 )
@@ -1562,4 +1563,266 @@ def cleanup_plaid_state(batch_size, now=None):
     return PlaidStateCleanupResult(
         webhook_events_deleted=events_deleted,
         exchange_handles_deleted=handles_deleted,
+    )
+
+
+ITEM_REMOVAL_MAX_ATTEMPTS = 5
+ITEM_REMOVAL_BACKOFF_BASE = timedelta(hours=1)
+ITEM_REMOVAL_BACKOFF_CAP = timedelta(hours=24)
+ITEM_REMOVAL_FAILED_DETAIL = "Plaid item removal is unavailable."
+
+
+@dataclass(frozen=True)
+class DisconnectConnectionResult:
+    """Safe outcome of one local-first disconnect; counts/strings only.
+
+    Carries the connection id, the resulting status string, and whether the
+    best-effort remote ``/item/remove`` call succeeded. Never carries token
+    material, key ids, cursors, or provider detail by construction.
+    """
+
+    connection_id: int
+    status: str
+    remote_removed: bool = False
+
+
+@dataclass(frozen=True)
+class ItemRemovalRunResult:
+    """Counts-only outcome of one bounded item-removal retry run.
+
+    Carries nothing but integer counts; never tokens, key ids, item ids,
+    cursors, or provider detail, so the caller can print it verbatim.
+    """
+
+    removed: int = 0
+    retried: int = 0
+    failed: int = 0
+    skipped: int = 0
+
+
+def _item_removal_backoff_delay(attempts_before_claim):
+    """Return the backoff delay for a row claimed at ``attempts_before_claim``.
+
+    Exponential ``base * 2**attempts`` bounded by the cap, using only module
+    constants; never touches tokens or provider state.
+    """
+    delay = ITEM_REMOVAL_BACKOFF_BASE * (2**attempts_before_claim)
+    if delay > ITEM_REMOVAL_BACKOFF_CAP:
+        return ITEM_REMOVAL_BACKOFF_CAP
+    return delay
+
+
+def disconnect_connection(connection, *, gateway=None):
+    """Disconnect ONE connection local-first with a relocated removal outbox.
+
+    In ONE ``transaction.atomic()`` block the connection row is locked with
+    ``select_for_update()``, an already-``disconnected`` connection returns
+    idempotently with no duplicate outbox row, otherwise the stored token
+    package (both columns) is moved VERBATIM into the
+    :class:`PlaidItemRemovalRequest` outbox (``update_or_create`` with
+    ``status="pending"`` and ``next_retry_at`` now so the row is immediately
+    due; never re-encrypted) and nulled on the connection, the status becomes
+    ``disconnected`` (only the changed fields are saved), and every linked
+    Mohr account owned by the connection owner is archived. ``sync_cursor``,
+    ``last_synced_at``, ``transactions_update_status``, ``last_sync_error``,
+    ``Transaction`` rows, and ``PlaidAccountLink`` rows are never touched.
+
+    After the transaction commits, a best-effort remote ``/item/remove`` runs
+    OUTSIDE the atomic block when ``PLAID_ENABLED`` and a token was moved:
+    the moved package is decrypted with the configured ring and sent through
+    the injected (or settings-built) gateway. Success deletes the outbox row;
+    a :class:`TokenCryptoError` marks it failed immediately (an undecryptable
+    package can never succeed later) while a :class:`PlaidGatewayError`
+    leaves it pending; both record only the fixed redacted reason, never the
+    token, key id, or provider text. A remote failure never raises out of
+    this function. Returns the repr-safe :class:`DisconnectConnectionResult`.
+    """
+    with transaction.atomic():
+        conn = PlaidConnection.objects.select_for_update().get(pk=connection.pk)
+        if conn.status == PlaidConnectionStatus.DISCONNECTED:
+            return DisconnectConnectionResult(
+                connection_id=conn.pk,
+                status=conn.status,
+                remote_removed=False,
+            )
+        moved_package = None
+        moved_key_id = None
+        token_moved = bool(conn.access_token_encrypted and conn.encryption_key_id)
+        if token_moved:
+            moved_package = conn.access_token_encrypted
+            moved_key_id = conn.encryption_key_id
+            PlaidItemRemovalRequest.objects.update_or_create(
+                connection=conn,
+                defaults={
+                    "access_token_encrypted": moved_package,
+                    "encryption_key_id": moved_key_id,
+                    "status": "pending",
+                    "next_retry_at": timezone.now(),
+                },
+            )
+            conn.access_token_encrypted = None
+            conn.encryption_key_id = None
+        conn.status = PlaidConnectionStatus.DISCONNECTED
+        if token_moved:
+            conn.save(
+                update_fields=[
+                    "access_token_encrypted",
+                    "encryption_key_id",
+                    "status",
+                ]
+            )
+        else:
+            conn.save(update_fields=["status"])
+        links = PlaidAccountLink.objects.filter(connection=conn).select_related(
+            "account"
+        )
+        for link in links:
+            if link.account.user_id != conn.user_id:
+                continue
+            if not link.account.is_archived:
+                link.account.is_archived = True
+                link.account.save(update_fields=["is_archived"])
+        connection_id = conn.pk
+        connection_status = conn.status
+
+    remote_removed = False
+    if token_moved and settings.PLAID_ENABLED:
+        try:
+            ring = settings.PLAID_TOKEN_RING
+            if ring is None:
+                raise TokenCryptoError("Token could not be decrypted.")
+            if gateway is None:
+                gateway = PlaidGateway.from_settings()
+            decrypted = ring.decrypt(moved_package, moved_key_id)
+            plaintext = decrypted.plaintext.decode()
+            gateway.remove_item(plaintext)
+        except TokenCryptoError:
+            PlaidItemRemovalRequest.objects.filter(connection_id=connection_id).update(
+                status="failed", last_error=ITEM_REMOVAL_FAILED_DETAIL
+            )
+        except PlaidGatewayError:
+            PlaidItemRemovalRequest.objects.filter(connection_id=connection_id).update(
+                last_error=ITEM_REMOVAL_FAILED_DETAIL
+            )
+        else:
+            PlaidItemRemovalRequest.objects.filter(connection_id=connection_id).delete()
+            remote_removed = True
+    return DisconnectConnectionResult(
+        connection_id=connection_id,
+        status=connection_status,
+        remote_removed=remote_removed,
+    )
+
+
+def process_plaid_item_removals(batch_size, *, gateway=None, now=None):
+    """Retry due Plaid item removals with a bounded exponential backoff.
+
+    Selects at most ``batch_size`` ``status="pending"`` rows where
+    ``next_retry_at IS NULL OR next_retry_at <= now``, ordered by
+    ``("next_retry_at", "id")``. Each row is claimed with ONE conditional
+    UPDATE (``attempts = F("attempts") + 1``, ``last_attempt_at = now``,
+    ``next_retry_at = now + min(base * 2**attempts, cap)``) filtered by pk,
+    pending status, and the same due predicate; only a claim that updates
+    exactly one row proceeds (mirroring ``claim_exchange_handle``), so the
+    claim commits BEFORE any network call and a lost race counts ``skipped``.
+
+    The moved package is then decrypted and sent through the gateway OUTSIDE
+    any transaction. Success deletes the row (``removed``). A
+    :class:`PlaidGatewayError` records the fixed redacted reason: rows whose
+    ``attempts`` reached ``ITEM_REMOVAL_MAX_ATTEMPTS`` become ``failed``,
+    others stay ``pending`` (``retried``). An undecryptable package becomes
+    ``failed`` immediately. One row never aborts the batch, and tokens or
+    provider text are never logged or stored. Returns the counts-only
+    :class:`ItemRemovalRunResult`.
+    """
+    if now is None:
+        now = timezone.now()
+    due = Q(next_retry_at__isnull=True) | Q(next_retry_at__lte=now)
+    candidates = list(
+        PlaidItemRemovalRequest.objects.filter(status="pending")
+        .filter(due)
+        .order_by("next_retry_at", "id")
+        .values_list("pk", flat=True)[:batch_size]
+    )
+    if gateway is None:
+        try:
+            gateway = PlaidGateway.from_settings()
+        except PlaidGatewayError:
+            gateway = None
+    removed = 0
+    retried = 0
+    failed = 0
+    skipped = 0
+    for pk in candidates:
+        snapshot = (
+            PlaidItemRemovalRequest.objects.filter(pk=pk).values(
+                "attempts", "access_token_encrypted", "encryption_key_id"
+            )
+        ).first()
+        if snapshot is None:
+            skipped += 1
+            continue
+        attempts_before = snapshot["attempts"]
+        delay = _item_removal_backoff_delay(attempts_before)
+        claimed = (
+            PlaidItemRemovalRequest.objects.filter(pk=pk, status="pending")
+            .filter(due)
+            .update(
+                attempts=F("attempts") + 1,
+                last_attempt_at=now,
+                next_retry_at=now + delay,
+            )
+        )
+        if claimed != 1:
+            skipped += 1
+            continue
+        new_attempts = attempts_before + 1
+        try:
+            ring = settings.PLAID_TOKEN_RING
+            if ring is None:
+                raise TokenCryptoError("Token could not be decrypted.")
+            decrypted = ring.decrypt(
+                snapshot["access_token_encrypted"],
+                snapshot["encryption_key_id"],
+            )
+            plaintext = decrypted.plaintext.decode()
+        except TokenCryptoError:
+            PlaidItemRemovalRequest.objects.filter(pk=pk).update(
+                status="failed", last_error=ITEM_REMOVAL_FAILED_DETAIL
+            )
+            failed += 1
+            continue
+        if gateway is None:
+            PlaidItemRemovalRequest.objects.filter(pk=pk).update(
+                last_error=ITEM_REMOVAL_FAILED_DETAIL,
+            )
+            if new_attempts >= ITEM_REMOVAL_MAX_ATTEMPTS:
+                PlaidItemRemovalRequest.objects.filter(pk=pk).update(
+                    status="failed",
+                )
+                failed += 1
+            else:
+                retried += 1
+            continue
+        try:
+            gateway.remove_item(plaintext)
+        except PlaidGatewayError:
+            PlaidItemRemovalRequest.objects.filter(pk=pk).update(
+                last_error=ITEM_REMOVAL_FAILED_DETAIL,
+            )
+            if new_attempts >= ITEM_REMOVAL_MAX_ATTEMPTS:
+                PlaidItemRemovalRequest.objects.filter(pk=pk).update(
+                    status="failed",
+                )
+                failed += 1
+            else:
+                retried += 1
+            continue
+        PlaidItemRemovalRequest.objects.filter(pk=pk).delete()
+        removed += 1
+    return ItemRemovalRunResult(
+        removed=removed,
+        retried=retried,
+        failed=failed,
+        skipped=skipped,
     )
