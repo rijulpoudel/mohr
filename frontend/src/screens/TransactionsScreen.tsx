@@ -309,6 +309,22 @@ function TransactionItem({
         <time dateTime={transaction.date}>{transaction.date}</time>
         {accountName !== undefined && <span>{accountName}</span>}
         {categoryName !== undefined && <span>{categoryName}</span>}
+        {transaction.source === 'plaid' && (
+          <span className="transaction-source">From your bank</span>
+        )}
+        {/* provider_name holds the bank's own description of the transaction
+            (Plaid's transaction name), which is usually a merchant or payee, not
+            the institution. It is therefore labelled as a description and never
+            phrased as the source of the data. */}
+        {transaction.provider_name.trim() !== '' && (
+          <span>Bank description: {transaction.provider_name}</span>
+        )}
+        {transaction.is_pending && (
+          <span className="transaction-source">Pending</span>
+        )}
+        {transaction.is_pending_initial_import && (
+          <span className="transaction-source">History still importing</span>
+        )}
       </div>
       {transaction.note !== '' && (
         <p className="transaction-note">{transaction.note}</p>
@@ -323,15 +339,17 @@ function TransactionItem({
         >
           Edit
         </button>
-        <button
-          type="button"
-          className="btn-delete"
-          aria-label={`Delete transaction ${transaction.id}`}
-          onClick={onDelete}
-          disabled={deleteDisabled}
-        >
-          Delete
-        </button>
+        {transaction.source !== 'plaid' && (
+          <button
+            type="button"
+            className="btn-delete"
+            aria-label={`Delete transaction ${transaction.id}`}
+            onClick={onDelete}
+            disabled={deleteDisabled}
+          >
+            Delete
+          </button>
+        )}
       </div>
     </li>
   )
@@ -1485,6 +1503,9 @@ export function TransactionsScreen() {
   const categoryById = new Map(
     categories.map((category) => [category.id, category]),
   )
+  const hasSyncedTransactions =
+    state.status === 'ready' &&
+    state.transactions.some((transaction) => transaction.source === 'plaid')
   const filtersLocked =
     editPending || editingId !== null || deletePending || deletingId !== null
   const rowLocked =
@@ -1627,6 +1648,12 @@ export function TransactionsScreen() {
       {updateNotice !== null && state.status === 'ready' && (
         <p role="status" className="notice">
           {updateNotice}
+        </p>
+      )}
+      {hasSyncedTransactions && (
+        <p className="transaction-retention-note">
+          Bank-synced transactions are kept for the audit trail and cannot be
+          deleted.
         </p>
       )}
       {state.status === 'ready' &&

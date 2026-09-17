@@ -135,6 +135,16 @@ function serverOrderedTransactions() {
   ]
 }
 
+function plaidTransactionFixture(overrides: Record<string, unknown> = {}) {
+  return transactionFixture({
+    source: 'plaid',
+    provider_name: 'Chase',
+    is_pending: false,
+    is_pending_initial_import: false,
+    ...overrides,
+  })
+}
+
 function transactionRequests(mock: FetchMock): number {
   return mock.mock.calls.filter(([input]) =>
     String(input).startsWith('/api/transactions/'),
@@ -532,6 +542,220 @@ describe('transactions list', () => {
     expect(await screen.findByText('Monthly paycheck')).toBeInTheDocument()
     expect(localStorage.length).toBe(0)
     expect(sessionStorage.length).toBe(0)
+  })
+})
+
+describe('transaction provenance', () => {
+  it('marks a bank-synced row as coming from the bank and labels the bank description', async () => {
+    installFetchMock(
+      authenticatedTransactionsHandler(
+        () =>
+          jsonResponse([
+            plaidTransactionFixture({
+              id: 4,
+              note: 'Coffee shop',
+              provider_name: 'Chase',
+            }),
+          ]),
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+
+    const item = (await screen.findAllByRole('listitem'))[0]
+    // provider_name is the bank's description of the transaction, not the
+    // institution, so it must never be phrased as the source of the data.
+    expect(within(item).getByText('From your bank')).toBeInTheDocument()
+    expect(within(item).getByText('Bank description: Chase')).toBeInTheDocument()
+    expect(within(item).queryByText('From Chase')).not.toBeInTheDocument()
+  })
+
+  it('identifies a bank-synced row without inventing a provider when provider_name is empty', async () => {
+    installFetchMock(
+      authenticatedTransactionsHandler(
+        () => jsonResponse([plaidTransactionFixture({ id: 4, provider_name: '' })]),
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+
+    const item = (await screen.findAllByRole('listitem'))[0]
+    expect(within(item).getByText('From your bank')).toBeInTheDocument()
+    expect(within(item).queryByText(/Bank description/)).not.toBeInTheDocument()
+    expect(within(item).queryByText(/Chase|provider/i)).not.toBeInTheDocument()
+  })
+
+  it('omits the bank description when the provider name is only whitespace', async () => {
+    installFetchMock(
+      authenticatedTransactionsHandler(
+        () => jsonResponse([plaidTransactionFixture({ id: 4, provider_name: '   ' })]),
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+
+    const item = (await screen.findAllByRole('listitem'))[0]
+    // The backend bounds this field by length only, so whitespace is possible
+    // and must not produce a hollow label with no value after it.
+    expect(within(item).getByText('From your bank')).toBeInTheDocument()
+    expect(within(item).queryByText(/Bank description/)).not.toBeInTheDocument()
+  })
+
+  it('renders no provenance marker on a manual row', async () => {
+    installFetchMock(
+      authenticatedTransactionsHandler(
+        () => jsonResponse(serverOrderedTransactions()),
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+
+    await screen.findByText('Monthly paycheck')
+    expect(screen.queryByText(/^From /)).not.toBeInTheDocument()
+  })
+
+  it('renders a distinct Pending marker on a pending bank-synced row', async () => {
+    installFetchMock(
+      authenticatedTransactionsHandler(
+        () => jsonResponse([plaidTransactionFixture({ id: 4, is_pending: true })]),
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+
+    const item = (await screen.findAllByRole('listitem'))[0]
+    expect(within(item).getByText('Pending')).toBeInTheDocument()
+  })
+
+  it('renders a distinct initial-import note worded differently from Pending', async () => {
+    installFetchMock(
+      authenticatedTransactionsHandler(
+        () =>
+          jsonResponse([
+            plaidTransactionFixture({
+              id: 4,
+              is_pending_initial_import: true,
+            }),
+          ]),
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+
+    const item = (await screen.findAllByRole('listitem'))[0]
+    expect(
+      within(item).getByText('History still importing'),
+    ).toBeInTheDocument()
+    expect(within(item).queryByText('Pending')).not.toBeInTheDocument()
+  })
+
+  it('renders both pending markers when a bank-synced row is pending and still importing', async () => {
+    installFetchMock(
+      authenticatedTransactionsHandler(
+        () =>
+          jsonResponse([
+            plaidTransactionFixture({
+              id: 4,
+              is_pending: true,
+              is_pending_initial_import: true,
+            }),
+          ]),
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+
+    const item = (await screen.findAllByRole('listitem'))[0]
+    expect(within(item).getByText('Pending')).toBeInTheDocument()
+    expect(
+      within(item).getByText('History still importing'),
+    ).toBeInTheDocument()
+  })
+
+  it('renders no Delete control on a bank-synced row and keeps it on a manual row', async () => {
+    installFetchMock(
+      authenticatedTransactionsHandler(
+        () =>
+          jsonResponse([
+            plaidTransactionFixture({ id: 4 }),
+            transactionFixture({
+              id: 5,
+              account: 1,
+              category: 2,
+              amount: '9.99',
+              date: '2026-09-09',
+              note: 'Manual entry',
+            }),
+          ]),
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+
+    await screen.findByText('Manual entry')
+    const items = screen.getAllByRole('listitem')
+    expect(
+      within(items[0]).queryByRole('button', { name: 'Delete transaction 4' }),
+    ).not.toBeInTheDocument()
+    expect(
+      within(items[1]).getByRole('button', { name: 'Delete transaction 5' }),
+    ).toBeInTheDocument()
+  })
+
+  it('keeps the Edit control and its accessible name on a bank-synced row', async () => {
+    installFetchMock(
+      authenticatedTransactionsHandler(
+        () => jsonResponse([plaidTransactionFixture({ id: 4 })]),
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+
+    const item = (await screen.findAllByRole('listitem'))[0]
+    const edit = within(item).getByRole('button', { name: 'Edit transaction 4' })
+    expect(edit).toBeEnabled()
+  })
+
+  it('keeps the retention note out of view when every row is manual', async () => {
+    installFetchMock(
+      authenticatedTransactionsHandler(
+        () => jsonResponse(serverOrderedTransactions()),
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+
+    await screen.findByText('Monthly paycheck')
+    expect(screen.queryByText(/kept for the audit trail/)).not.toBeInTheDocument()
+  })
+
+  it('states once that bank-synced transactions are kept for the audit trail and cannot be deleted', async () => {
+    installFetchMock(
+      authenticatedTransactionsHandler(
+        () =>
+          jsonResponse([
+            plaidTransactionFixture({ id: 4 }),
+            transactionFixture({
+              id: 5,
+              account: 1,
+              category: 2,
+              amount: '9.99',
+              date: '2026-09-09',
+              note: 'Manual entry',
+            }),
+          ]),
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+
+    await screen.findByText('Manual entry')
+    expect(screen.getAllByText(/kept for the audit trail/)).toHaveLength(1)
+    expect(
+      screen.getByText(
+        'Bank-synced transactions are kept for the audit trail and cannot be deleted.',
+      ),
+    ).toBeInTheDocument()
   })
 })
 

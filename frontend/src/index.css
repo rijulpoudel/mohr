@@ -411,6 +411,10 @@ a {
   font-size: 0.8125rem;
 }
 
+.transaction-source {
+  color: var(--color-accent);
+}
+
 .transaction-item .transaction-note {
   margin: var(--space-1) 0 0;
   font-size: 0.875rem;
@@ -431,6 +435,12 @@ a {
   flex-wrap: wrap;
   gap: var(--space-3);
   margin-block-start: var(--space-2);
+}
+
+.transaction-retention-note {
+  margin: var(--space-3) 0;
+  color: var(--color-muted);
+  font-size: 0.875rem;
 }
 
 .transaction-delete .form {
@@ -544,6 +554,19 @@ a {
 
 .account-actions {
   margin-block-start: var(--space-2);
+}
+
+.account-balance-pending {
+  margin: var(--space-2) 0 0;
+  color: var(--color-muted);
+  font-size: 0.875rem;
+}
+
+.account-balance-pending-mark {
+  color: var(--color-accent);
+  /* Head the explanation on its own line so the marker reads as a label
+     followed by its reason, not as one long run-on sentence. */
+  display: block;
 }
 
 .account-edit h3 {

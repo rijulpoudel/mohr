@@ -28,6 +28,12 @@ const NAME_ERROR_LONG = 'Name must be 100 characters or fewer.'
 const ACCOUNT_TYPE_ERROR = 'Choose an account type.'
 const OPENING_ERROR =
   'Enter an amount with exactly 2 decimals and at most 10 integer digits.'
+// A synced account with an unanchored link reports 0.00 for both balances as a
+// placeholder: the current balance is forced to zero, and the opening balance is
+// only derived once the anchor is applied. Showing those zeros would present a
+// fabricated balance as a real one, so the figures are replaced by a word that
+// cannot be mistaken for money.
+const PENDING_BALANCE_TEXT = 'Pending'
 
 type AccountsState =
   | { status: 'loading' }
@@ -410,13 +416,30 @@ function AccountItem({
       <dl className="account-balances">
         <div className="account-balance">
           <dt>Current balance</dt>
-          <dd>{formatMoney(account.current_balance)}</dd>
+          <dd>
+            {account.sync_pending
+              ? PENDING_BALANCE_TEXT
+              : formatMoney(account.current_balance)}
+          </dd>
         </div>
         <div className="account-balance">
           <dt>Opening balance</dt>
-          <dd>{formatMoney(account.opening_balance)}</dd>
+          <dd>
+            {account.sync_pending
+              ? PENDING_BALANCE_TEXT
+              : formatMoney(account.opening_balance)}
+          </dd>
         </div>
       </dl>
+      {account.sync_pending && (
+        <p className="account-balance-pending">
+          <span className="account-balance-pending-mark">Balance pending</span>{' '}
+          <span>
+            Balances are temporarily excluded while transaction history
+            finishes and the opening balance is anchored.
+          </span>
+        </p>
+      )}
       <div className="account-actions">
         <button
           type="button"

@@ -311,6 +311,69 @@ describe('accounts list', () => {
   })
 })
 
+describe('account sync pending', () => {
+  it('renders a Balance pending marker with the anchored-balance explanation on a sync_pending account', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse([
+          // The real backend reports 0.00 for both balances while a synced
+          // account is unanchored, so the fixture mirrors that rather than a
+          // comfortable non-zero value.
+          accountFixture({
+            id: 1,
+            name: 'Checking One',
+            sync_pending: true,
+            opening_balance: '0.00',
+            current_balance: '0.00',
+          }),
+        ]),
+      ),
+    )
+    renderApp('/accounts')
+
+    const item = (await screen.findAllByRole('listitem'))[0]
+    expect(within(item).getByText('Balance pending')).toBeInTheDocument()
+    expect(
+      within(item).getByText(
+        'Balances are temporarily excluded while transaction history finishes and the opening balance is anchored.',
+      ),
+    ).toBeInTheDocument()
+    // Those zeros are placeholders, so they must never be presented as money.
+    expect(within(item).getAllByText('Pending')).toHaveLength(2)
+    expect(within(item).queryByText('$0.00')).not.toBeInTheDocument()
+  })
+
+  it('renders no pending marker on an account with sync_pending false', async () => {
+    installFetchMock(authenticatedHandler(() => jsonResponse([accountFixture()])))
+    renderApp('/accounts')
+
+    await screen.findByText('Everyday Checking')
+    expect(screen.queryByText('Balance pending')).not.toBeInTheDocument()
+    expect(
+      screen.queryByText(/opening balance is anchored/),
+    ).not.toBeInTheDocument()
+  })
+
+  it('keeps Edit and Archive controls with their accessible names on a sync_pending account', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse([
+          accountFixture({ id: 1, name: 'Checking One', sync_pending: true }),
+        ]),
+      ),
+    )
+    renderApp('/accounts')
+
+    const item = (await screen.findAllByRole('listitem'))[0]
+    expect(
+      within(item).getByRole('button', { name: 'Edit Checking One' }),
+    ).toBeInTheDocument()
+    expect(
+      within(item).getByRole('button', { name: 'Archive Checking One' }),
+    ).toBeInTheDocument()
+  })
+})
+
 describe('malformed accounts payloads', () => {
   const malformedPayloads: Array<[string, unknown]> = [
     ['a null payload', null],
