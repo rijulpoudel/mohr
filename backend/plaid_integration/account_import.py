@@ -16,7 +16,11 @@ A, at the Plaid integration boundary:
   opening balance, mapped type, bounded display name) and one
   ``PlaidAccountLink`` per supported account for one ``PlaidConnection``,
   idempotently reusing existing links and refreshing only provider-owned
-  snapshot fields.
+  snapshot fields. ``import_normalized_provider_accounts`` performs the same
+  batch through the shared core for outcomes that are already normalized
+  (the ``NormalizationOutcome`` objects carried on
+  ``NormalizedSyncPage.account_outcomes``), so the sync path never
+  re-derives values from raw provider shapes.
 
 Unsupported or malformed provider accounts are skipped with a deterministic,
 redacted reason and never become Mohr rows. Provider account ids are never
@@ -422,32 +426,16 @@ def _account_import_error_summary(skipped, reasons):
     return summary[:ACCOUNT_IMPORT_ERROR_MAX_LENGTH]
 
 
-def import_provider_accounts(connection, provider_accounts):
-    """Atomically import normalized supported accounts for one connection.
+def _import_normalized_outcomes(connection, normalizations):
+    """Shared internal core: apply already-normalized outcomes atomically.
 
-    ``connection`` is a persisted :class:`PlaidConnection` and its owner is
-    authoritative for every row created or refreshed. Each supported
-    provider account becomes one ``accounts.Account`` (owned by
-    ``connection.user``, mapped type, ``opening_balance`` exactly
-    ``Decimal("0.00")``) and one ``PlaidAccountLink`` carrying the stable
-    provider identity, the immutable anchor captured from the current
-    balance (written only while null), and the refreshable display
-    snapshots. Unsupported and malformed accounts create nothing; valid
-    siblings still import. The whole batch is one transaction, so a
-    fail-closed ownership violation or a failed link write rolls back
-    everything and no orphan Account row survives.
-
-    ``last_sync_error`` on the connection carries a bounded redacted summary
-    when any account is skipped and the field is empty or already carries the
-    account-import-owned summary; an unrelated sync/provider error is
-    preserved exactly and never replaced. A fully clean pass clears only the
-    account-import-owned error state, preserving unrelated sync/provider
-    errors. Returns a small internal :class:`AccountImportResult`.
+    One atomic batch per call, with the same reuse/anchor-capture/rollback
+    semantics via ``_import_or_reuse_account`` and the same bounded redacted
+    error-summary behavior tied to this module's own error tag. Returns the
+    repr-safe :class:`AccountImportResult`. The input is materialized so
+    generators and tuples are both accepted.
     """
-    normalizations = [
-        normalize_provider_account(provider_account)
-        for provider_account in provider_accounts
-    ]
+    normalizations = list(normalizations)
     reasons = []
     for normalization in normalizations:
         reason = normalization.reason
@@ -481,3 +469,60 @@ def import_provider_accounts(connection, provider_accounts):
         skipped=skipped,
         reasons=tuple(reasons),
     )
+
+
+def import_normalized_provider_accounts(connection, outcomes):
+    """Atomically import already-normalized account outcomes for one connection.
+
+    ``outcomes`` are the :class:`NormalizationOutcome` objects carried on a
+    ``NormalizedSyncPage.account_outcomes``: already normalized by
+    ``normalize_provider_account``, so nothing is re-derived from raw
+    provider shapes. ``connection`` is a persisted :class:`PlaidConnection`
+    and its owner is authoritative for every row created or refreshed. Each
+    supported outcome becomes one ``accounts.Account`` (owned by
+    ``connection.user``, mapped type, ``opening_balance`` exactly
+    ``Decimal("0.00")``) and one ``PlaidAccountLink`` carrying the stable
+    provider identity, the immutable anchor captured from the current
+    balance (written only while null), and the refreshable display
+    snapshots. Skipped outcomes create nothing; valid siblings still
+    import. The whole batch is one transaction, so a fail-closed ownership
+    violation or a failed link write rolls back everything and no orphan
+    Account row survives.
+
+    ``last_sync_error`` on the connection carries a bounded redacted summary
+    when any account is skipped and the field is empty or already carries the
+    account-import-owned summary; an unrelated sync/provider error is
+    preserved exactly and never replaced. A fully clean pass clears only the
+    account-import-owned error state, preserving unrelated sync/provider
+    errors. Returns a small internal :class:`AccountImportResult`.
+    """
+    return _import_normalized_outcomes(connection, outcomes)
+
+
+def import_provider_accounts(connection, provider_accounts):
+    """Atomically import normalized supported accounts for one connection.
+
+    ``connection`` is a persisted :class:`PlaidConnection` and its owner is
+    authoritative for every row created or refreshed. Each supported
+    provider account becomes one ``accounts.Account`` (owned by
+    ``connection.user``, mapped type, ``opening_balance`` exactly
+    ``Decimal("0.00")``) and one ``PlaidAccountLink`` carrying the stable
+    provider identity, the immutable anchor captured from the current
+    balance (written only while null), and the refreshable display
+    snapshots. Unsupported and malformed accounts create nothing; valid
+    siblings still import. The whole batch is one transaction, so a
+    fail-closed ownership violation or a failed link write rolls back
+    everything and no orphan Account row survives.
+
+    ``last_sync_error`` on the connection carries a bounded redacted summary
+    when any account is skipped and the field is empty or already carries the
+    account-import-owned summary; an unrelated sync/provider error is
+    preserved exactly and never replaced. A fully clean pass clears only the
+    account-import-owned error state, preserving unrelated sync/provider
+    errors. Returns a small internal :class:`AccountImportResult`.
+    """
+    normalizations = [
+        normalize_provider_account(provider_account)
+        for provider_account in provider_accounts
+    ]
+    return _import_normalized_outcomes(connection, normalizations)

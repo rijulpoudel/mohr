@@ -42,6 +42,7 @@ from plaid_integration.account_import import (
     AccountImportError,
     AccountImportResult,
     NormalizedProviderAccount,
+    import_normalized_provider_accounts,
     import_provider_accounts,
     normalize_provider_account,
 )
@@ -1092,3 +1093,196 @@ class ImportProviderAccountsTests(TestCase):
                 FakeProviderAccount(account_id="plaid-account-quiet-1"),
                 FakeProviderAccount(account_type="loan", subtype="auto"),
             )
+
+
+class ImportNormalizedProviderAccountsTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = get_user_model().objects.create_user(
+            email="normalized-import-owner@example.com",
+            password="TestOnlyPassword123!",
+        )
+        cls.other_user = get_user_model().objects.create_user(
+            email="normalized-import-other@example.com",
+            password="TestOnlyPassword123!",
+        )
+        cls.raw_connection = PlaidConnection.objects.create(
+            user=cls.user,
+            item_id="item-sandbox-normalized-import-raw-00001",
+            institution_name="Normalized Import Bank",
+        )
+        cls.normalized_connection = PlaidConnection.objects.create(
+            user=cls.user,
+            item_id="item-sandbox-normalized-import-norm-00001",
+            institution_name="Normalized Import Bank",
+        )
+
+    def raw_accounts(self):
+        return [
+            FakeProviderAccount(
+                account_id="plaid-account-equiv-check-1",
+                name="Equiv Checking",
+                subtype="checking",
+                mask="1111",
+                current=123.45,
+                available=88.88,
+            ),
+            FakeProviderAccount(
+                account_id="plaid-account-equiv-card-1",
+                name="Equiv Card",
+                account_type="credit",
+                subtype="credit card",
+                mask="9999",
+                current=400.00,
+                available=1600.00,
+            ),
+        ]
+
+    def test_normalized_entry_point_matches_raw_entry_point_exactly(self):
+        accounts = self.raw_accounts()
+        outcomes = [normalize_provider_account(account) for account in accounts]
+        for outcome in outcomes:
+            self.assertFalse(outcome.skipped)
+
+        raw_result = import_provider_accounts(self.raw_connection, accounts)
+        normalized_result = import_normalized_provider_accounts(
+            self.normalized_connection, outcomes
+        )
+
+        self.assertEqual(normalized_result, raw_result)
+        raw_links = PlaidAccountLink.objects.filter(
+            connection=self.raw_connection
+        ).order_by("plaid_account_id")
+        normalized_links = PlaidAccountLink.objects.filter(
+            connection=self.normalized_connection
+        ).order_by("plaid_account_id")
+        self.assertEqual(len(normalized_links), len(raw_links))
+        self.assertEqual(
+            {link.account.account_type for link in normalized_links},
+            {AccountType.CHECKING, AccountType.CREDIT_CARD},
+        )
+        for normalized_link, raw_link in zip(normalized_links, raw_links):
+            self.assertEqual(normalized_link.user, raw_link.user)
+            self.assertEqual(normalized_link.connection, self.normalized_connection)
+            self.assertEqual(
+                normalized_link.plaid_account_id, raw_link.plaid_account_id
+            )
+            self.assertEqual(normalized_link.plaid_type, raw_link.plaid_type)
+            self.assertEqual(normalized_link.plaid_subtype, raw_link.plaid_subtype)
+            self.assertEqual(normalized_link.mask, raw_link.mask)
+            self.assertEqual(
+                normalized_link.anchor_provider_current_balance,
+                raw_link.anchor_provider_current_balance,
+            )
+            self.assertEqual(
+                normalized_link.provider_current_balance,
+                raw_link.provider_current_balance,
+            )
+            self.assertEqual(
+                normalized_link.provider_available_balance,
+                raw_link.provider_available_balance,
+            )
+            self.assertIsNone(normalized_link.anchor_applied_at)
+            normalized_account = normalized_link.account
+            raw_account = raw_link.account
+            self.assertEqual(normalized_account.user, raw_account.user)
+            self.assertEqual(normalized_account.name, raw_account.name)
+            self.assertEqual(normalized_account.account_type, raw_account.account_type)
+            self.assertEqual(
+                normalized_account.opening_balance, raw_account.opening_balance
+            )
+            self.assertEqual(normalized_account.is_archived, raw_account.is_archived)
+
+    def test_replaying_same_normalized_outcome_reuses_link_and_keeps_anchor(self):
+        outcome = normalize_provider_account(
+            FakeProviderAccount(
+                account_id="plaid-account-norm-replay-1",
+                name="Replay Checking",
+                current=100.00,
+            )
+        )
+        self.assertFalse(outcome.skipped)
+
+        first = import_normalized_provider_accounts(
+            self.normalized_connection, [outcome]
+        )
+        self.assertEqual(
+            first,
+            AccountImportResult(imported=1, reused=0, skipped=0, reasons=()),
+        )
+
+        changed = normalize_provider_account(
+            FakeProviderAccount(
+                account_id="plaid-account-norm-replay-1",
+                name="Replay Checking",
+                current=500.00,
+            )
+        )
+        second = import_normalized_provider_accounts(
+            self.normalized_connection, [changed]
+        )
+        self.assertEqual(
+            second,
+            AccountImportResult(imported=0, reused=1, skipped=0, reasons=()),
+        )
+        self.assertEqual(Account.objects.count(), 1)
+        self.assertEqual(PlaidAccountLink.objects.count(), 1)
+        link = PlaidAccountLink.objects.get()
+        self.assertEqual(link.anchor_provider_current_balance, Decimal("100.00"))
+        self.assertEqual(link.provider_current_balance, Decimal("500.00"))
+
+    def test_normalized_entry_point_fails_closed_on_cross_user_link_state(self):
+        other_account = Account.objects.create(
+            user=self.other_user,
+            name="Their Checking",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("0.00"),
+        )
+        PlaidAccountLink.objects.create(
+            connection=self.normalized_connection,
+            user=self.other_user,
+            account=other_account,
+            plaid_account_id="plaid-account-foreign-norm-1",
+            plaid_type="depository",
+            plaid_subtype="checking",
+            mask="7777",
+        )
+        accounts_before = Account.objects.count()
+
+        outcomes = [
+            normalize_provider_account(
+                FakeProviderAccount(
+                    account_id="plaid-account-good-norm-1",
+                    name="Good Checking",
+                )
+            ),
+            normalize_provider_account(
+                FakeProviderAccount(
+                    account_id="plaid-account-foreign-norm-1",
+                    name="Colliding",
+                )
+            ),
+        ]
+        with self.assertRaises(AccountImportError) as raised:
+            import_normalized_provider_accounts(self.normalized_connection, outcomes)
+
+        self.assertEqual(Account.objects.count(), accounts_before)
+        self.assertFalse(
+            PlaidAccountLink.objects.filter(
+                plaid_account_id="plaid-account-good-norm-1"
+            ).exists()
+        )
+        other_account.refresh_from_db()
+        self.assertEqual(other_account.user, self.other_user)
+        self.assertEqual(other_account.name, "Their Checking")
+        self.assertEqual(other_account.opening_balance, Decimal("0.00"))
+        self.normalized_connection.refresh_from_db()
+        self.assertEqual(self.normalized_connection.last_sync_error, "")
+        for forbidden in (
+            "plaid-account-foreign-norm-1",
+            "Their Checking",
+            "plaid-account-good-norm-1",
+            self.other_user.email,
+        ):
+            self.assertNotIn(forbidden, str(raised.exception))
+            self.assertNotIn(forbidden, repr(raised.exception))

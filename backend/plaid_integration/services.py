@@ -8,10 +8,25 @@ idempotent per-page application of one normalized ``/transactions/sync``
 page (section 7) for issue #38 slice D. One ``transaction.atomic()`` block
 writes the applied rows and the next cursor together; a per-Item row lock
 serializes concurrent syncs; the cursor never moves backward, on failure, or
-on a page that does not continue from the committed state; provider
+on a page that does not continue from the committed state (except by
+replaying the same update after mutation-during-pagination); provider
 quarantines and unmappable-account rows are recorded in bounded redacted
-form on ``last_sync_error`` without ever deadlocking the connection; and
-provider-owned ``Uncategorized`` categories fail closed when archived.
+form on ``last_sync_error`` without ever deadlocking the connection;
+provider-owned ``Uncategorized`` categories fail closed when archived; and the
+bounded sync orchestration plus the section 5 opening-balance anchor (issue
+#38 slice E): ``perform_sync`` decrypts the stored access token (never logged
+or returned), guards blocked connection states without any write, fetches
+pages from the committed cursor through an injected or settings-built
+gateway, imports each page's supported accounts before rows are mapped,
+applies every page through ``apply_sync_page`` so rows, cursor, and status
+commit together, applies the exactly-once anchor only on the drained final
+page (``HISTORICAL_UPDATE_COMPLETE`` with ``has_more=False``) inside that
+page's own atomic block, restarts pagination from the update-start cursor on
+mutation-during-pagination up to a bounded restart budget (a re-applied page
+behind the committed cursor never advances it and contributes nothing to the
+run totals), fails closed on outage, token, anchor, and blocked-page
+conditions without ever advancing the cursor past a committed value, and
+heals the ``error`` status back to ``active`` on a later successful run.
 """
 
 import hashlib
@@ -19,15 +34,19 @@ import hmac
 import secrets
 from dataclasses import dataclass
 from datetime import timedelta
+from decimal import Decimal
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
-from django.db.models import F
-from django.db.models.functions import Lower, Trim
+from django.db.models import DecimalField, F, Q, Sum, Value
+from django.db.models.functions import Coalesce, Lower, Trim
 from django.utils import timezone
 
+from accounts.models import AccountType
 from categories.models import Category, CategoryType
+from plaid_integration.account_import import import_normalized_provider_accounts
+from plaid_integration.gateway import PlaidGateway, PlaidGatewayError
 from plaid_integration.models import (
     PlaidAccountLink,
     PlaidConnection,
@@ -35,6 +54,8 @@ from plaid_integration.models import (
     PlaidExchangeHandle,
     TransactionsUpdateStatus,
 )
+from plaid_integration.token_encryption import TokenCryptoError
+from plaid_integration.transaction_sync import PlaidSyncMutationError
 from transactions.models import Transaction, TransactionSource, TransactionType
 
 EXCHANGE_HANDLE_LIFETIME = timedelta(minutes=30)
@@ -57,6 +78,21 @@ BLOCKED_CURSOR_DETAIL = (
 )
 _PLAID_TRANSACTION_UNIQUE_CONSTRAINT = "transactions_user_plaid_transaction_id_unique"
 _CATEGORY_UNIQUE_CONSTRAINT = "categories_user_name_type_unique"
+
+PAGE_CAP = 20
+MAX_MUTATION_RESTARTS = 2
+
+PROVIDER_HISTORICAL_UPDATE_COMPLETE = "HISTORICAL_UPDATE_COMPLETE"
+
+TOKEN_UNAVAILABLE_DETAIL = (
+    "stored access token is unavailable; requires explicit repair or relink"
+)
+ANCHOR_MISSING_BALANCE_DETAIL = (
+    "linked account has no captured anchor balance; requires explicit repair or relink"
+)
+MUTATION_RESTARTS_EXHAUSTED_DETAIL = (
+    "Plaid reported repeated changes during pagination. Try again later."
+)
 
 _PROVIDER_UPDATE_STATUS_TO_MODEL = {
     "NOT_READY": TransactionsUpdateStatus.NOT_READY,
@@ -225,6 +261,46 @@ class SyncPageResult:
     superseded: int = 0
     skipped: int = 0
     quarantined: int = 0
+
+
+@dataclass(frozen=True)
+class SyncRunResult:
+    """Safe outcome of one bounded sync run; counts only, repr-safe.
+
+    Carries at most booleans and row counts; never cursors, tokens, provider
+    identities, names, amounts, or raw provider values by construction.
+    ``blocked`` is True when the run stopped without applying its requested
+    pages: a guarded connection state, an unavailable token, a provider
+    outage, an exhausted mutation-restart budget, an anchor fail-closed, or
+    a page the page-applier blocked. ``history_complete`` is True only when
+    the run drained the provider's pagination (the final applied page
+    reported ``has_more=False``) and that page reported
+    ``HISTORICAL_UPDATE_COMPLETE``; a run stopped at the page cap reports
+    not complete and resumes later from the committed cursor.
+    ``anchors_applied`` counts the section 5 anchors applied during this run.
+    """
+
+    blocked: bool = False
+    pages_applied: int = 0
+    added: int = 0
+    modified: int = 0
+    removed: int = 0
+    superseded: int = 0
+    skipped: int = 0
+    quarantined: int = 0
+    history_complete: bool = False
+    anchors_applied: int = 0
+
+
+class _AnchorFailClosed(Exception):
+    """Completion was reported but a link cannot be anchored.
+
+    Internal fail-closed marker: the caller's atomic block (the page commit
+    that reports completion) rolls back entirely, so rows, cursor, status,
+    and any partial anchor writes never exist without the history that
+    justifies them. The fixed redacted error is recorded after the rollback
+    and the whole window is re-requested later.
+    """
 
 
 class _ArchivedCategoryError(Exception):
@@ -546,13 +622,39 @@ def apply_sync_page(connection, page, request_cursor=None):
     cursor still advances, so one bad row never deadlocks the connection.
     Returns the repr-safe :class:`SyncPageResult`.
     """
+    result, _ = _apply_sync_page(
+        connection, page, request_cursor=request_cursor, replaying=False
+    )
+    return result
+
+
+def _apply_sync_page(connection, page, request_cursor=None, replaying=False):
+    """Replay-capable core of :func:`apply_sync_page`.
+
+    ``replaying`` is True only for a page fetched as part of a restarted
+    pagination sequence of the same update (``TRANSACTIONS_SYNC_MUTATION_
+    DURING_PAGINATION``): a page that neither continues from the committed
+    cursor nor is the already-committed last page is a re-served page of the
+    same update whose rows are already committed, so it is re-applied
+    idempotently and the cursor stays put. The cursor never moves backward
+    past a committed value except by replaying the same update
+    (``docs/plaid.md`` section 7). The flag is private to the sync run's
+    restart path; the public :func:`apply_sync_page` never re-serves pages
+    behind the committed cursor.
+
+    Returns the repr-safe :class:`SyncPageResult` and whether the page
+    actually advanced the committed cursor (a re-applied page from behind
+    the cursor contributes nothing to a run's totals because its rows are
+    already stored).
+    """
     with transaction.atomic():
         conn = PlaidConnection.objects.select_for_update().get(pk=connection.pk)
         replayed = conn.sync_cursor == page.next_cursor
-        if not replayed and conn.sync_cursor != request_cursor:
+        fresh = conn.sync_cursor == request_cursor
+        if not replayed and not fresh and not replaying:
             _replace_owned_error(conn, _owned_error(BLOCKED_CURSOR_DETAIL))
             conn.save(update_fields=["last_sync_error"])
-            return SyncPageResult(applied=False)
+            return SyncPageResult(applied=False), False
         try:
             categories = {
                 TransactionType.INCOME: _ensure_provider_category(
@@ -565,7 +667,7 @@ def apply_sync_page(connection, page, request_cursor=None):
         except _ArchivedCategoryError:
             _replace_owned_error(conn, _owned_error(ARCHIVED_CATEGORY_DETAIL))
             conn.save(update_fields=["last_sync_error"])
-            return SyncPageResult(applied=False)
+            return SyncPageResult(applied=False), False
 
         account_map = _linked_account_map(conn)
         counters = _PageCounters()
@@ -586,7 +688,8 @@ def apply_sync_page(connection, page, request_cursor=None):
         elif conn.last_sync_error.startswith(SYNC_ERROR_TAG):
             conn.last_sync_error = ""
 
-        conn.sync_cursor = page.next_cursor
+        if fresh:
+            conn.sync_cursor = page.next_cursor
         conn.transactions_update_status = _PROVIDER_UPDATE_STATUS_TO_MODEL[
             page.transactions_update_status
         ]
@@ -600,12 +703,396 @@ def apply_sync_page(connection, page, request_cursor=None):
             ]
         )
 
-    return SyncPageResult(
-        applied=True,
-        added=counters.added,
-        modified=counters.modified,
-        removed=counters.removed,
-        superseded=counters.superseded,
-        skipped=counters.skipped,
-        quarantined=len(page.quarantines),
+    return (
+        SyncPageResult(
+            applied=True,
+            added=counters.added,
+            modified=counters.modified,
+            removed=counters.removed,
+            superseded=counters.superseded,
+            skipped=counters.skipped,
+            quarantined=len(page.quarantines),
+        ),
+        fresh,
     )
+
+
+def _decrypt_access_token(connection):
+    """Return the plaintext access token, or None when it is unavailable.
+
+    Decrypts the stored package with the configured key ring. A missing
+    stored token, a missing key ring, or an undecryptable package is an
+    error state. The plaintext is held in memory only for the outgoing
+    gateway calls and is never logged, stored, interpolated, or returned.
+    """
+    ring = settings.PLAID_TOKEN_RING
+    package = connection.access_token_encrypted
+    key_id = connection.encryption_key_id
+    if ring is None or not package or not key_id:
+        return None
+    try:
+        decrypted = ring.decrypt(package, key_id)
+    except TokenCryptoError:
+        return None
+    return decrypted.plaintext.decode()
+
+
+def _record_owned_error(connection, message):
+    """Record ``message`` through the owned-error convention, nothing else.
+
+    Writes only when the field is empty or already ours, so an unrelated
+    error is preserved exactly; the row is briefly locked for the read-check
+    and write. Never touches the cursor or status.
+    """
+    with transaction.atomic():
+        conn = PlaidConnection.objects.select_for_update().get(pk=connection.pk)
+        _replace_owned_error(conn, message)
+        conn.save(update_fields=["last_sync_error"])
+
+
+def _record_outage_error(connection, detail):
+    """Record the fixed redacted outage detail and set the ``error`` status.
+
+    The cursor is never touched: it stays exactly where the last committed
+    page put it, so a later retry is always safe (``docs/plaid.md`` section
+    9). A previously recorded error tag that is not ours is preserved.
+    """
+    with transaction.atomic():
+        conn = PlaidConnection.objects.select_for_update().get(pk=connection.pk)
+        _replace_owned_error(conn, _owned_error(detail))
+        conn.status = PlaidConnectionStatus.ERROR
+        conn.save(update_fields=["last_sync_error", "status"])
+
+
+def _record_anchor_error(connection):
+    """Record the anchor fail-closed reason unconditionally.
+
+    The whole window is blocked by the missing anchor balance, so the reason
+    the run stopped must be the anchor reason even when the shared field
+    already carries another owned summary (for example an account-import
+    tag): the user must be able to see why nothing was applied. Only the
+    fixed redacted reason is written; the cursor, status, and rows are never
+    touched, and the window is re-requested later.
+    """
+    with transaction.atomic():
+        conn = PlaidConnection.objects.select_for_update().get(pk=connection.pk)
+        conn.last_sync_error = _owned_error(ANCHOR_MISSING_BALANCE_DETAIL)
+        conn.save(update_fields=["last_sync_error"])
+
+
+def _restore_active_status(connection):
+    """Heal the connection status back to ``active`` after a successful run.
+
+    Called only when a pagination attempt completed without blocking. Sets
+    ``status`` to ``active`` if and only if it is currently ``error`` (the
+    single transient provider-outage symptom); every other status is left
+    untouched, and the cursor and ``last_sync_error`` are never written. The
+    row is briefly locked so the status-only update is atomic and never
+    bypasses the page commit block (``docs/plaid.md`` section 9).
+    """
+    with transaction.atomic():
+        conn = PlaidConnection.objects.select_for_update().get(pk=connection.pk)
+        if conn.status == PlaidConnectionStatus.ERROR:
+            conn.status = PlaidConnectionStatus.ACTIVE
+            conn.save(update_fields=["status"])
+
+
+def _import_page_accounts(connection, page):
+    """Import the page's supported provider accounts before rows are mapped.
+
+    The page already carries normalized account outcomes, so they are passed
+    to the normalized import entry point directly and never re-derived from
+    raw provider shapes. Idempotent and safe to repeat on a replay. The
+    import runs in its own atomic block, before the page apply; a page that
+    later fails still leaves only unanchored accounts, which contribute
+    exact zero to every aggregate by construction (``docs/plaid.md`` section
+    5).
+    """
+    supported = [outcome for outcome in page.account_outcomes if not outcome.skipped]
+    if not supported:
+        return
+    import_normalized_provider_accounts(connection, supported)
+
+
+def _apply_anchors(connection):
+    """Apply the section 5 opening-balance anchor inside the caller's atomic block.
+
+    Called only for a page whose commit reports ``HISTORICAL_UPDATE_COMPLETE``
+    and is the drained final page of the window (``has_more=False``), so the
+    anchor is pinned against the complete imported history, never a partial
+    one. For every link of this connection whose ``anchor_applied_at`` is still
+    null, the opening balance is seeded from the immutable captured anchor
+    balance and the sums of the imported POSTED rows only (pending,
+    provider-removed, and superseded rows are excluded), per the frozen
+    formulas:
+
+    - checking and savings:
+        opening_balance = anchor_provider_current_balance
+                        - (posted_income - posted_expense)
+    - credit card (a negative liability in Mohr):
+        opening_balance = -anchor_provider_current_balance
+                        - (posted_income - posted_expense)
+
+    The linked Account's ``opening_balance`` and the link's
+    ``anchor_applied_at`` are written here so they commit together with the
+    page rows and cursor that justify them, and the ``anchor_applied_at IS
+    NULL`` guard makes a replayed completion page a no-op. Malformed links
+    whose user or linked account belongs to another user, or whose Account
+    type is not a supported account class, are never written. A link without
+    a captured anchor balance fails closed with :class:`_AnchorFailClosed`
+    so the whole page commit rolls back and the window is re-requested later.
+    """
+    links = PlaidAccountLink.objects.filter(
+        connection=connection,
+        anchor_applied_at__isnull=True,
+    ).select_related("account")
+    applied = 0
+    for link in links:
+        if (
+            link.user_id != connection.user_id
+            or link.account.user_id != connection.user_id
+        ):
+            continue
+        if link.account.account_type not in (
+            AccountType.CHECKING,
+            AccountType.SAVINGS,
+            AccountType.CREDIT_CARD,
+        ):
+            continue
+        if link.anchor_provider_current_balance is None:
+            raise _AnchorFailClosed()
+        totals = Transaction.objects.filter(
+            user=connection.user,
+            connection=connection,
+            account_id=link.account_id,
+            is_provider_removed=False,
+            is_pending=False,
+            is_superseded=False,
+        ).aggregate(
+            income=Coalesce(
+                Sum("amount", filter=Q(transaction_type=TransactionType.INCOME)),
+                Value(Decimal("0.00")),
+                output_field=DecimalField(max_digits=30, decimal_places=2),
+            ),
+            expense=Coalesce(
+                Sum("amount", filter=Q(transaction_type=TransactionType.EXPENSE)),
+                Value(Decimal("0.00")),
+                output_field=DecimalField(max_digits=30, decimal_places=2),
+            ),
+        )
+        net_income = totals["income"] - totals["expense"]
+        anchor = link.anchor_provider_current_balance
+        if link.account.account_type == AccountType.CREDIT_CARD:
+            opening_balance = -anchor - net_income
+        else:
+            opening_balance = anchor - net_income
+        link.account.opening_balance = opening_balance
+        link.account.save(update_fields=["opening_balance"])
+        link.anchor_applied_at = timezone.now()
+        link.save(update_fields=["anchor_applied_at"])
+        applied += 1
+    return applied
+
+
+def _blocked_run(state):
+    """The repr-safe blocked result carrying the run's counts so far."""
+    return SyncRunResult(
+        blocked=True,
+        pages_applied=state.pages_applied,
+        added=state.added,
+        modified=state.modified,
+        removed=state.removed,
+        superseded=state.superseded,
+        skipped=state.skipped,
+        quarantined=state.quarantined,
+    )
+
+
+@dataclass
+class _SyncRunState:
+    """Mutable per-run counts shared across mutation-restart attempts.
+
+    A restarted pagination attempt re-applies already-committed pages, so the
+    run totals must survive the abort of the attempt that raised
+    ``TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION``. Only pages that
+    actually advanced the committed cursor contribute to the totals; a
+    re-applied page from behind the cursor contributes nothing because its
+    rows are already stored. Only counts and booleans live here; cursors,
+    tokens, and provider values never do.
+    """
+
+    pages_applied: int = 0
+    added: int = 0
+    modified: int = 0
+    removed: int = 0
+    superseded: int = 0
+    skipped: int = 0
+    quarantined: int = 0
+    anchors_applied: int = 0
+    history_complete: bool = False
+
+
+def _run_pagination_attempt(
+    connection, gateway, access_token, start_cursor, page_cap, state, replaying
+):
+    """One pagination sequence starting from ``start_cursor``.
+
+    Fetches pages and, per page in order: imports the supported accounts
+    carried on the page so linked Mohr accounts exist before rows are mapped,
+    then applies the page through the private replay-capable page applier so
+    rows and the new cursor commit in one atomic block; when that page
+    reports ``HISTORICAL_UPDATE_COMPLETE`` AND is the drained final page
+    (``has_more=False``) the section 5 anchor is applied in the same block,
+    so the anchor commits exactly with the complete history window. Stops at
+    the page cap (reported not complete) or when the provider reports
+    ``has_more=False``. ``request_cursor`` is always the
+    exact cursor sent to the provider for that page, so an already-committed
+    page from a previous attempt re-applies idempotently and the cursor never
+    moves backward past a committed value. ``replaying`` is True for a
+    restarted sequence (mutation-during-pagination), which is the one legal
+    case for re-serving pages behind the committed cursor
+    (``docs/plaid.md`` section 7). ``state`` accumulates the run totals so
+    counts survive an aborted attempt; a page only contributes to the
+    totals when it actually advanced the committed cursor, so re-applied
+    pages from behind the cursor are never double-counted. Returns None on
+    success or the repr-safe blocked :class:`SyncRunResult` when a page
+    blocked the run. Provider error conditions (outage,
+    mutation-during-pagination) propagate to the caller.
+    """
+    request_cursor = start_cursor
+    while state.pages_applied < page_cap:
+        page = gateway.sync_transactions(access_token, cursor=request_cursor)
+        _import_page_accounts(connection, page)
+        try:
+            with transaction.atomic():
+                page_result, cursor_advanced = _apply_sync_page(
+                    connection,
+                    page,
+                    request_cursor=request_cursor,
+                    replaying=replaying,
+                )
+                if (
+                    page_result.applied
+                    and page.transactions_update_status
+                    == PROVIDER_HISTORICAL_UPDATE_COMPLETE
+                    and not page.has_more
+                ):
+                    state.anchors_applied += _apply_anchors(connection)
+        except _AnchorFailClosed:
+            _record_anchor_error(connection)
+            return _blocked_run(state)
+        if not page_result.applied:
+            return _blocked_run(state)
+        if cursor_advanced:
+            state.pages_applied += 1
+            state.added += page_result.added
+            state.modified += page_result.modified
+            state.removed += page_result.removed
+            state.superseded += page_result.superseded
+            state.skipped += page_result.skipped
+            state.quarantined += page_result.quarantined
+        request_cursor = page.next_cursor
+        if not page.has_more:
+            state.history_complete = (
+                page.transactions_update_status == PROVIDER_HISTORICAL_UPDATE_COMPLETE
+            )
+            break
+
+
+def perform_sync(
+    connection,
+    *,
+    gateway=None,
+    page_cap=PAGE_CAP,
+    max_mutation_restarts=MAX_MUTATION_RESTARTS,
+):
+    """Drive one bounded sync of ONE PlaidConnection (issue #38 slice E).
+
+    ``gateway`` is injectable so tests never touch the network; when it is
+    not supplied it is built from settings (constructing it performs no
+    network call). The stored access token is decrypted with the configured
+    key ring and held in memory only for the gateway calls; a missing or
+    undecryptable token blocks the run with the fixed redacted owned error
+    and no other write. A ``disconnected``, ``revoked``, or ``updating``
+    connection is blocked without any fetch or write.
+
+    Pages are fetched from the connection's committed cursor (none on the
+    initial call) and applied one at a time: the supported accounts carried
+    on the page are imported first (idempotent), then the page applier
+    commits the rows, the cursor, and the status in one atomic block, and
+    the opening-balance anchor is applied in that same block only when the
+    page reports ``HISTORICAL_UPDATE_COMPLETE`` and is the drained final
+    page (``has_more=False``). Pagination continues while ``has_more`` and
+    the page cap allow; a run stopped at the cap is reported not complete
+    and resumes later from the committed cursor.
+
+    A ``TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION`` error restarts the
+    whole pagination sequence from the cursor held at the start of that
+    update, re-applying already-committed pages idempotently, up to
+    ``max_mutation_restarts`` restarts; a re-applied page from behind the
+    committed cursor never advances it and contributes nothing to the run
+    totals. Exhausting the restarts blocks with a fixed
+    redacted error and the cursor at its last committed value. A provider
+    outage blocks with the fixed redacted detail, sets the ``error`` status,
+    and never moves the cursor, so a later retry is always safe; a later run
+    that completes without blocking heals the status back to ``active``.
+    Returns the repr-safe :class:`SyncRunResult`; provider conditions never
+    raise.
+    """
+    if gateway is None:
+        gateway = PlaidGateway.from_settings()
+
+    conn = PlaidConnection.objects.get(pk=connection.pk)
+    if conn.status in (
+        PlaidConnectionStatus.DISCONNECTED,
+        PlaidConnectionStatus.REVOKED,
+        PlaidConnectionStatus.UPDATING,
+    ):
+        return SyncRunResult(blocked=True)
+
+    access_token = _decrypt_access_token(conn)
+    if access_token is None:
+        _record_owned_error(conn, _owned_error(TOKEN_UNAVAILABLE_DETAIL))
+        return SyncRunResult(blocked=True)
+
+    start_cursor = conn.sync_cursor
+    state = _SyncRunState()
+    restarts_left = max_mutation_restarts
+    replaying = False
+    while True:
+        try:
+            result = _run_pagination_attempt(
+                conn,
+                gateway,
+                access_token,
+                start_cursor,
+                page_cap,
+                state,
+                replaying,
+            )
+            if result is not None:
+                return result
+            _restore_active_status(conn)
+            return SyncRunResult(
+                blocked=False,
+                pages_applied=state.pages_applied,
+                added=state.added,
+                modified=state.modified,
+                removed=state.removed,
+                superseded=state.superseded,
+                skipped=state.skipped,
+                quarantined=state.quarantined,
+                history_complete=state.history_complete,
+                anchors_applied=state.anchors_applied,
+            )
+        except PlaidSyncMutationError:
+            if restarts_left <= 0:
+                _record_owned_error(
+                    conn, _owned_error(MUTATION_RESTARTS_EXHAUSTED_DETAIL)
+                )
+                return _blocked_run(state)
+            restarts_left -= 1
+            replaying = True
+        except PlaidGatewayError as exc:
+            _record_outage_error(conn, str(exc))
+            return _blocked_run(state)
