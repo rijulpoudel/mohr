@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { type AccountType } from '../api/accounts'
 import {
   fetchPlaidConnections,
@@ -7,6 +7,7 @@ import {
 } from '../api/plaid'
 import { ApiError, userMessage } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
+import { ConnectBankButton } from './ConnectBankButton'
 
 const GENERIC_ERROR_MESSAGE = 'Something went wrong. Please try again.'
 
@@ -189,6 +190,10 @@ export function ConnectionsScreen() {
     setAttempt((current) => current + 1)
   }
 
+  const handleConnectionAdded = useCallback(() => {
+    setAttempt((current) => current + 1)
+  }, [])
+
   if (state.status === 'loading') {
     return (
       <div className="screen">
@@ -215,6 +220,7 @@ export function ConnectionsScreen() {
   return (
     <div className="screen">
       <h2>Connections</h2>
+      <ConnectBankButton onConnectionAdded={handleConnectionAdded} />
       {state.connections.length === 0 ? (
         <p className="empty-state">
           No bank connections yet. Connections you add will appear here.

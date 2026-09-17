@@ -774,6 +774,10 @@ a {
   border-top: 1px solid var(--color-border);
 }
 
+.connect-bank {
+  margin-block-end: var(--space-6);
+}
+
 .connection-item {
   padding-block: var(--space-3);
   border-bottom: 1px solid var(--color-border);

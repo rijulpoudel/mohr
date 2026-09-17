@@ -13,6 +13,16 @@ import {
   CONNECTION_STALE_AFTER_MS,
 } from './ConnectionsScreen'
 
+vi.mock('react-plaid-link', () => ({
+  usePlaidLink: vi.fn(() => ({
+    open: vi.fn(),
+    exit: vi.fn(),
+    ready: true,
+    error: null,
+    submit: vi.fn(),
+  })),
+}))
+
 const TIMESTAMP = '2026-09-11T14:52:48.008850Z'
 
 function linkedAccountFixture(overrides: Record<string, unknown> = {}) {
@@ -233,13 +243,16 @@ describe('connections list', () => {
     expect(screen.queryByRole('status')).not.toBeInTheDocument()
   })
 
-  it('shows meaningful empty text without a list or fake connect control', async () => {
+  it('shows meaningful empty text with the real connect control', async () => {
     installFetchMock(authenticatedHandler(() => jsonResponse([])))
     renderApp('/connections')
 
     expect(await screen.findByText(/No bank connections yet/)).toBeInTheDocument()
     expect(screen.queryByRole('listitem')).not.toBeInTheDocument()
-    expect(screen.queryByRole('button')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Connect a bank' })).toHaveAttribute(
+      'type',
+      'button',
+    )
   })
 
   it('renders every lifecycle label and never claims a disconnected card is syncing', async () => {
