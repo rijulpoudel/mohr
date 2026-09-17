@@ -359,6 +359,35 @@ class WebhookEndpointNoOpTests(WebhookEndpointBase):
         self.connection.refresh_from_db()
         self.assertFalse(self.connection.sync_due)
 
+    def test_transaction_connection_disappears_between_lookup_and_lock(self):
+        body = webhook_body()
+        header = signed_header(body)
+        real_filter = PlaidConnection.objects.filter
+
+        def disappearing_filter(*args, **kwargs):
+            queryset = real_filter(*args, **kwargs)
+            stale_connection = queryset.first()
+            if stale_connection is not None:
+                stale_connection.delete()
+
+            class StaleQuerySet:
+                def first(self):
+                    return stale_connection
+
+            return StaleQuerySet()
+
+        with patched_gateway():
+            with patch.object(
+                PlaidConnection.objects,
+                "filter",
+                side_effect=disappearing_filter,
+            ):
+                response = self.post_webhook(body, header=header)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json(), WEBHOOK_RECEIVED_RESPONSE)
+        self.assertEqual(PlaidWebhookEvent.objects.count(), 0)
+
 
 class WebhookEndpointDuplicateTests(WebhookEndpointBase):
     def test_duplicate_exact_body_returns_200_single_row_and_connection_not_modified(

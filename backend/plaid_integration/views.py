@@ -325,6 +325,8 @@ def webhook_transactions(request):
                 {"detail": WEBHOOK_INBOX_FULL_DETAIL},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
+        except PlaidConnection.DoesNotExist:
+            return Response(WEBHOOK_RECEIVED_RESPONSE)
         return Response(WEBHOOK_RECEIVED_RESPONSE)
     if (
         payload.webhook_type == _WEBHOOK_TYPE_ITEM
