@@ -195,49 +195,113 @@ def _constraint_name(integrity_error):
     return getattr(getattr(cause, "diag", None), "constraint_name", None)
 
 
-def persist_exchange_connection(user, item_id, institution_name, token_package, key_id):
-    """Persist one encrypted connection from provider exchange data.
+@dataclass(frozen=True)
+class PlaidExchangeResult:
+    """Safe outcome of one exchange persistence; never carries provider data.
 
-    Provider-derived values are validated before anything is persisted: the
-    ``item_id`` must be a nonempty string within the model bound, and the
-    ``institution_name`` must be None or a string. Blank institution names
-    normalize to ``UNKNOWN_INSTITUTION``; values that exceed the model
-    bounds, or the wrong type, fail as a safe provider error and nothing is
-    persisted. The provider item id is never truncated (the display
-    institution name is bounded deliberately to the model maximum).
-    ``full_clean()`` enforces the model bounds; the database constraints
-    (the globally unique item id and the status checks) are enforced by the
-    insert itself. An already-existing Item (the globally unique item id)
-    surfaces as :class:`PlaidExchangeDuplicateItem` without touching the
-    existing row, whether detected as the concurrent-insert race at save
-    time or against an already-committed duplicate. Unrelated integrity
-    errors propagate.
+    Carries the persisted (created or healed) connection and whether it was
+    newly created, so the view can choose 201 vs 200 with the same body
+    shape. Never carries token material, key ids, item ids, or cursors.
+    """
+
+    connection: PlaidConnection
+    created: bool
+
+
+def _heal_institution_name(institution_name):
+    """Return the stripped bounded name to store, or None to keep stored."""
+    if not isinstance(institution_name, str):
+        return None
+    stripped = institution_name.strip()
+    if not stripped:
+        return None
+    if len(stripped) > EXCHANGE_INSTITUTION_MAX_LENGTH:
+        return None
+    return stripped
+
+
+def persist_exchange_connection(user, item_id, institution_name, token_package, key_id):
+    """Persist one encrypted connection or heal the same-user same-Item row.
+
+    ``docs/plaid.md`` section 9 relink: a same-``item_id`` exchange by the
+    SAME authenticated user HEALS the existing connection (new token package
+    pair verbatim, ``status=active``, ``sync_due=True``, conditional
+    institution-name update, un-archived own linked accounts, deleted stale
+    removal row) while preserving ``sync_cursor``,
+    ``transactions_update_status``, ``last_synced_at``, link rows, and
+    ``Transaction`` rows. A same-``item_id`` exchange by a DIFFERENT user
+    raises :class:`PlaidExchangeDuplicateItem` without mutating anything. A
+    genuinely new ``item_id`` creates a new connection with the existing
+    validation (blank names normalize to ``UNKNOWN_INSTITUTION``, overlong
+    or wrong-type values raise :class:`PlaidExchangeProviderDataError`).
+
+    The lookup, heal, and create run inside one ``transaction.atomic()``
+    block with ``select_for_update()`` on the existing row when one exists;
+    the item-id unique violation still translates to the same safe duplicate
+    failure for the concurrent-insert race. Unrelated integrity errors
+    propagate. Returns the repr-safe :class:`PlaidExchangeResult`.
     """
     if not isinstance(item_id, str) or not item_id:
         raise PlaidExchangeProviderDataError()
     if len(item_id) > EXCHANGE_ITEM_ID_MAX_LENGTH:
         raise PlaidExchangeProviderDataError()
-    if institution_name is not None and not isinstance(institution_name, str):
-        raise PlaidExchangeProviderDataError()
-    display_name = (institution_name or "").strip() or UNKNOWN_INSTITUTION
-    if len(display_name) > EXCHANGE_INSTITUTION_MAX_LENGTH:
-        raise PlaidExchangeProviderDataError()
-    connection = PlaidConnection(
-        user=user,
-        item_id=item_id,
-        access_token_encrypted=token_package,
-        encryption_key_id=key_id,
-        institution_name=display_name,
-        status=PlaidConnectionStatus.ACTIVE,
-        transactions_update_status=TransactionsUpdateStatus.NOT_READY,
-    )
-    try:
-        connection.full_clean(validate_unique=False, validate_constraints=False)
-    except ValidationError:
-        raise PlaidExchangeProviderDataError() from None
     try:
         with transaction.atomic():
+            try:
+                existing = PlaidConnection.objects.select_for_update().get(
+                    item_id=item_id
+                )
+            except PlaidConnection.DoesNotExist:
+                existing = None
+            if existing is not None:
+                if existing.user_id != user.pk:
+                    raise PlaidExchangeDuplicateItem()
+                existing.access_token_encrypted = token_package
+                existing.encryption_key_id = key_id
+                existing.status = PlaidConnectionStatus.ACTIVE
+                existing.sync_due = True
+                new_name = _heal_institution_name(institution_name)
+                update_fields = [
+                    "access_token_encrypted",
+                    "encryption_key_id",
+                    "status",
+                    "sync_due",
+                ]
+                if new_name is not None:
+                    existing.institution_name = new_name
+                    update_fields.append("institution_name")
+                existing.save(update_fields=update_fields)
+                PlaidItemRemovalRequest.objects.filter(connection=existing).delete()
+                links = PlaidAccountLink.objects.filter(
+                    connection=existing
+                ).select_related("account")
+                for link in links:
+                    if link.account.user_id != existing.user_id:
+                        continue
+                    if link.account.is_archived:
+                        link.account.is_archived = False
+                        link.account.save(update_fields=["is_archived"])
+                return PlaidExchangeResult(connection=existing, created=False)
+            if institution_name is not None and not isinstance(institution_name, str):
+                raise PlaidExchangeProviderDataError()
+            display_name = (institution_name or "").strip() or UNKNOWN_INSTITUTION
+            if len(display_name) > EXCHANGE_INSTITUTION_MAX_LENGTH:
+                raise PlaidExchangeProviderDataError()
+            connection = PlaidConnection(
+                user=user,
+                item_id=item_id,
+                access_token_encrypted=token_package,
+                encryption_key_id=key_id,
+                institution_name=display_name,
+                status=PlaidConnectionStatus.ACTIVE,
+                transactions_update_status=TransactionsUpdateStatus.NOT_READY,
+            )
+            try:
+                connection.full_clean(validate_unique=False, validate_constraints=False)
+            except ValidationError:
+                raise PlaidExchangeProviderDataError() from None
             connection.save()
+            return PlaidExchangeResult(connection=connection, created=True)
     except IntegrityError as exc:
         constraint_name = _constraint_name(exc)
         if constraint_name is not None:
@@ -251,7 +315,6 @@ def persist_exchange_connection(user, item_id, institution_name, token_package, 
         if PlaidConnection.objects.filter(item_id=item_id).exists():
             raise PlaidExchangeDuplicateItem() from None
         raise
-    return connection
 
 
 _WEBHOOK_EVENT_IDEMPOTENCY_UNIQUE = "plaid_webhook_event_idempotency_key_unique"

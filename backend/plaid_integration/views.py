@@ -483,7 +483,7 @@ def exchange(request):
         exchanged.access_token.encode("utf-8")
     )
     try:
-        connection = persist_exchange_connection(
+        result = persist_exchange_connection(
             request.user,
             exchanged.item_id,
             item.institution_name,
@@ -501,6 +501,7 @@ def exchange(request):
             status=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
 
+    connection = result.connection
     return Response(
         {
             "connection": {
@@ -510,7 +511,7 @@ def exchange(request):
                 "linked_accounts": [],
             }
         },
-        status=status.HTTP_201_CREATED,
+        status=(status.HTTP_201_CREATED if result.created else status.HTTP_200_OK),
     )
 
 
