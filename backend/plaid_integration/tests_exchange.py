@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import secrets
+import traceback
 from datetime import timedelta
 from unittest.mock import patch
 
@@ -63,6 +64,8 @@ from plaid_integration.token_encryption import TokenKeyRing
 SYNTHETIC_ACCESS_TOKEN = "access-sandbox-00000000-0000-0000-0000-000000000000"
 SYNTHETIC_PUBLIC_TOKEN = "public-sandbox-00000000-0000-0000-0000-000000000000"
 SYNTHETIC_ITEM_ID = "item-sandbox-00000000000000000000000000"
+
+RAW_PROVIDER_BODY_MARKER = "RAW-PROVIDER-BODY-MARKER"
 
 _TEST_KEY = Fernet.generate_key().decode()
 SYNTHETIC_RING = TokenKeyRing([("key-a", _TEST_KEY)])
@@ -370,6 +373,146 @@ class ExchangeGatewayTests(SimpleTestCase):
             "secret-test",
         ):
             self.assertNotIn(forbidden, log_text)
+
+    def test_exchange_invalid_400_suppresses_cause_and_never_renders_body(self):
+        error = api_error(
+            400,
+            {
+                "error_type": "INVALID_INPUT",
+                "error_code": "INVALID_PUBLIC_TOKEN",
+                "error_message": (
+                    f"{RAW_PROVIDER_BODY_MARKER} {SYNTHETIC_PUBLIC_TOKEN} "
+                    f"{SYNTHETIC_ACCESS_TOKEN}"
+                ),
+                "request_id": "req-invalid-1",
+            },
+        )
+
+        with self.assertNoLogs("plaid_integration.gateway", level=logging.WARNING):
+            with self.assertRaises(PlaidExchangeInvalidError) as raised:
+                gateway_for(FakePlaidApi(exchange_error=error)).exchange_public_token(
+                    SYNTHETIC_PUBLIC_TOKEN
+                )
+
+        exception = raised.exception
+        self.assertIsNone(exception.__cause__)
+        self.assertEqual(str(exception), "")
+        formatted = "".join(traceback.format_exception(exception))
+        for forbidden in (
+            RAW_PROVIDER_BODY_MARKER,
+            SYNTHETIC_PUBLIC_TOKEN,
+            SYNTHETIC_ACCESS_TOKEN,
+            "req-invalid-1",
+        ):
+            self.assertNotIn(forbidden, str(exception))
+            self.assertNotIn(forbidden, repr(exception))
+            self.assertNotIn(forbidden, formatted)
+
+    def test_exchange_outage_and_transport_suppress_cause_and_never_render_body(self):
+        outage = api_error(
+            500,
+            {
+                "error_type": "API_ERROR",
+                "error_code": "PROVIDER_ERROR",
+                "error_message": (
+                    f"{RAW_PROVIDER_BODY_MARKER} {SYNTHETIC_PUBLIC_TOKEN} "
+                    f"{SYNTHETIC_ACCESS_TOKEN}"
+                ),
+                "request_id": "req-outage-1",
+            },
+        )
+
+        for error in (
+            outage,
+            TimeoutError("Connection timed out"),
+            ProtocolError("Connection aborted."),
+        ):
+            with self.subTest(error=error):
+                with self.assertLogs(
+                    "plaid_integration.gateway", level=logging.WARNING
+                ) as captured:
+                    with self.assertRaises(PlaidGatewayError) as raised:
+                        gateway_for(
+                            FakePlaidApi(exchange_error=error)
+                        ).exchange_public_token(SYNTHETIC_PUBLIC_TOKEN)
+
+                exception = raised.exception
+                self.assertIsNone(exception.__cause__)
+                self.assertEqual(str(exception), PLAID_UNAVAILABLE_DETAIL)
+                formatted = "".join(traceback.format_exception(exception))
+                for forbidden in (
+                    RAW_PROVIDER_BODY_MARKER,
+                    SYNTHETIC_PUBLIC_TOKEN,
+                    SYNTHETIC_ACCESS_TOKEN,
+                    "req-outage-1",
+                ):
+                    self.assertNotIn(forbidden, str(exception))
+                    self.assertNotIn(forbidden, repr(exception))
+                    self.assertNotIn(forbidden, formatted)
+                log_text = "\n".join(captured.output)
+                self.assertEqual(len(captured.output), 1)
+                self.assertIn("Plaid public token exchange failed.", log_text)
+                for forbidden in (
+                    RAW_PROVIDER_BODY_MARKER,
+                    SYNTHETIC_PUBLIC_TOKEN,
+                    SYNTHETIC_ACCESS_TOKEN,
+                    "req-outage-1",
+                ):
+                    self.assertNotIn(forbidden, log_text)
+
+    def test_item_get_failures_suppress_cause_and_never_render_body(self):
+        errors = [
+            api_error(
+                500,
+                {
+                    "error_type": "API_ERROR",
+                    "error_code": "PROVIDER_ERROR",
+                    "error_message": (
+                        f"{RAW_PROVIDER_BODY_MARKER} {SYNTHETIC_ACCESS_TOKEN}"
+                    ),
+                    "request_id": "req-item-1",
+                },
+            ),
+            api_error(
+                400,
+                {"error_message": f"{RAW_PROVIDER_BODY_MARKER} invalid token"},
+            ),
+            TimeoutError("Connection timed out"),
+            ProtocolError("Connection aborted."),
+        ]
+        for error in errors:
+            with self.subTest(error=error):
+                with self.assertLogs(
+                    "plaid_integration.gateway", level=logging.WARNING
+                ) as captured:
+                    with self.assertRaises(PlaidGatewayError) as raised:
+                        gateway_for(FakePlaidApi(item_error=error)).get_item(
+                            SYNTHETIC_ACCESS_TOKEN
+                        )
+
+                exception = raised.exception
+                self.assertIsNone(exception.__cause__)
+                self.assertEqual(str(exception), PLAID_UNAVAILABLE_DETAIL)
+                formatted = "".join(traceback.format_exception(exception))
+                for forbidden in (
+                    RAW_PROVIDER_BODY_MARKER,
+                    SYNTHETIC_ACCESS_TOKEN,
+                    SYNTHETIC_PUBLIC_TOKEN,
+                    "req-item-1",
+                ):
+                    self.assertNotIn(forbidden, str(exception))
+                    self.assertNotIn(forbidden, repr(exception))
+                    self.assertNotIn(forbidden, formatted)
+                log_text = "\n".join(captured.output)
+                self.assertEqual(len(captured.output), 1)
+                self.assertIn("Plaid item lookup failed.", log_text)
+                for forbidden in (
+                    RAW_PROVIDER_BODY_MARKER,
+                    SYNTHETIC_ACCESS_TOKEN,
+                    SYNTHETIC_PUBLIC_TOKEN,
+                    "req-item-1",
+                ):
+                    self.assertNotIn(forbidden, log_text)
 
 
 class ClaimExchangeHandleTests(TestCase):

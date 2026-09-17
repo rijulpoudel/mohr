@@ -6,10 +6,13 @@ internals. The SDK client is built lazily from settings per request and
 never at import time; constructing it performs no network call. Every
 provider failure (API error, timeout, outage) is normalized to a fixed safe
 error that never carries response bodies, credentials, tokens, or key
-material. Permanent access tokens and public tokens are excluded from
+material. The chained provider exception is suppressed (``raise ... from
+None``) so a formatted traceback can never render the raw provider payload.
+Permanent access tokens and public tokens are excluded from
 result ``repr`` forms by construction.
 """
 
+import json
 import logging
 from dataclasses import dataclass, field
 
@@ -25,6 +28,7 @@ from plaid.model.link_token_create_request import LinkTokenCreateRequest
 from plaid.model.link_token_create_request_user import LinkTokenCreateRequestUser
 from plaid.model.link_token_transactions import LinkTokenTransactions
 from plaid.model.products import Products
+from plaid.model.transactions_sync_request import TransactionsSyncRequest
 from urllib3.exceptions import HTTPError
 
 logger = logging.getLogger(__name__)
@@ -46,6 +50,30 @@ class PlaidExchangeInvalidError(Exception):
     client cannot distinguish a bad public token from a bad handle. Never
     carries a provider body.
     """
+
+
+def _is_mutation_during_pagination(exc):
+    """True only when the structured provider error body names the exact code.
+
+    The provider error body is parsed as JSON and its ``error_code`` field
+    must equal ``TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION`` exactly; the
+    body is never logged, returned, or retained. A body that is not a JSON
+    object, or lacks the exact structured field, is never classified as the
+    mutation error and falls back to the fixed safe provider failure. This
+    deliberately avoids substring classification over an arbitrary response.
+    """
+    from plaid_integration.transaction_sync import MUTATION_DURING_PAGINATION_CODE
+
+    body = getattr(exc, "body", None)
+    if not isinstance(body, str) or not body:
+        return False
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return payload.get("error_code") == MUTATION_DURING_PAGINATION_CODE
 
 
 @dataclass(frozen=True)
@@ -119,9 +147,9 @@ class PlaidGateway:
                 link_token_create_request=request,
                 _request_timeout=PLAID_REQUEST_TIMEOUT_SECONDS,
             )
-        except (ApiException, HTTPError, TimeoutError) as exc:
+        except (ApiException, HTTPError, TimeoutError):
             logger.warning("Plaid link token creation failed.")
-            raise PlaidGatewayError(PLAID_UNAVAILABLE_DETAIL) from exc
+            raise PlaidGatewayError(PLAID_UNAVAILABLE_DETAIL) from None
 
     def exchange_public_token(self, public_token):
         """Exchange a server-only one-time public token for an access token.
@@ -147,12 +175,12 @@ class PlaidGateway:
             )
         except ApiException as exc:
             if exc.status == 400:
-                raise PlaidExchangeInvalidError() from exc
+                raise PlaidExchangeInvalidError() from None
             logger.warning("Plaid public token exchange failed.")
-            raise PlaidGatewayError(PLAID_UNAVAILABLE_DETAIL) from exc
-        except (HTTPError, TimeoutError) as exc:
+            raise PlaidGatewayError(PLAID_UNAVAILABLE_DETAIL) from None
+        except (HTTPError, TimeoutError):
             logger.warning("Plaid public token exchange failed.")
-            raise PlaidGatewayError(PLAID_UNAVAILABLE_DETAIL) from exc
+            raise PlaidGatewayError(PLAID_UNAVAILABLE_DETAIL) from None
         access_token = getattr(response, "access_token", None)
         item_id = getattr(response, "item_id", None)
         if (
@@ -188,9 +216,9 @@ class PlaidGateway:
                 item_get_request=request,
                 _request_timeout=PLAID_REQUEST_TIMEOUT_SECONDS,
             )
-        except (ApiException, HTTPError, TimeoutError) as exc:
+        except (ApiException, HTTPError, TimeoutError):
             logger.warning("Plaid item lookup failed.")
-            raise PlaidGatewayError(PLAID_UNAVAILABLE_DETAIL) from exc
+            raise PlaidGatewayError(PLAID_UNAVAILABLE_DETAIL) from None
         item = getattr(response, "item", None)
         if item is None:
             logger.warning("Plaid item lookup returned malformed data.")
@@ -200,3 +228,52 @@ class PlaidGateway:
             logger.warning("Plaid item lookup returned malformed data.")
             raise PlaidGatewayError(PLAID_UNAVAILABLE_DETAIL)
         return ItemGetResult(institution_name=institution_name)
+
+    def sync_transactions(self, access_token, cursor=None):
+        """Fetch one page of ``/transactions/sync`` and normalize it safely.
+
+        The initial call omits the cursor entirely; an incremental call sends
+        the exact opaque cursor passed in, never a synthesized one. No
+        enrichment options are requested. Every provider, transport, timeout,
+        or malformed-response condition raises the fixed safe
+        :class:`PlaidGatewayError`; a provider
+        ``TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION`` error, recognized
+        only from the structured ``error_code`` in the parsed error body,
+        raises the dedicated payload-free :class:`PlaidSyncMutationError`
+        marker so the sync loop can restart the update from its original
+        cursor. The access token and cursor are never logged or interpolated,
+        and the raw provider response never leaves this boundary: the method
+        returns only the frozen :class:`NormalizedSyncPage` value object. A
+        page normalization defect is a programmer error and propagates.
+        """
+        from plaid_integration.transaction_sync import (
+            SYNC_MUTATION_DETAIL,
+            PlaidSyncMutationError,
+            normalize_sync_page,
+        )
+
+        request_kwargs = {
+            "client_id": self._client_id,
+            "secret": self._secret,
+            "access_token": access_token,
+        }
+        if cursor is not None:
+            request_kwargs["cursor"] = cursor
+        request = TransactionsSyncRequest(**request_kwargs)
+        try:
+            response = self._plaid_api.transactions_sync(
+                transactions_sync_request=request,
+                _request_timeout=PLAID_REQUEST_TIMEOUT_SECONDS,
+            )
+        except ApiException as exc:
+            if _is_mutation_during_pagination(exc):
+                # Suppress the handled exception context: the plaid ApiException
+                # renders its raw response body in a formatted traceback, which
+                # section 10 forbids. The marker carries only the fixed detail.
+                raise PlaidSyncMutationError(SYNC_MUTATION_DETAIL) from None
+            logger.warning("Plaid transaction sync failed.")
+            raise PlaidGatewayError(PLAID_UNAVAILABLE_DETAIL) from None
+        except (HTTPError, TimeoutError):
+            logger.warning("Plaid transaction sync failed.")
+            raise PlaidGatewayError(PLAID_UNAVAILABLE_DETAIL) from None
+        return normalize_sync_page(response)
