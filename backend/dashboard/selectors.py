@@ -6,6 +6,7 @@ from django.utils import timezone
 from accounts.selectors import owned_accounts_with_balances
 from budgets.selectors import budgets_with_spending
 from transactions.models import Transaction, TransactionType
+from transactions.selectors import counting_transactions, ledger_transactions_q
 
 
 def month_bounds(today):
@@ -22,29 +23,34 @@ def total_balance(user):
     """Sum current balances of the user's active accounts."""
     accounts = owned_accounts_with_balances(user).filter(is_archived=False)
     return sum(
-        (
-            account.opening_balance + account._income_total - account._expense_total
-            for account in accounts
-        ),
+        (account.current_balance for account in accounts),
         Decimal("0.00"),
     )
 
 
 def current_month_totals(user, month_start, next_month_start):
-    """Income and expense sums for the user's transactions in the month."""
-    totals = Transaction.objects.filter(
-        user=user,
-        date__gte=month_start,
-        date__lt=next_month_start,
-    ).aggregate(
-        income_total=Sum(
-            "amount",
-            filter=Q(transaction_type=TransactionType.INCOME),
-        ),
-        expense_total=Sum(
-            "amount",
-            filter=Q(transaction_type=TransactionType.EXPENSE),
-        ),
+    """Income and expense sums for the user's transactions in the month.
+
+    Applies the shared ledger predicate so provider lifecycle rows and rows
+    on not-yet-anchored linked accounts never move month totals.
+    """
+    totals = (
+        Transaction.objects.filter(
+            user=user,
+            date__gte=month_start,
+            date__lt=next_month_start,
+        )
+        .filter(ledger_transactions_q())
+        .aggregate(
+            income_total=Sum(
+                "amount",
+                filter=Q(transaction_type=TransactionType.INCOME),
+            ),
+            expense_total=Sum(
+                "amount",
+                filter=Q(transaction_type=TransactionType.EXPENSE),
+            ),
+        )
     )
     return (
         totals["income_total"] or Decimal("0.00"),
@@ -61,8 +67,8 @@ def budget_totals(user, month_start):
 
 
 def recent_transactions(user):
-    """Newest five transactions owned by `user` in model order."""
-    return list(Transaction.objects.filter(user=user)[:5])
+    """Newest five counting rows owned by `user` in model order."""
+    return list(counting_transactions(user)[:5])
 
 
 def dashboard_summary(user):

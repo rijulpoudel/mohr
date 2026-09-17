@@ -68,6 +68,29 @@ class Transaction(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    @property
+    def is_pending_initial_import(self):
+        """True while the linked account has not yet applied its anchor.
+
+        This is a synced-row display state: manual rows are always False,
+        even when their account has an unanchored link. Prefers the
+        ``_is_pending_initial_import`` annotation produced by
+        ``transactions.selectors`` and falls back to one lookup only for
+        synced rows serialized without an annotated queryset.
+        """
+        if self.source != TransactionSource.PLAID:
+            return False
+        annotated = getattr(self, "_is_pending_initial_import", None)
+        if annotated is not None:
+            return annotated
+        from plaid_integration.models import PlaidAccountLink
+
+        return PlaidAccountLink.objects.filter(
+            account_id=self.account_id,
+            user_id=self.user_id,
+            anchor_applied_at__isnull=True,
+        ).exists()
+
     class Meta:
         ordering = ("-date", "-created_at", "-id")
         constraints = [

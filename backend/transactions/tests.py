@@ -1,11 +1,13 @@
+import itertools
 from datetime import date, timedelta
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, models, transaction
+from django.db import IntegrityError, connection, models, transaction
 from django.db.models.deletion import RestrictedError
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
@@ -13,8 +15,9 @@ from rest_framework.test import APIClient, APITestCase
 
 from accounts.models import Account, AccountType
 from categories.models import Category, CategoryType
-from plaid_integration.models import PlaidConnection
+from plaid_integration.models import PlaidAccountLink, PlaidConnection
 from transactions.models import Transaction, TransactionType
+from transactions.serializers import SYNCED_DELETE_MESSAGE, SYNCED_PATCH_MESSAGE
 
 TRANSACTION_TYPE_CHOICES = [
     ("income", "Income"),
@@ -474,6 +477,10 @@ class TransactionCollectionAPITests(APITestCase):
                     "amount": "25.50",
                     "date": "2026-09-01",
                     "note": "",
+                    "source": "manual",
+                    "provider_name": "",
+                    "is_pending": False,
+                    "is_pending_initial_import": False,
                     "created_at": format_datetime(second.created_at),
                     "updated_at": format_datetime(second.updated_at),
                 },
@@ -485,6 +492,10 @@ class TransactionCollectionAPITests(APITestCase):
                     "amount": "50.00",
                     "date": "2026-08-01",
                     "note": "",
+                    "source": "manual",
+                    "provider_name": "",
+                    "is_pending": False,
+                    "is_pending_initial_import": False,
                     "created_at": format_datetime(first.created_at),
                     "updated_at": format_datetime(first.updated_at),
                 },
@@ -557,6 +568,10 @@ class TransactionCollectionAPITests(APITestCase):
                 "amount": "25.50",
                 "date": "2026-09-01",
                 "note": "",
+                "source": "manual",
+                "provider_name": "",
+                "is_pending": False,
+                "is_pending_initial_import": False,
                 "created_at": format_datetime(transaction.created_at),
                 "updated_at": format_datetime(transaction.updated_at),
             },
@@ -591,6 +606,10 @@ class TransactionCollectionAPITests(APITestCase):
                 "amount": "10.00",
                 "date": "2026-09-02",
                 "note": "Weekly groceries",
+                "source": "manual",
+                "provider_name": "",
+                "is_pending": False,
+                "is_pending_initial_import": False,
                 "created_at": format_datetime(transaction.created_at),
                 "updated_at": format_datetime(transaction.updated_at),
             },
@@ -1039,6 +1058,10 @@ class TransactionDetailAPITests(APITestCase):
                 "amount": "25.50",
                 "date": "2026-09-01",
                 "note": "",
+                "source": "manual",
+                "provider_name": "",
+                "is_pending": False,
+                "is_pending_initial_import": False,
                 "created_at": format_datetime(transaction.created_at),
                 "updated_at": format_datetime(transaction.updated_at),
             },
@@ -1144,6 +1167,10 @@ class TransactionDetailAPITests(APITestCase):
                 "amount": "25.50",
                 "date": "2026-09-01",
                 "note": "Updated note",
+                "source": "manual",
+                "provider_name": "",
+                "is_pending": False,
+                "is_pending_initial_import": False,
                 "created_at": format_datetime(transaction.created_at),
                 "updated_at": format_datetime(transaction.updated_at),
             },
@@ -2499,3 +2526,1076 @@ class TransactionProviderModelTests(TestCase):
             "transactions_superseded_requires_superseded_by", constraint_names
         )
         self.assertIn("transactions_user_plaid_transaction_id_unique", constraint_names)
+
+
+class TransactionProviderVisibilityAPITests(APITestCase):
+    """Slice A list contract: hide provider-removed and superseded rows,
+    keep pending and unanchored rows visible, and expose only safe
+    read-only provider state."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = get_user_model().objects.create_user(
+            email="transaction-visibility-owner@example.com",
+            password="TestOnlyPassword123!",
+        )
+        cls.other_user = get_user_model().objects.create_user(
+            email="transaction-visibility-other@example.com",
+            password="TestOnlyPassword123!",
+        )
+        cls.account = Account.objects.create(
+            user=cls.user,
+            name="Manual Checking",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("100.00"),
+        )
+        cls.linked_account = Account.objects.create(
+            user=cls.user,
+            name="Linked Checking",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("0.00"),
+        )
+        cls.category = Category.objects.create(
+            user=cls.user,
+            name="Salary",
+            category_type=CategoryType.INCOME,
+        )
+        cls.connection = PlaidConnection.objects.create(
+            user=cls.user,
+            item_id="item-sandbox-visibility-00001",
+            institution_name="Visibility Bank",
+        )
+        cls.link = PlaidAccountLink.objects.create(
+            connection=cls.connection,
+            user=cls.user,
+            account=cls.linked_account,
+            plaid_account_id="plaid-account-visibility-00001",
+            plaid_type="depository",
+            plaid_subtype="checking",
+            mask="1111",
+        )
+        cls.other_account = Account.objects.create(
+            user=cls.other_user,
+            name="Their Checking",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("0.00"),
+        )
+        cls.other_connection = PlaidConnection.objects.create(
+            user=cls.other_user,
+            item_id="item-sandbox-visibility-00002",
+            institution_name="Their Bank",
+        )
+        cls.other_category = Category.objects.create(
+            user=cls.other_user,
+            name="Their Salary",
+            category_type=CategoryType.INCOME,
+        )
+        cls._plaid_seq = itertools.count(1)
+
+    def create_manual(self, **overrides):
+        values = {
+            "user": self.user,
+            "account": self.account,
+            "category": self.category,
+            "transaction_type": TransactionType.INCOME,
+            "amount": Decimal("25.50"),
+            "date": date(2026, 9, 1),
+        }
+        values.update(overrides)
+        return Transaction.objects.create(**values)
+
+    def create_plaid(self, **overrides):
+        values = {
+            "user": self.user,
+            "account": self.linked_account,
+            "category": self.category,
+            "transaction_type": TransactionType.INCOME,
+            "amount": Decimal("25.50"),
+            "date": date(2026, 9, 1),
+            "source": "plaid",
+            "connection": self.connection,
+            "plaid_transaction_id": (
+                f"plaid-transaction-visibility-{next(self._plaid_seq)}"
+            ),
+        }
+        values.update(overrides)
+        return Transaction.objects.create(**values)
+
+    def test_list_hides_provider_removed_and_superseded_rows(self):
+        visible_manual = self.create_manual(date=date(2026, 9, 1))
+        posted = self.create_plaid(date=date(2026, 9, 2))
+        pending = self.create_plaid(is_pending=True, date=date(2026, 9, 3))
+        removed = self.create_plaid(is_provider_removed=True, date=date(2026, 9, 4))
+        superseded = self.create_plaid(
+            is_superseded=True,
+            superseded_by=posted,
+            date=date(2026, 9, 5),
+        )
+        self.client.force_login(self.user)
+
+        response = self.client.get(reverse("transaction-list"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [item["id"] for item in response.data],
+            [pending.id, posted.id, visible_manual.id],
+        )
+        self.assertNotIn(removed.id, [item["id"] for item in response.data])
+        self.assertNotIn(superseded.id, [item["id"] for item in response.data])
+
+    def test_list_keeps_pending_and_unanchored_rows_visible_with_exact_safe_state(
+        self,
+    ):
+        pending = self.create_plaid(
+            is_pending=True,
+            provider_name="Coffee Corner",
+            date=date(2026, 9, 2),
+        )
+        self.client.force_login(self.user)
+
+        response = self.client.get(reverse("transaction-list"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        item = next(entry for entry in response.data if entry["id"] == pending.id)
+        self.assertEqual(item["source"], "plaid")
+        self.assertEqual(item["provider_name"], "Coffee Corner")
+        self.assertTrue(item["is_pending"])
+        self.assertTrue(item["is_pending_initial_import"])
+
+    def test_unanchored_posted_row_reports_pending_initial_import_state(self):
+        posted = self.create_plaid(
+            provider_name="Whole Foods",
+            date=date(2026, 9, 2),
+        )
+        self.client.force_login(self.user)
+
+        item = next(
+            entry
+            for entry in self.client.get(reverse("transaction-list")).data
+            if entry["id"] == posted.id
+        )
+
+        self.assertFalse(item["is_pending"])
+        self.assertTrue(item["is_pending_initial_import"])
+
+    def test_anchored_posted_row_no_longer_reports_pending_initial_import(self):
+        posted = self.create_plaid(
+            provider_name="Whole Foods",
+            date=date(2026, 9, 2),
+        )
+        PlaidAccountLink.objects.filter(pk=self.link.pk).update(
+            anchor_applied_at=timezone.now()
+        )
+        self.client.force_login(self.user)
+
+        item = next(
+            entry
+            for entry in self.client.get(reverse("transaction-list")).data
+            if entry["id"] == posted.id
+        )
+
+        self.assertFalse(item["is_pending"])
+        self.assertFalse(item["is_pending_initial_import"])
+
+    def test_list_exposes_only_safe_read_only_state_fields(self):
+        self.create_plaid(is_pending=True, provider_name="Coffee Corner")
+        self.client.force_login(self.user)
+
+        item = self.client.get(reverse("transaction-list")).data[0]
+
+        self.assertEqual(
+            set(item.keys()),
+            {
+                "id",
+                "account",
+                "category",
+                "transaction_type",
+                "amount",
+                "date",
+                "note",
+                "source",
+                "provider_name",
+                "is_pending",
+                "is_pending_initial_import",
+                "created_at",
+                "updated_at",
+            },
+        )
+
+    def test_detail_retrieves_owned_removed_and_superseded_rows(self):
+        removed = self.create_plaid(is_provider_removed=True)
+        posted = self.create_plaid()
+        superseded = self.create_plaid(is_superseded=True, superseded_by=posted)
+        self.client.force_login(self.user)
+
+        for audit_row in (removed, superseded):
+            with self.subTest(transaction=audit_row.pk):
+                response = self.client.get(
+                    reverse("transaction-detail", args=[audit_row.pk])
+                )
+
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertEqual(response.data["id"], audit_row.pk)
+                self.assertEqual(response.data["source"], "plaid")
+
+    def test_detail_foreign_and_missing_audit_rows_remain_indistinguishable_404(
+        self,
+    ):
+        foreign = Transaction.objects.create(
+            user=self.other_user,
+            account=self.other_account,
+            category=self.other_category,
+            transaction_type=TransactionType.INCOME,
+            amount=Decimal("10.00"),
+            date=date(2026, 9, 1),
+            source="plaid",
+            connection=self.other_connection,
+            plaid_transaction_id="plaid-transaction-visibility-foreign-removed",
+            is_provider_removed=True,
+        )
+        self.client.force_login(self.user)
+
+        foreign_response = self.client.get(
+            reverse("transaction-detail", args=[foreign.pk])
+        )
+        missing_response = self.client.get(reverse("transaction-detail", args=[999999]))
+
+        self.assertEqual(foreign_response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(missing_response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(foreign_response.json(), missing_response.json())
+
+    def test_delete_on_removed_and_superseded_rows_returns_400_and_retains_them(
+        self,
+    ):
+        removed = self.create_plaid(is_provider_removed=True)
+        posted = self.create_plaid()
+        superseded = self.create_plaid(is_superseded=True, superseded_by=posted)
+        self.client.force_login(self.user)
+
+        for audit_row in (removed, superseded):
+            with self.subTest(transaction=audit_row.pk):
+                response = self.client.delete(
+                    reverse("transaction-detail", args=[audit_row.pk])
+                )
+
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertEqual(response.json(), {"detail": SYNCED_DELETE_MESSAGE})
+                self.assertTrue(Transaction.objects.filter(pk=audit_row.pk).exists())
+
+    def test_delete_on_foreign_and_missing_audit_rows_returns_404(self):
+        foreign_posted = Transaction.objects.create(
+            user=self.other_user,
+            account=self.other_account,
+            category=self.other_category,
+            transaction_type=TransactionType.INCOME,
+            amount=Decimal("10.00"),
+            date=date(2026, 9, 1),
+            source="plaid",
+            connection=self.other_connection,
+            plaid_transaction_id="plaid-transaction-visibility-foreign-posted",
+        )
+        foreign = Transaction.objects.create(
+            user=self.other_user,
+            account=self.other_account,
+            category=self.other_category,
+            transaction_type=TransactionType.INCOME,
+            amount=Decimal("10.00"),
+            date=date(2026, 9, 1),
+            source="plaid",
+            connection=self.other_connection,
+            plaid_transaction_id="plaid-transaction-visibility-foreign-superseded",
+            is_superseded=True,
+            superseded_by=foreign_posted,
+        )
+        self.client.force_login(self.user)
+
+        foreign_response = self.client.delete(
+            reverse("transaction-detail", args=[foreign.pk])
+        )
+        missing_response = self.client.delete(
+            reverse("transaction-detail", args=[999999])
+        )
+
+        self.assertEqual(foreign_response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(missing_response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(foreign_response.json(), missing_response.json())
+        self.assertTrue(Transaction.objects.filter(pk=foreign.pk).exists())
+
+    def test_patch_on_removed_and_superseded_rows_stays_under_synced_rules(self):
+        alternate = Category.objects.create(
+            user=self.user,
+            name="Bonus",
+            category_type=CategoryType.INCOME,
+        )
+        removed = self.create_plaid(is_provider_removed=True)
+        posted = self.create_plaid()
+        superseded = self.create_plaid(is_superseded=True, superseded_by=posted)
+        self.client.force_login(self.user)
+
+        for audit_row in (removed, superseded):
+            with self.subTest(transaction=audit_row.pk):
+                response = self.client.patch(
+                    reverse("transaction-detail", args=[audit_row.pk]),
+                    {"category": alternate.id, "note": "User note"},
+                    format="json",
+                )
+
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                audit_row.refresh_from_db()
+                self.assertEqual(audit_row.category, alternate)
+                self.assertEqual(audit_row.note, "User note")
+                self.assertTrue(audit_row.category_customized)
+                self.assertTrue(audit_row.note_customized)
+
+        blocked_response = self.client.patch(
+            reverse("transaction-detail", args=[removed.pk]),
+            {"amount": "99.99"},
+            format="json",
+        )
+
+        self.assertEqual(blocked_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            blocked_response.json(),
+            {"non_field_errors": [SYNCED_PATCH_MESSAGE]},
+        )
+        removed.refresh_from_db()
+        self.assertEqual(removed.amount, Decimal("25.50"))
+
+    def test_manual_rows_report_manual_state_defaults(self):
+        self.create_manual()
+        self.client.force_login(self.user)
+
+        item = self.client.get(reverse("transaction-list")).data[0]
+
+        self.assertEqual(item["source"], "manual")
+        self.assertEqual(item["provider_name"], "")
+        self.assertFalse(item["is_pending"])
+        self.assertFalse(item["is_pending_initial_import"])
+
+    def test_manual_row_on_linked_account_never_reports_pending_initial_import(
+        self,
+    ):
+        self.create_manual(account=self.linked_account)
+        self.client.force_login(self.user)
+
+        item = self.client.get(reverse("transaction-list")).data[0]
+
+        self.assertEqual(item["source"], "manual")
+        self.assertFalse(item["is_pending_initial_import"])
+
+    def test_list_annotates_pending_state_without_per_row_queries(self):
+        for index in range(2):
+            self.create_plaid(
+                provider_name=f"Row {index}",
+                date=date(2026, 9, 2 + index),
+            )
+            self.create_manual(date=date(2026, 9, 2 + index))
+        self.client.force_login(self.user)
+
+        with CaptureQueriesContext(connection) as few:
+            response = self.client.get(reverse("transaction-list"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 4)
+        for index in range(6):
+            self.create_plaid(
+                provider_name=f"Grown Row {index}",
+                date=date(2026, 9, 10 + index),
+            )
+            self.create_manual(date=date(2026, 9, 10 + index))
+
+        with CaptureQueriesContext(connection) as many:
+            response = self.client.get(reverse("transaction-list"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 16)
+        self.assertEqual(
+            len(few.captured_queries),
+            len(many.captured_queries),
+        )
+
+    def test_list_remains_owner_scoped_for_provider_rows(self):
+        mine = self.create_plaid()
+        Transaction.objects.create(
+            user=self.other_user,
+            account=self.other_account,
+            category=self.other_category,
+            transaction_type=TransactionType.INCOME,
+            amount=Decimal("10.00"),
+            date=date(2026, 9, 1),
+            source="plaid",
+            connection=self.other_connection,
+            plaid_transaction_id="plaid-transaction-visibility-other-00001",
+        )
+        self.client.force_login(self.user)
+
+        response = self.client.get(reverse("transaction-list"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([item["id"] for item in response.data], [mine.id])
+
+
+class SyncedTransactionPatchAPITests(APITestCase):
+    """Slice A PATCH contract: source=plaid rows accept only category and
+    note, and each explicit edit pins its override flag forever."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = get_user_model().objects.create_user(
+            email="transaction-synced-patch-owner@example.com",
+            password="TestOnlyPassword123!",
+        )
+        cls.other_user = get_user_model().objects.create_user(
+            email="transaction-synced-patch-other@example.com",
+            password="TestOnlyPassword123!",
+        )
+        cls.account = Account.objects.create(
+            user=cls.user,
+            name="Manual Checking",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("100.00"),
+        )
+        cls.linked_account = Account.objects.create(
+            user=cls.user,
+            name="Linked Checking",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("0.00"),
+        )
+        cls.income_category = Category.objects.create(
+            user=cls.user,
+            name="Salary",
+            category_type=CategoryType.INCOME,
+        )
+        cls.expense_category = Category.objects.create(
+            user=cls.user,
+            name="Groceries",
+            category_type=CategoryType.EXPENSE,
+        )
+        cls.second_expense_category = Category.objects.create(
+            user=cls.user,
+            name="Dining Out",
+            category_type=CategoryType.EXPENSE,
+        )
+        cls.archived_category = Category.objects.create(
+            user=cls.user,
+            name="Old Rent",
+            category_type=CategoryType.EXPENSE,
+            is_archived=True,
+        )
+        cls.connection = PlaidConnection.objects.create(
+            user=cls.user,
+            item_id="item-sandbox-synced-patch-00001",
+            institution_name="Patch Bank",
+        )
+        cls.link = PlaidAccountLink.objects.create(
+            connection=cls.connection,
+            user=cls.user,
+            account=cls.linked_account,
+            plaid_account_id="plaid-account-synced-patch-00001",
+            plaid_type="depository",
+            plaid_subtype="checking",
+            mask="1111",
+        )
+        cls.other_account = Account.objects.create(
+            user=cls.other_user,
+            name="Their Checking",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("0.00"),
+        )
+        cls.other_connection = PlaidConnection.objects.create(
+            user=cls.other_user,
+            item_id="item-sandbox-synced-patch-00002",
+            institution_name="Their Patch Bank",
+        )
+        cls.other_category = Category.objects.create(
+            user=cls.other_user,
+            name="Their Salary",
+            category_type=CategoryType.INCOME,
+        )
+        cls._plaid_seq = itertools.count(1)
+
+    def create_manual(self, **overrides):
+        values = {
+            "user": self.user,
+            "account": self.account,
+            "category": self.expense_category,
+            "transaction_type": TransactionType.EXPENSE,
+            "amount": Decimal("25.50"),
+            "date": date(2026, 9, 1),
+        }
+        values.update(overrides)
+        return Transaction.objects.create(**values)
+
+    def create_plaid(self, **overrides):
+        values = {
+            "user": self.user,
+            "account": self.linked_account,
+            "category": self.expense_category,
+            "transaction_type": TransactionType.EXPENSE,
+            "amount": Decimal("25.50"),
+            "date": date(2026, 9, 1),
+            "note": "Provider note",
+            "source": "plaid",
+            "connection": self.connection,
+            "plaid_transaction_id": (
+                f"plaid-transaction-synced-patch-{next(self._plaid_seq)}"
+            ),
+        }
+        values.update(overrides)
+        return Transaction.objects.create(**values)
+
+    def patch_url(self, transaction):
+        return reverse("transaction-detail", args=[transaction.pk])
+
+    def snapshot(self, transaction):
+        transaction.refresh_from_db()
+        return {
+            "account_id": transaction.account_id,
+            "category_id": transaction.category_id,
+            "transaction_type": transaction.transaction_type,
+            "amount": transaction.amount,
+            "date": transaction.date,
+            "note": transaction.note,
+            "source": transaction.source,
+            "provider_name": transaction.provider_name,
+            "plaid_transaction_id": transaction.plaid_transaction_id,
+            "category_customized": transaction.category_customized,
+            "note_customized": transaction.note_customized,
+        }
+
+    def test_patch_category_updates_and_sets_category_customized(self):
+        transaction = self.create_plaid()
+        self.client.force_login(self.user)
+
+        response = self.client.patch(
+            self.patch_url(transaction),
+            {"category": self.second_expense_category.id},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        transaction.refresh_from_db()
+        self.assertEqual(transaction.category, self.second_expense_category)
+        self.assertTrue(transaction.category_customized)
+        self.assertFalse(transaction.note_customized)
+        self.assertEqual(transaction.amount, Decimal("25.50"))
+        self.assertEqual(transaction.date, date(2026, 9, 1))
+        self.assertEqual(transaction.note, "Provider note")
+        self.assertEqual(transaction.source, "plaid")
+
+    def test_patch_note_updates_and_sets_note_customized(self):
+        transaction = self.create_plaid()
+        self.client.force_login(self.user)
+
+        response = self.client.patch(
+            self.patch_url(transaction),
+            {"note": "  User note  "},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        transaction.refresh_from_db()
+        self.assertEqual(transaction.note, "User note")
+        self.assertTrue(transaction.note_customized)
+        self.assertFalse(transaction.category_customized)
+        self.assertEqual(transaction.category, self.expense_category)
+        self.assertEqual(transaction.amount, Decimal("25.50"))
+
+    def test_patch_category_with_same_value_sets_category_customized(self):
+        transaction = self.create_plaid()
+        self.client.force_login(self.user)
+
+        response = self.client.patch(
+            self.patch_url(transaction),
+            {"category": self.expense_category.id},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        transaction.refresh_from_db()
+        self.assertTrue(transaction.category_customized)
+        self.assertEqual(transaction.category, self.expense_category)
+
+    def test_patch_note_with_same_value_sets_note_customized(self):
+        transaction = self.create_plaid()
+        self.client.force_login(self.user)
+
+        response = self.client.patch(
+            self.patch_url(transaction),
+            {"note": "Provider note"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        transaction.refresh_from_db()
+        self.assertTrue(transaction.note_customized)
+        self.assertEqual(transaction.note, "Provider note")
+
+    def test_patch_blank_note_sets_note_customized(self):
+        transaction = self.create_plaid()
+        self.client.force_login(self.user)
+
+        response = self.client.patch(
+            self.patch_url(transaction),
+            {"note": "   "},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        transaction.refresh_from_db()
+        self.assertEqual(transaction.note, "")
+        self.assertTrue(transaction.note_customized)
+
+    def test_patch_category_and_note_together_sets_both_flags(self):
+        transaction = self.create_plaid()
+        self.client.force_login(self.user)
+
+        response = self.client.patch(
+            self.patch_url(transaction),
+            {
+                "category": self.second_expense_category.id,
+                "note": "User note",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        transaction.refresh_from_db()
+        self.assertEqual(transaction.category, self.second_expense_category)
+        self.assertEqual(transaction.note, "User note")
+        self.assertTrue(transaction.category_customized)
+        self.assertTrue(transaction.note_customized)
+
+    def test_patch_rejects_amount_without_persisting_anything(self):
+        transaction = self.create_plaid()
+        before = self.snapshot(transaction)
+        self.client.force_login(self.user)
+
+        response = self.client.patch(
+            self.patch_url(transaction),
+            {"amount": "99.99"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(self.snapshot(transaction), before)
+
+    def test_patch_synced_row_multipart_blocked_field_returns_400_without_write(
+        self,
+    ):
+        transaction = self.create_plaid()
+        before = self.snapshot(transaction)
+        self.client.force_login(self.user)
+
+        response = self.client.patch(
+            self.patch_url(transaction),
+            {"amount": "99.99", "note": "Multipart note"},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(self.snapshot(transaction), before)
+
+    def test_patch_synced_row_multipart_allows_category_and_note_edits(self):
+        transaction = self.create_plaid()
+        self.client.force_login(self.user)
+
+        response = self.client.patch(
+            self.patch_url(transaction),
+            {
+                "category": self.second_expense_category.id,
+                "note": "Multipart note",
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        transaction.refresh_from_db()
+        self.assertEqual(transaction.category, self.second_expense_category)
+        self.assertEqual(transaction.note, "Multipart note")
+        self.assertTrue(transaction.category_customized)
+        self.assertTrue(transaction.note_customized)
+
+    def test_patch_rejects_date_account_and_transaction_type(self):
+        transaction = self.create_plaid()
+        before = self.snapshot(transaction)
+        self.client.force_login(self.user)
+
+        for payload in (
+            {"date": "2026-10-01"},
+            {"account": self.account.id},
+            {"transaction_type": "income"},
+        ):
+            with self.subTest(payload=payload):
+                response = self.client.patch(
+                    self.patch_url(transaction),
+                    payload,
+                    format="json",
+                )
+
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        self.assertEqual(self.snapshot(transaction), before)
+
+    def test_patch_rejects_internal_and_provider_fields(self):
+        transaction = self.create_plaid()
+        before = self.snapshot(transaction)
+        self.client.force_login(self.user)
+
+        for field, value in (
+            ("source", "manual"),
+            ("provider_name", "Spoofed Name"),
+            ("is_pending", True),
+            ("connection", self.connection.id),
+            ("plaid_transaction_id", "plaid-spoofed-00001"),
+            ("plaid_pending_transaction_id", "plaid-spoofed-pending-00001"),
+            ("is_provider_removed", True),
+            ("is_superseded", True),
+            ("superseded_by", transaction.id),
+            ("category_customized", True),
+            ("note_customized", True),
+            ("user", self.user.id),
+            ("id", transaction.id + 1),
+            ("created_at", "2000-01-01T00:00:00Z"),
+            ("updated_at", "2000-01-01T00:00:00Z"),
+        ):
+            with self.subTest(field=field):
+                response = self.client.patch(
+                    self.patch_url(transaction),
+                    {field: value},
+                    format="json",
+                )
+
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        self.assertEqual(self.snapshot(transaction), before)
+
+    def test_patch_rejects_combined_allowed_and_blocked_fields_without_partial_write(
+        self,
+    ):
+        transaction = self.create_plaid()
+        before = self.snapshot(transaction)
+        self.client.force_login(self.user)
+
+        response = self.client.patch(
+            self.patch_url(transaction),
+            {
+                "category": self.second_expense_category.id,
+                "amount": "99.99",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(self.snapshot(transaction), before)
+        self.assertFalse(transaction.category_customized)
+
+    def test_patch_rejects_archived_category_for_synced_row(self):
+        transaction = self.create_plaid()
+        before = self.snapshot(transaction)
+        self.client.force_login(self.user)
+
+        response = self.client.patch(
+            self.patch_url(transaction),
+            {"category": self.archived_category.id},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("category", response.data)
+        self.assertEqual(self.snapshot(transaction), before)
+
+    def test_patch_rejects_type_mismatched_category_for_synced_row(self):
+        transaction = self.create_plaid()
+        before = self.snapshot(transaction)
+        self.client.force_login(self.user)
+
+        response = self.client.patch(
+            self.patch_url(transaction),
+            {"category": self.income_category.id},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("category", response.data)
+        self.assertEqual(self.snapshot(transaction), before)
+
+    def test_patch_foreign_and_missing_synced_rows_return_404(self):
+        foreign = Transaction.objects.create(
+            user=self.other_user,
+            account=self.other_account,
+            category=self.other_category,
+            transaction_type=TransactionType.INCOME,
+            amount=Decimal("10.00"),
+            date=date(2026, 9, 1),
+            source="plaid",
+            connection=self.other_connection,
+            plaid_transaction_id="plaid-transaction-synced-patch-other-00001",
+        )
+        before = self.snapshot(foreign)
+        self.client.force_login(self.user)
+
+        foreign_response = self.client.patch(
+            self.patch_url(foreign),
+            {"note": "Spoofed"},
+            format="json",
+        )
+        missing_response = self.client.patch(
+            reverse("transaction-detail", args=[999999]),
+            {"note": "Spoofed"},
+            format="json",
+        )
+
+        self.assertEqual(foreign_response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(missing_response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(foreign_response.json(), missing_response.json())
+        self.assertEqual(self.snapshot(foreign), before)
+
+    def test_manual_patch_keeps_v0_1_behavior_and_never_sets_override_flags(self):
+        transaction = self.create_manual()
+        self.client.force_login(self.user)
+
+        response = self.client.patch(
+            self.patch_url(transaction),
+            {
+                "account": self.account.id,
+                "category": self.expense_category.id,
+                "transaction_type": "expense",
+                "amount": "99.99",
+                "date": "2026-10-01",
+                "note": "Full rewrite",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        transaction.refresh_from_db()
+        self.assertEqual(transaction.amount, Decimal("99.99"))
+        self.assertEqual(transaction.date, date(2026, 10, 1))
+        self.assertEqual(transaction.note, "Full rewrite")
+        self.assertFalse(transaction.category_customized)
+        self.assertFalse(transaction.note_customized)
+
+    def test_patch_synced_row_requires_csrf_token_without_mutation(self):
+        transaction = self.create_plaid()
+        before = self.snapshot(transaction)
+        csrf_client = APIClient(enforce_csrf_checks=True)
+        csrf_client.force_login(self.user)
+
+        response = csrf_client.patch(
+            self.patch_url(transaction),
+            {"note": "Blocked"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response["Content-Type"], "application/json")
+        self.assertEqual(response.json(), {"detail": "CSRF verification failed."})
+        self.assertEqual(self.snapshot(transaction), before)
+
+    def test_anonymous_patch_on_synced_row_returns_401(self):
+        transaction = self.create_plaid()
+
+        response = self.client.patch(
+            self.patch_url(transaction),
+            {"note": "Spoofed"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertTrue(Transaction.objects.filter(pk=transaction.pk).exists())
+
+
+class SyncedTransactionDeleteAPITests(APITestCase):
+    """Slice A DELETE contract: source=plaid rows return 400 and are never
+    hard-deleted; manual rows keep full v0.1 delete behavior."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = get_user_model().objects.create_user(
+            email="transaction-synced-delete-owner@example.com",
+            password="TestOnlyPassword123!",
+        )
+        cls.other_user = get_user_model().objects.create_user(
+            email="transaction-synced-delete-other@example.com",
+            password="TestOnlyPassword123!",
+        )
+        cls.account = Account.objects.create(
+            user=cls.user,
+            name="Manual Checking",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("100.00"),
+        )
+        cls.linked_account = Account.objects.create(
+            user=cls.user,
+            name="Linked Checking",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("0.00"),
+        )
+        cls.category = Category.objects.create(
+            user=cls.user,
+            name="Salary",
+            category_type=CategoryType.INCOME,
+        )
+        cls.connection = PlaidConnection.objects.create(
+            user=cls.user,
+            item_id="item-sandbox-synced-delete-00001",
+            institution_name="Delete Bank",
+        )
+        cls.link = PlaidAccountLink.objects.create(
+            connection=cls.connection,
+            user=cls.user,
+            account=cls.linked_account,
+            plaid_account_id="plaid-account-synced-delete-00001",
+            plaid_type="depository",
+            plaid_subtype="checking",
+            mask="1111",
+        )
+        cls.other_account = Account.objects.create(
+            user=cls.other_user,
+            name="Their Checking",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("0.00"),
+        )
+        cls.other_connection = PlaidConnection.objects.create(
+            user=cls.other_user,
+            item_id="item-sandbox-synced-delete-00002",
+            institution_name="Their Delete Bank",
+        )
+        cls.other_category = Category.objects.create(
+            user=cls.other_user,
+            name="Their Salary",
+            category_type=CategoryType.INCOME,
+        )
+        cls._plaid_seq = itertools.count(1)
+
+    def create_manual(self, **overrides):
+        values = {
+            "user": self.user,
+            "account": self.account,
+            "category": self.category,
+            "transaction_type": TransactionType.INCOME,
+            "amount": Decimal("25.50"),
+            "date": date(2026, 9, 1),
+        }
+        values.update(overrides)
+        return Transaction.objects.create(**values)
+
+    def create_plaid(self, **overrides):
+        values = {
+            "user": self.user,
+            "account": self.linked_account,
+            "category": self.category,
+            "transaction_type": TransactionType.INCOME,
+            "amount": Decimal("25.50"),
+            "date": date(2026, 9, 1),
+            "source": "plaid",
+            "connection": self.connection,
+            "plaid_transaction_id": (
+                f"plaid-transaction-synced-delete-{next(self._plaid_seq)}"
+            ),
+        }
+        values.update(overrides)
+        return Transaction.objects.create(**values)
+
+    def detail_url(self, transaction):
+        return reverse("transaction-detail", args=[transaction.pk])
+
+    def test_delete_synced_row_returns_400_and_deletes_nothing(self):
+        transaction = self.create_plaid()
+        self.client.force_login(self.user)
+
+        response = self.client.delete(self.detail_url(transaction))
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(Transaction.objects.filter(pk=transaction.pk).exists())
+        self.assertTrue(PlaidConnection.objects.filter(pk=self.connection.pk).exists())
+        self.assertTrue(PlaidAccountLink.objects.filter(pk=self.link.pk).exists())
+        self.assertTrue(Account.objects.filter(pk=self.linked_account.pk).exists())
+
+    def test_delete_rejects_unanchored_and_anchored_synced_rows_identically(self):
+        unanchored = self.create_plaid()
+        anchored = self.create_plaid()
+        PlaidAccountLink.objects.filter(pk=self.link.pk).update(
+            anchor_applied_at=timezone.now()
+        )
+        self.client.force_login(self.user)
+
+        for synced_transaction in (unanchored, anchored):
+            with self.subTest(transaction=synced_transaction.pk):
+                response = self.client.delete(self.detail_url(synced_transaction))
+
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        self.assertEqual(Transaction.objects.count(), 2)
+
+    def test_manual_delete_keeps_v0_1_behavior(self):
+        transaction = self.create_manual()
+        self.client.force_login(self.user)
+
+        response = self.client.delete(self.detail_url(transaction))
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Transaction.objects.filter(pk=transaction.pk).exists())
+
+    def test_delete_foreign_and_missing_synced_rows_return_404(self):
+        foreign = Transaction.objects.create(
+            user=self.other_user,
+            account=self.other_account,
+            category=self.other_category,
+            transaction_type=TransactionType.INCOME,
+            amount=Decimal("10.00"),
+            date=date(2026, 9, 1),
+            source="plaid",
+            connection=self.other_connection,
+            plaid_transaction_id="plaid-transaction-synced-delete-other-00001",
+        )
+        self.client.force_login(self.user)
+
+        foreign_response = self.client.delete(self.detail_url(foreign))
+        missing_response = self.client.delete(
+            reverse("transaction-detail", args=[999999])
+        )
+
+        self.assertEqual(foreign_response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(missing_response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(foreign_response.json(), missing_response.json())
+        self.assertTrue(Transaction.objects.filter(pk=foreign.pk).exists())
+
+    def test_delete_synced_row_requires_csrf_token_without_side_effects(self):
+        transaction = self.create_plaid()
+        csrf_client = APIClient(enforce_csrf_checks=True)
+        csrf_client.force_login(self.user)
+
+        response = csrf_client.delete(self.detail_url(transaction))
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response["Content-Type"], "application/json")
+        self.assertEqual(response.json(), {"detail": "CSRF verification failed."})
+        self.assertTrue(Transaction.objects.filter(pk=transaction.pk).exists())
+
+    def test_anonymous_delete_on_synced_row_returns_401(self):
+        transaction = self.create_plaid()
+
+        response = self.client.delete(self.detail_url(transaction))
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertTrue(Transaction.objects.filter(pk=transaction.pk).exists())
+
+    def test_put_and_post_on_synced_detail_remain_405(self):
+        transaction = self.create_plaid()
+        self.client.force_login(self.user)
+
+        for method in ("post", "put"):
+            with self.subTest(method=method):
+                response = getattr(self.client, method)(
+                    self.detail_url(transaction),
+                    {"note": "Ignored"},
+                    format="json",
+                )
+
+                self.assertEqual(
+                    response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED
+                )
+
+        self.assertTrue(Transaction.objects.filter(pk=transaction.pk).exists())

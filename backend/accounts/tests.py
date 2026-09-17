@@ -1,3 +1,4 @@
+import itertools
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -12,6 +13,7 @@ from rest_framework.test import APIClient, APITestCase
 
 from accounts.models import Account, AccountType
 from categories.models import Category, CategoryType
+from plaid_integration.models import PlaidAccountLink, PlaidConnection
 from transactions.models import Transaction, TransactionType
 
 ACCOUNT_TYPE_CHOICES = [
@@ -357,6 +359,7 @@ class AccountCollectionAPITests(APITestCase):
                     "account_type": "checking",
                     "opening_balance": "100.00",
                     "current_balance": "100.00",
+                    "sync_pending": False,
                     "is_archived": False,
                     "created_at": self.format_datetime(account.created_at),
                     "updated_at": self.format_datetime(account.updated_at),
@@ -430,6 +433,7 @@ class AccountCollectionAPITests(APITestCase):
                 "account_type": "credit_card",
                 "opening_balance": "-123.45",
                 "current_balance": "-123.45",
+                "sync_pending": False,
                 "is_archived": False,
                 "created_at": self.format_datetime(account.created_at),
                 "updated_at": self.format_datetime(account.updated_at),
@@ -684,6 +688,7 @@ class AccountDetailAPITests(APITestCase):
                 "account_type": "checking",
                 "opening_balance": "100.00",
                 "current_balance": "100.00",
+                "sync_pending": False,
                 "is_archived": False,
                 "created_at": format_datetime(account.created_at),
                 "updated_at": format_datetime(account.updated_at),
@@ -714,6 +719,7 @@ class AccountDetailAPITests(APITestCase):
                 "account_type": "checking",
                 "opening_balance": "100.00",
                 "current_balance": "100.00",
+                "sync_pending": False,
                 "is_archived": False,
                 "created_at": format_datetime(account.created_at),
                 "updated_at": format_datetime(account.updated_at),
@@ -1284,3 +1290,415 @@ class AccountBalanceQueryCountTests(APITestCase):
             {item["current_balance"] for item in response.data},
             {"140.00"},
         )
+
+    def test_list_annotates_sync_pending_without_per_account_queries(self):
+        connection = PlaidConnection.objects.create(
+            user=self.user,
+            item_id="item-sandbox-account-sync-pending-00001",
+            institution_name="Sync Pending Bank",
+        )
+        for index, account in enumerate(self.accounts):
+            PlaidAccountLink.objects.create(
+                connection=connection,
+                user=self.user,
+                account=account,
+                plaid_account_id=f"plaid-account-sync-pending-{index + 1}",
+                plaid_type="depository",
+                plaid_subtype="checking",
+                mask="4444",
+            )
+        self.client.force_login(self.user)
+
+        # One annotated accounts query carries balances and the sync_pending
+        # flag for every account; nothing runs per account.
+        with self.assertNumQueries(3):
+            response = self.client.get(reverse("account-list"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 3)
+        self.assertEqual(
+            {item["sync_pending"] for item in response.data},
+            {True},
+        )
+        self.assertEqual(
+            {item["current_balance"] for item in response.data},
+            {"0.00"},
+        )
+
+
+class AccountProviderVisibilityTests(APITestCase):
+    """Slice A balance gate: rows on linked accounts count only once the
+    opening-balance anchor is applied, and provider lifecycle rows never
+    count. Manual rows on ordinary manual accounts keep v0.1 behavior."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = get_user_model().objects.create_user(
+            email="account-provider-visibility-owner@example.com",
+            password="TestOnlyPassword123!",
+        )
+        cls.other_user = get_user_model().objects.create_user(
+            email="account-provider-visibility-other@example.com",
+            password="TestOnlyPassword123!",
+        )
+        cls.manual_account = Account.objects.create(
+            user=cls.user,
+            name="Manual Checking",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("100.00"),
+        )
+        cls.linked_account = Account.objects.create(
+            user=cls.user,
+            name="Linked Checking",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("0.00"),
+        )
+        cls.income_category = Category.objects.create(
+            user=cls.user,
+            name="Salary",
+            category_type=CategoryType.INCOME,
+        )
+        cls.expense_category = Category.objects.create(
+            user=cls.user,
+            name="Groceries",
+            category_type=CategoryType.EXPENSE,
+        )
+        cls.connection = PlaidConnection.objects.create(
+            user=cls.user,
+            item_id="item-sandbox-account-gate-00001",
+            institution_name="Gate Bank",
+        )
+        cls.link = PlaidAccountLink.objects.create(
+            connection=cls.connection,
+            user=cls.user,
+            account=cls.linked_account,
+            plaid_account_id="plaid-account-gate-00001",
+            plaid_type="depository",
+            plaid_subtype="checking",
+            mask="1111",
+        )
+        cls.other_linked_account = Account.objects.create(
+            user=cls.other_user,
+            name="Their Linked Checking",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("0.00"),
+        )
+        cls.other_connection = PlaidConnection.objects.create(
+            user=cls.other_user,
+            item_id="item-sandbox-account-gate-00002",
+            institution_name="Other Gate Bank",
+        )
+        PlaidAccountLink.objects.create(
+            connection=cls.other_connection,
+            user=cls.other_user,
+            account=cls.other_linked_account,
+            plaid_account_id="plaid-account-gate-00002",
+            plaid_type="depository",
+            plaid_subtype="checking",
+            mask="2222",
+        )
+        cls.other_category = Category.objects.create(
+            user=cls.other_user,
+            name="Their Salary",
+            category_type=CategoryType.INCOME,
+        )
+        cls._plaid_seq = itertools.count(1)
+
+    def create_transaction(self, account, **overrides):
+        values = {
+            "user": self.user,
+            "account": account,
+            "category": self.income_category,
+            "transaction_type": TransactionType.INCOME,
+            "amount": Decimal("25.50"),
+            "date": date(2026, 9, 1),
+        }
+        values.update(overrides)
+        return Transaction.objects.create(**values)
+
+    def create_plaid(self, account, **overrides):
+        values = {
+            "user": self.user,
+            "account": account,
+            "category": self.income_category,
+            "transaction_type": TransactionType.INCOME,
+            "amount": Decimal("25.50"),
+            "date": date(2026, 9, 1),
+            "source": "plaid",
+            "connection": self.connection,
+            "plaid_transaction_id": (
+                f"plaid-transaction-account-gate-{next(self._plaid_seq)}"
+            ),
+        }
+        values.update(overrides)
+        return Transaction.objects.create(**values)
+
+    def account_balance(self, account):
+        response = self.client.get(reverse("account-detail", args=[account.pk]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        return response.data["current_balance"]
+
+    def test_unanchored_linked_account_contributes_zero_to_api_current_balance(
+        self,
+    ):
+        self.create_plaid(self.linked_account, amount=Decimal("50.00"))
+        self.create_plaid(
+            self.linked_account,
+            category=self.expense_category,
+            transaction_type=TransactionType.EXPENSE,
+            amount=Decimal("10.00"),
+        )
+        self.client.force_login(self.user)
+
+        self.assertEqual(self.account_balance(self.linked_account), "0.00")
+
+    def test_unanchored_linked_account_fallback_current_balance_is_zero(self):
+        self.create_plaid(self.linked_account, amount=Decimal("50.00"))
+        self.create_plaid(
+            self.linked_account,
+            category=self.expense_category,
+            transaction_type=TransactionType.EXPENSE,
+            amount=Decimal("10.00"),
+        )
+
+        account = Account.objects.get(pk=self.linked_account.pk)
+
+        self.assertEqual(account.current_balance, Decimal("0.00"))
+
+    def test_anchored_linked_account_counts_valid_posted_rows(self):
+        self.create_plaid(self.linked_account, amount=Decimal("50.00"))
+        self.create_plaid(
+            self.linked_account,
+            category=self.expense_category,
+            transaction_type=TransactionType.EXPENSE,
+            amount=Decimal("10.00"),
+        )
+        PlaidAccountLink.objects.filter(pk=self.link.pk).update(
+            anchor_applied_at=timezone.now()
+        )
+        self.client.force_login(self.user)
+
+        self.assertEqual(self.account_balance(self.linked_account), "40.00")
+        self.assertEqual(
+            Account.objects.get(pk=self.linked_account.pk).current_balance,
+            Decimal("40.00"),
+        )
+
+    def test_anchored_linked_account_still_excludes_pending_removed_superseded(
+        self,
+    ):
+        posted = self.create_plaid(self.linked_account, amount=Decimal("50.00"))
+        self.create_plaid(
+            self.linked_account,
+            amount=Decimal("20.00"),
+            is_pending=True,
+        )
+        self.create_plaid(
+            self.linked_account,
+            amount=Decimal("30.00"),
+            is_provider_removed=True,
+        )
+        self.create_plaid(
+            self.linked_account,
+            amount=Decimal("40.00"),
+            is_superseded=True,
+            superseded_by=posted,
+        )
+        PlaidAccountLink.objects.filter(pk=self.link.pk).update(
+            anchor_applied_at=timezone.now()
+        )
+        self.client.force_login(self.user)
+
+        self.assertEqual(self.account_balance(self.linked_account), "50.00")
+
+    def test_manual_account_balance_unchanged_by_provider_gate(self):
+        self.create_transaction(self.manual_account, amount=Decimal("50.00"))
+        self.create_transaction(
+            self.manual_account,
+            category=self.expense_category,
+            transaction_type=TransactionType.EXPENSE,
+            amount=Decimal("10.00"),
+        )
+        self.client.force_login(self.user)
+
+        self.assertEqual(self.account_balance(self.manual_account), "140.00")
+
+    def test_manual_transaction_on_unanchored_linked_account_is_excluded(self):
+        self.create_transaction(self.linked_account, amount=Decimal("50.00"))
+        self.client.force_login(self.user)
+
+        self.assertEqual(self.account_balance(self.linked_account), "0.00")
+
+    def create_unanchored_nonzero_account(self, **overrides):
+        values = {
+            "user": self.user,
+            "name": "Nonzero Unanchored",
+            "account_type": AccountType.CHECKING,
+            "opening_balance": Decimal("500.00"),
+        }
+        values.update(overrides)
+        account = Account.objects.create(**values)
+        PlaidAccountLink.objects.create(
+            connection=self.connection,
+            user=self.user,
+            account=account,
+            plaid_account_id=f"plaid-account-gate-nonzero-{account.pk}",
+            plaid_type="depository",
+            plaid_subtype="checking",
+            mask="3333",
+        )
+        return account
+
+    def test_unanchored_linked_account_nonzero_opening_api_balance_is_zero(self):
+        account = self.create_unanchored_nonzero_account()
+        self.create_plaid(account, amount=Decimal("50.00"))
+        self.client.force_login(self.user)
+
+        self.assertEqual(self.account_balance(account), "0.00")
+
+    def test_unanchored_linked_account_nonzero_opening_fallback_is_zero(self):
+        account = self.create_unanchored_nonzero_account()
+        self.create_plaid(account, amount=Decimal("50.00"))
+
+        self.assertEqual(
+            Account.objects.get(pk=account.pk).current_balance,
+            Decimal("0.00"),
+        )
+
+    def test_anchored_linked_account_nonzero_opening_derives_opening_plus_net(self):
+        account = self.create_unanchored_nonzero_account()
+        self.create_plaid(account, amount=Decimal("50.00"))
+        PlaidAccountLink.objects.filter(
+            account_id=account.pk, user_id=self.user.pk
+        ).update(anchor_applied_at=timezone.now())
+        self.client.force_login(self.user)
+
+        self.assertEqual(self.account_balance(account), "550.00")
+        self.assertEqual(
+            Account.objects.get(pk=account.pk).current_balance,
+            Decimal("550.00"),
+        )
+
+    def test_sync_pending_flag_renders_exact_response_for_unanchored_account(self):
+        account = self.create_unanchored_nonzero_account()
+        self.client.force_login(self.user)
+
+        response = self.client.get(reverse("account-detail", args=[account.pk]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data,
+            {
+                "id": account.id,
+                "name": "Nonzero Unanchored",
+                "account_type": "checking",
+                "opening_balance": "500.00",
+                "current_balance": "0.00",
+                "sync_pending": True,
+                "is_archived": False,
+                "created_at": format_datetime(account.created_at),
+                "updated_at": format_datetime(account.updated_at),
+            },
+        )
+
+    def test_sync_pending_flag_turns_false_after_anchor_applied(self):
+        account = self.create_unanchored_nonzero_account()
+        self.client.force_login(self.user)
+
+        unanchored = self.client.get(reverse("account-detail", args=[account.pk])).data
+        PlaidAccountLink.objects.filter(
+            account_id=account.pk, user_id=self.user.pk
+        ).update(anchor_applied_at=timezone.now())
+        anchored = self.client.get(reverse("account-detail", args=[account.pk])).data
+
+        self.assertTrue(unanchored["sync_pending"])
+        self.assertFalse(anchored["sync_pending"])
+        self.assertEqual(anchored["current_balance"], "500.00")
+
+    def test_sync_pending_flag_is_false_for_manual_accounts(self):
+        self.client.force_login(self.user)
+
+        response = self.client.get(
+            reverse("account-detail", args=[self.manual_account.pk])
+        )
+
+        self.assertFalse(response.data["sync_pending"])
+        self.assertEqual(response.data["current_balance"], "100.00")
+
+    def test_duplicate_cross_user_links_do_not_double_balance(self):
+        account = Account.objects.create(
+            user=self.user,
+            name="Doubly Linked",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("100.00"),
+        )
+        PlaidAccountLink.objects.create(
+            connection=self.connection,
+            user=self.user,
+            account=account,
+            plaid_account_id="plaid-account-gate-dup-00001",
+            plaid_type="depository",
+            plaid_subtype="checking",
+            mask="4444",
+            anchor_applied_at=timezone.now(),
+        )
+        PlaidAccountLink.objects.create(
+            connection=self.other_connection,
+            user=self.other_user,
+            account=account,
+            plaid_account_id="plaid-account-gate-dup-foreign-00001",
+            plaid_type="depository",
+            plaid_subtype="checking",
+            mask="5555",
+            anchor_applied_at=timezone.now(),
+        )
+        self.create_plaid(account, amount=Decimal("50.00"))
+        self.client.force_login(self.user)
+
+        self.assertEqual(self.account_balance(account), "150.00")
+        self.assertEqual(
+            Account.objects.get(pk=account.pk).current_balance,
+            Decimal("150.00"),
+        )
+
+    def test_malformed_foreign_user_link_does_not_gate_owner_account(self):
+        account = Account.objects.create(
+            user=self.user,
+            name="Foreign Link Only",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("100.00"),
+        )
+        PlaidAccountLink.objects.create(
+            connection=self.other_connection,
+            user=self.other_user,
+            account=account,
+            plaid_account_id="plaid-account-gate-foreign-00001",
+            plaid_type="depository",
+            plaid_subtype="checking",
+            mask="6666",
+        )
+        self.create_plaid(account, amount=Decimal("50.00"))
+        self.client.force_login(self.user)
+
+        self.assertEqual(self.account_balance(account), "150.00")
+        self.assertEqual(
+            Account.objects.get(pk=account.pk).current_balance,
+            Decimal("150.00"),
+        )
+
+    def test_foreign_linked_account_rows_never_affect_owner_balance(self):
+        Transaction.objects.create(
+            user=self.other_user,
+            account=self.other_linked_account,
+            category=self.other_category,
+            transaction_type=TransactionType.INCOME,
+            amount=Decimal("999.99"),
+            date=date(2026, 9, 1),
+            source="plaid",
+            connection=self.other_connection,
+            plaid_transaction_id="plaid-transaction-account-gate-other-00001",
+        )
+        self.client.force_login(self.user)
+
+        self.assertEqual(self.account_balance(self.linked_account), "0.00")
+        self.assertEqual(self.account_balance(self.manual_account), "100.00")

@@ -12,6 +12,7 @@ import hmac
 import json
 import logging
 import string
+import traceback
 from datetime import timedelta
 from unittest.mock import patch
 
@@ -36,6 +37,8 @@ from plaid_integration.gateway import (
 from plaid_integration.models import PlaidExchangeHandle
 from plaid_integration.services import issue_exchange_handle, plaid_client_user_id
 from plaid_integration.tests import assert_constraint_violation
+
+RAW_PROVIDER_BODY_MARKER = "RAW-PROVIDER-BODY-MARKER"
 
 
 class FakeLinkTokenResponse:
@@ -199,6 +202,58 @@ class PlaidGatewayTests(SimpleTestCase):
             "opaque-client-user-id",
         ):
             self.assertNotIn(forbidden, log_text)
+
+    def test_failures_suppress_cause_and_never_render_provider_body(self):
+        error = ApiException(status=500, reason="PROVIDER_ERROR", http_resp=None)
+        error.body = json.dumps(
+            {
+                "error_type": "API_ERROR",
+                "error_code": "PROVIDER_ERROR",
+                "error_message": (
+                    f"{RAW_PROVIDER_BODY_MARKER} link-sandbox-leak "
+                    "opaque-client-user-id"
+                ),
+                "request_id": "req-link-leak",
+            }
+        )
+
+        for provider_error in (
+            error,
+            TimeoutError("Connection timed out"),
+            ProtocolError("Connection aborted."),
+        ):
+            with self.subTest(provider_error=provider_error):
+                with self.assertLogs(
+                    "plaid_integration.gateway", level=logging.WARNING
+                ) as captured:
+                    with self.assertRaises(PlaidGatewayError) as raised:
+                        gateway_for(
+                            FakePlaidApi(error=provider_error)
+                        ).create_link_token("opaque-client-user-id")
+
+                exception = raised.exception
+                self.assertIsNone(exception.__cause__)
+                self.assertEqual(str(exception), PLAID_UNAVAILABLE_DETAIL)
+                formatted = "".join(traceback.format_exception(exception))
+                for forbidden in (
+                    RAW_PROVIDER_BODY_MARKER,
+                    "link-sandbox-leak",
+                    "opaque-client-user-id",
+                    "req-link-leak",
+                ):
+                    self.assertNotIn(forbidden, str(exception))
+                    self.assertNotIn(forbidden, repr(exception))
+                    self.assertNotIn(forbidden, formatted)
+                log_text = "\n".join(captured.output)
+                self.assertEqual(len(captured.output), 1)
+                self.assertIn("Plaid link token creation failed.", log_text)
+                for forbidden in (
+                    RAW_PROVIDER_BODY_MARKER,
+                    "link-sandbox-leak",
+                    "opaque-client-user-id",
+                    "req-link-leak",
+                ):
+                    self.assertNotIn(forbidden, log_text)
 
 
 class PlaidClientUserIdTests(TestCase):
