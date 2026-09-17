@@ -52,6 +52,7 @@ from plaid_integration.models import (
     PlaidConnection,
     PlaidConnectionStatus,
     PlaidExchangeHandle,
+    PlaidWebhookEvent,
     TransactionsUpdateStatus,
 )
 from plaid_integration.token_encryption import TokenCryptoError
@@ -239,6 +240,98 @@ def persist_exchange_connection(user, item_id, institution_name, token_package, 
             raise PlaidExchangeDuplicateItem() from None
         raise
     return connection
+
+
+_WEBHOOK_EVENT_IDEMPOTENCY_UNIQUE = "plaid_webhook_event_idempotency_key_unique"
+
+
+class WebhookDuplicateEvent(Exception):
+    """A verified webhook with this exact body was already persisted.
+
+    Raised only for the exact ``plaid_webhook_event_idempotency_key_unique``
+    constraint violation (or, on a backend without a constraint diagnostic,
+    an existing row with the same idempotency key). Never carries the body,
+    its hash, or any connection state.
+    """
+
+
+def _advance_transactions_update_status(
+    current, *, initial_complete, historical_complete
+):
+    """Return the monotonic next status from received webhook flags.
+
+    ``initial_complete`` advances only a null or NOT_READY status to
+    INITIAL_UPDATE_COMPLETE; ``historical_complete`` always advances to
+    HISTORICAL_UPDATE_COMPLETE and wins, so the status never regresses.
+    """
+    if historical_complete:
+        return TransactionsUpdateStatus.HISTORICAL_UPDATE_COMPLETE
+    if initial_complete and current in (
+        None,
+        TransactionsUpdateStatus.NOT_READY,
+    ):
+        return TransactionsUpdateStatus.INITIAL_UPDATE_COMPLETE
+    return current
+
+
+def persist_verified_webhook(
+    connection,
+    claims,
+    *,
+    webhook_type,
+    webhook_code,
+    initial_update_complete,
+    historical_update_complete,
+):
+    """Persist one verified supported webhook and flip its connection.
+
+    ``claims`` is the frozen :class:`~plaid_integration.webhook_verification.
+    VerifiedWebhookClaims` produced by ``verify_plaid_webhook``; its
+    ``idempotency_key`` is the authoritative duplicate detector and is stored
+    (never the raw body). ``connection`` is the matched
+    :class:`PlaidConnection` for the parsed ``item_id``. In ONE
+    ``transaction.atomic()`` block the durable inbox row is inserted and the
+    connection's ``sync_due`` is set and ``transactions_update_status``
+    advances monotonically (``docs/plaid.md`` sections 4, 7, and 8); the
+    status, cursor, token, error, ``last_synced_at``, accounts, and
+    transactions are never touched. A re-delivered exact body raises
+    :class:`WebhookDuplicateEvent` after the failed atomic block rolls back,
+    so the duplicate changes neither the connection nor the inbox. An
+    unrelated ``IntegrityError`` propagates.
+    """
+    try:
+        with transaction.atomic():
+            conn = PlaidConnection.objects.select_for_update().get(pk=connection.pk)
+            PlaidWebhookEvent.objects.create(
+                connection=conn,
+                user=conn.user,
+                webhook_type=webhook_type,
+                webhook_code=webhook_code,
+                item_id=conn.item_id,
+                idempotency_key=claims.idempotency_key,
+                initial_update_complete=initial_update_complete,
+                historical_update_complete=historical_update_complete,
+                received_at=timezone.now(),
+                processed_at=None,
+            )
+            conn.sync_due = True
+            conn.transactions_update_status = _advance_transactions_update_status(
+                conn.transactions_update_status,
+                initial_complete=initial_update_complete,
+                historical_complete=historical_update_complete,
+            )
+            conn.save(update_fields=["sync_due", "transactions_update_status"])
+    except IntegrityError as exc:
+        constraint_name = _constraint_name(exc)
+        if constraint_name is not None:
+            if constraint_name == _WEBHOOK_EVENT_IDEMPOTENCY_UNIQUE:
+                raise WebhookDuplicateEvent() from None
+            raise
+        if PlaidWebhookEvent.objects.filter(
+            idempotency_key=claims.idempotency_key
+        ).exists():
+            raise WebhookDuplicateEvent() from None
+        raise
 
 
 @dataclass(frozen=True)

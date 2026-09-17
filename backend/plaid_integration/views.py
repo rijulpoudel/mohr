@@ -10,14 +10,34 @@ is set, ``202`` while the history window is still incomplete, and a fixed
 ``503`` when the run was blocked without mutating anything. Per the Render
 Free single-process constraint, the GET route only reports persisted state;
 it never performs Plaid calls, cursor writes, or any mutation.
+
+The public ``POST /api/plaid/webhooks/transactions/`` receiver (issue #39
+slice B) is a server-to-server Plaid callback per ``docs/plaid.md`` section
+8: it reads the exact raw body and the ``Plaid-Verification`` JWT first,
+verifies the ES256 signature through the gateway before any JSON parsing or
+database access, and only then parses, validates, matches, and persists a
+supported ``TRANSACTIONS`` webhook. It requires no session authentication
+and is CSRF exempt only here because signature verification replaces browser
+CSRF protection; the exemption never weakens the authenticated Plaid routes.
 """
+
+import json
+import logging
+from dataclasses import dataclass
 
 from django.conf import settings
 from django.shortcuts import get_object_or_404
+from django.views.decorators.csrf import csrf_exempt
 from rest_framework import status
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.decorators import (
+    api_view,
+    authentication_classes,
+    permission_classes,
+    throttle_classes,
+)
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import SimpleRateThrottle
 
 from plaid_integration.gateway import (
     PLAID_UNAVAILABLE_DETAIL,
@@ -34,12 +54,191 @@ from plaid_integration.serializers import (
 from plaid_integration.services import (
     PlaidExchangeDuplicateItem,
     PlaidExchangeProviderDataError,
+    WebhookDuplicateEvent,
     claim_exchange_handle,
     issue_exchange_handle,
     perform_sync,
     persist_exchange_connection,
+    persist_verified_webhook,
     plaid_client_user_id,
 )
+from plaid_integration.webhook_verification import (
+    WEBHOOK_VERIFICATION_FAILED_DETAIL,
+    PlaidWebhookVerificationError,
+    verify_plaid_webhook,
+)
+
+logger = logging.getLogger(__name__)
+
+WEBHOOK_PAYLOAD_INVALID_DETAIL = "Invalid webhook payload."
+WEBHOOK_RECEIVED_RESPONSE = {"status": "ok"}
+
+_WEBHOOK_TYPE_TRANSACTIONS = "TRANSACTIONS"
+_WEBHOOK_TRANSACTIONS_SUPPORTED_CODES = frozenset(
+    {"SYNC_UPDATES_AVAILABLE", "DEFAULT_UPDATE"}
+)
+_WEBHOOK_TYPE_MAX_LENGTH = 50
+_WEBHOOK_CODE_MAX_LENGTH = 50
+_WEBHOOK_ITEM_ID_MAX_LENGTH = 100
+
+
+class PlaidWebhookRateThrottle(SimpleRateThrottle):
+    """Rate limit the public webhook receiver per source IP (60/min).
+
+    The rate is configured under the dedicated ``plaid_webhook`` scope in
+    ``REST_FRAMEWORK.DEFAULT_THROTTLE_RATES`` and is applied only to this
+    view via ``throttle_classes``, so unrelated APIs are never throttled.
+    """
+
+    scope = "plaid_webhook"
+
+    def get_cache_key(self, request, view):
+        return self.cache_format % {
+            "scope": self.scope,
+            "ident": self.get_ident(request),
+        }
+
+
+class _LazyPlaidWebhookGateway:
+    """Build the configured gateway only after the JWT header is trusted.
+
+    ``verify_plaid_webhook`` rejects a missing or malformed header before it
+    asks for a key. Keeping gateway construction behind that key lookup makes
+    malformed deliveries fail as verification errors even when Plaid is
+    disabled or misconfigured, without touching settings secrets or the ORM.
+    """
+
+    def __init__(self):
+        self._gateway = None
+
+    def get_webhook_verification_key(self, key_id):
+        if self._gateway is None:
+            self._gateway = PlaidGateway.from_settings()
+        return self._gateway.get_webhook_verification_key(key_id)
+
+
+@dataclass(frozen=True)
+class _WebhookPayload:
+    webhook_type: str
+    webhook_code: str
+    item_id: str
+    initial_update_complete: bool
+    historical_update_complete: bool
+
+
+def _is_bounded_nonempty_string(value, max_length):
+    return isinstance(value, str) and bool(value) and len(value) <= max_length
+
+
+def _parse_webhook_payload(raw_body):
+    """Parse the exact verified bytes into a validated payload, or None.
+
+    Runs only after verification. The raw bytes are decoded as UTF-8 and
+    parsed with ``json.loads``; the result must be a JSON object whose
+    ``webhook_type``, ``webhook_code``, and ``item_id`` are bounded nonempty
+    strings (model max lengths) and whose ``initial_update_complete`` and
+    ``historical_update_complete`` flags, when present, are actual booleans.
+    Any deviation returns None and the endpoint mutates nothing.
+    """
+    try:
+        data = json.loads(raw_body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    webhook_type = data.get("webhook_type")
+    webhook_code = data.get("webhook_code")
+    item_id = data.get("item_id")
+    if not _is_bounded_nonempty_string(webhook_type, _WEBHOOK_TYPE_MAX_LENGTH):
+        return None
+    if not _is_bounded_nonempty_string(webhook_code, _WEBHOOK_CODE_MAX_LENGTH):
+        return None
+    if not _is_bounded_nonempty_string(item_id, _WEBHOOK_ITEM_ID_MAX_LENGTH):
+        return None
+    initial_update_complete = data.get("initial_update_complete", False)
+    historical_update_complete = data.get("historical_update_complete", False)
+    if not isinstance(initial_update_complete, bool):
+        return None
+    if not isinstance(historical_update_complete, bool):
+        return None
+    return _WebhookPayload(
+        webhook_type=webhook_type,
+        webhook_code=webhook_code,
+        item_id=item_id,
+        initial_update_complete=initial_update_complete,
+        historical_update_complete=historical_update_complete,
+    )
+
+
+@api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+@csrf_exempt
+@throttle_classes([PlaidWebhookRateThrottle])
+def webhook_transactions(request):
+    """Verify and durably persist a Plaid transactions webhook.
+
+    Public server-to-server receiver per ``docs/plaid.md`` section 8. The
+    exact raw ``request.body`` bytes and the ``Plaid-Verification`` JWT are
+    read first; the ES256 signature is verified through the injected-or-built
+    gateway before any JSON parsing or ORM query, and an unverifiable
+    delivery returns the fixed 400 and mutates nothing. Only after
+    verification is the body parsed and validated; verified unsupported
+    type/code and unmatched ``item_id`` deliveries return the fixed 200 and
+    persist nothing. A supported matched event is persisted inside one atomic
+    block (inbox row + ``sync_due`` + monotonic status advance), and a
+    re-delivered exact body is translated from the idempotency constraint to
+    the same fixed 200. Responses never reflect provider or body data, the
+    raw body is never stored, and requests are rate limited per source IP.
+    """
+    raw_body = request.body
+    verification_header = request.META.get("HTTP_PLAID_VERIFICATION")
+    try:
+        claims = verify_plaid_webhook(
+            raw_body,
+            verification_header,
+            gateway=_LazyPlaidWebhookGateway(),
+        )
+    except PlaidWebhookVerificationError:
+        return Response(
+            {"detail": WEBHOOK_VERIFICATION_FAILED_DETAIL},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    payload = _parse_webhook_payload(raw_body)
+    if payload is None:
+        return Response(
+            {"detail": WEBHOOK_PAYLOAD_INVALID_DETAIL},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if (
+        payload.webhook_type != _WEBHOOK_TYPE_TRANSACTIONS
+        or payload.webhook_code not in _WEBHOOK_TRANSACTIONS_SUPPORTED_CODES
+    ):
+        logger.warning(
+            "Ignoring unsupported Plaid webhook (type=%r code=%r).",
+            payload.webhook_type,
+            payload.webhook_code,
+        )
+        return Response(WEBHOOK_RECEIVED_RESPONSE)
+    connection = PlaidConnection.objects.filter(item_id=payload.item_id).first()
+    if connection is None:
+        return Response(WEBHOOK_RECEIVED_RESPONSE)
+    try:
+        persist_verified_webhook(
+            connection,
+            claims,
+            webhook_type=payload.webhook_type,
+            webhook_code=payload.webhook_code,
+            initial_update_complete=payload.initial_update_complete,
+            historical_update_complete=payload.historical_update_complete,
+        )
+    except WebhookDuplicateEvent:
+        logger.info(
+            "Duplicate Plaid webhook ignored (type=%r code=%r).",
+            payload.webhook_type,
+            payload.webhook_code,
+        )
+    return Response(WEBHOOK_RECEIVED_RESPONSE)
 
 
 @api_view(["POST"])

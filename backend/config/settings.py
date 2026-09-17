@@ -131,6 +131,11 @@ CSRF_FAILURE_VIEW = "config.views.csrf_failure"
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": ("users.authentication.SessionAuthentication",),
+    # Dedicated per-source-IP rate for the public webhook receiver only; no
+    # default throttle class is registered, so unrelated APIs are unaffected.
+    "DEFAULT_THROTTLE_RATES": {
+        "plaid_webhook": "60/min",
+    },
 }
 
 MIDDLEWARE = [

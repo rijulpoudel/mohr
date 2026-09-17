@@ -5,6 +5,7 @@ from plaid_integration.views import (
     connection_sync,
     exchange,
     link_token,
+    webhook_transactions,
 )
 
 urlpatterns = [
@@ -15,5 +16,10 @@ urlpatterns = [
         "connections/<int:pk>/sync/",
         connection_sync,
         name="plaid-connection-sync",
+    ),
+    path(
+        "webhooks/transactions/",
+        webhook_transactions,
+        name="plaid-webhook-transactions",
     ),
 ]
