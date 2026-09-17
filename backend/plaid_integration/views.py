@@ -1,6 +1,19 @@
-"""Authenticated Plaid Link endpoints (issue #37)."""
+"""Authenticated Plaid Link endpoints (issue #37) and connections slice F.
+
+The two connections endpoints for issue #38 slice F follow the frozen
+``docs/plaid.md`` section 3 boundaries: ``GET /api/plaid/connections/`` is a
+read-only owner-scoped list that never calls Plaid, never writes, and never
+renders a stored secret, cursor, key id, or provider payload; ``POST
+/api/plaid/connections/<id>/sync/`` is an owner-scoped manual sync trigger
+that maps a ``SyncRunResult`` to ``200`` only once the opening-balance anchor
+is set, ``202`` while the history window is still incomplete, and a fixed
+``503`` when the run was blocked without mutating anything. Per the Render
+Free single-process constraint, the GET route only reports persisted state;
+it never performs Plaid calls, cursor writes, or any mutation.
+"""
 
 from django.conf import settings
+from django.shortcuts import get_object_or_404
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
@@ -12,8 +25,10 @@ from plaid_integration.gateway import (
     PlaidGateway,
     PlaidGatewayError,
 )
+from plaid_integration.models import PlaidConnection
 from plaid_integration.serializers import (
     EXCHANGE_INVALID_DETAIL,
+    ConnectionSerializer,
     ExchangeRequestSerializer,
 )
 from plaid_integration.services import (
@@ -21,6 +36,7 @@ from plaid_integration.services import (
     PlaidExchangeProviderDataError,
     claim_exchange_handle,
     issue_exchange_handle,
+    perform_sync,
     persist_exchange_connection,
     plaid_client_user_id,
 )
@@ -141,4 +157,77 @@ def exchange(request):
             }
         },
         status=status.HTTP_201_CREATED,
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def connection_list(request):
+    """Owner-scoped read-only connection list.
+
+    Returns only ``request.user``'s connections with their linked accounts in
+    a bounded number of queries (one for connections, one for links, one for
+    the linked accounts via ``prefetch_related``). This route never calls
+    Plaid and never writes anything, per the Render Free single-process
+    constraint: it only reports persisted state.
+    """
+    connections = PlaidConnection.objects.filter(user=request.user).prefetch_related(
+        "account_links__account"
+    )
+    serializer = ConnectionSerializer(connections, many=True)
+    return Response(serializer.data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def connection_sync(request, pk):
+    """Owner-scoped manual sync trigger for ONE connection.
+
+    The lookup is scoped to ``request.user`` so a missing id and a foreign
+    id are the same indistinguishable 404 and nothing is ever fetched,
+    written, or called first. The disabled-integration 503 check mirrors the
+    link-token and exchange routes and returns before any provider call or
+    write. The run result maps to the frozen boundary: ``200`` with the
+    frozen field set only once the opening-balance anchor is set (the
+    provider reported ``HISTORICAL_UPDATE_COMPLETE`` on the drained final
+    page), ``202 {connection_id, status: "processing"}`` while the requested
+    history window is still incomplete, and a fixed ``503`` with the
+    established detail for every blocked run. A blocked run is never
+    reported as a successful sync: ``SyncRunResult`` carries only booleans
+    and counts (never the blocking reason), so the smallest consistent
+    mapping is one fixed 503 for all blocked conditions rather than
+    inspecting ``last_sync_error`` text or status in the view; the redacted
+    reason stays on the connection row for the repair path. No provider
+    payload, token, cursor, or provider identifier is ever returned.
+    """
+    if not settings.PLAID_ENABLED:
+        return Response(
+            {"detail": PLAID_UNAVAILABLE_DETAIL},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+    connection = get_object_or_404(
+        PlaidConnection.objects.filter(user=request.user),
+        pk=pk,
+    )
+    result = perform_sync(connection)
+    if result.blocked:
+        return Response(
+            {"detail": PLAID_UNAVAILABLE_DETAIL},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    if result.history_complete:
+        connection.refresh_from_db()
+        return Response(
+            {
+                "connection_id": connection.pk,
+                "status": connection.status,
+                "added": result.added,
+                "modified": result.modified,
+                "removed": result.removed,
+            }
+        )
+    return Response(
+        {"connection_id": connection.pk, "status": "processing"},
+        status=status.HTTP_202_ACCEPTED,
     )
