@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { type AccountType } from '../api/accounts'
 import {
   fetchPlaidConnections,
+  syncPlaidConnection,
   type PlaidConnection,
   type PlaidConnectionStatus,
 } from '../api/plaid'
@@ -10,6 +11,8 @@ import { useAuth } from '../auth/AuthContext'
 import { ConnectBankButton } from './ConnectBankButton'
 
 const GENERIC_ERROR_MESSAGE = 'Something went wrong. Please try again.'
+const STILL_IMPORTING_MESSAGE =
+  'Still importing. Transaction history is still being fetched.'
 
 export const CONNECTION_STALE_AFTER_MS = 24 * 60 * 60 * 1000
 
@@ -35,6 +38,39 @@ type ConnectionsState =
   | { status: 'loading' }
   | { status: 'ready'; connections: PlaidConnection[] }
   | { status: 'error'; message: string }
+
+type SyncNotice =
+  | { status: 'in-flight'; connectionId: number }
+  | {
+      status: 'done'
+      connectionId: number
+      added: number
+      modified: number
+      removed: number
+    }
+  | { status: 'processing'; connectionId: number }
+  | { status: 'error'; connectionId: number; message: string }
+
+interface SyncSummary {
+  added: number
+  modified: number
+  removed: number
+}
+
+function syncSummaryMessage(summary: SyncSummary): string {
+  const parts: string[] = []
+  if (summary.added > 0) {
+    parts.push(`${summary.added} added`)
+  }
+  if (summary.modified > 0) {
+    parts.push(`${summary.modified} updated`)
+  }
+  if (summary.removed > 0) {
+    parts.push(`${summary.removed} removed`)
+  }
+  if (parts.length === 0) return 'No changes were found.'
+  return `${parts.join(', ')}.`
+}
 
 function isConnectionStale(lastSyncedAt: string, now: number): boolean {
   return now - Date.parse(lastSyncedAt) > CONNECTION_STALE_AFTER_MS
@@ -77,14 +113,23 @@ function formatSyncTime(iso: string): string {
 function ConnectionCard({
   connection,
   now,
+  syncNotice,
+  onSync,
 }: {
   connection: PlaidConnection
   now: number
+  syncNotice: SyncNotice | null
+  onSync: (connectionId: number) => void
 }) {
   const syncStatus = connectionSyncStatus(connection, now)
   const accountPending = connection.linked_accounts.some(
     (account) => account.sync_pending,
   )
+  const syncInFlight = syncNotice !== null && syncNotice.status === 'in-flight'
+  const noticeForConnection =
+    syncNotice !== null && syncNotice.connectionId === connection.id
+      ? syncNotice
+      : null
   return (
     <li className="connection-item">
       <div className="connection-main">
@@ -113,6 +158,51 @@ function ConnectionCard({
           </div>
         )}
       </dl>
+      {connection.status === 'active' && (
+        <div className="connection-sync">
+          <button
+            type="button"
+            className="btn btn-secondary"
+            aria-label={`Sync now for ${connection.institution_name}`}
+            disabled={syncInFlight}
+            onClick={() => onSync(connection.id)}
+          >
+            Sync now
+          </button>
+          {noticeForConnection?.status === 'in-flight' && (
+            <p role="status" className="connection-note">
+              Syncing {connection.institution_name}…
+            </p>
+          )}
+          {noticeForConnection?.status === 'done' && (
+            <p role="status" className="connection-note">
+              {syncSummaryMessage({
+                added: noticeForConnection.added,
+                modified: noticeForConnection.modified,
+                removed: noticeForConnection.removed,
+              })}
+            </p>
+          )}
+          {noticeForConnection?.status === 'processing' && (
+            <p role="status" className="connection-note">
+              {STILL_IMPORTING_MESSAGE}
+            </p>
+          )}
+          {noticeForConnection?.status === 'error' && (
+            <div className="error-summary" role="alert">
+              <p>{noticeForConnection.message}</p>
+              <button
+                type="button"
+                className="btn"
+                aria-label={`Retry sync for ${connection.institution_name}`}
+                onClick={() => onSync(connection.id)}
+              >
+                Retry
+              </button>
+            </div>
+          )}
+        </div>
+      )}
       {connection.status === 'active' && accountPending && (
         <p className="connection-note">{INITIAL_IMPORT_MESSAGE}</p>
       )}
@@ -150,6 +240,14 @@ export function ConnectionsScreen() {
   const [attempt, setAttempt] = useState(0)
   const [state, setState] = useState<ConnectionsState>({ status: 'loading' })
   const [now, setNow] = useState(() => Date.now())
+  // One synchronization notice at a time, owned by the connection it describes.
+  // A pending notice is replaced when that sync settles, and a settled result
+  // stays readable until another sync replaces it or the user retries the list.
+  // The sync's own refetch deliberately does not clear it: that refetch lands
+  // within moments of the result, so clearing there would make the counts the
+  // user just asked for effectively invisible.
+  const [syncNotice, setSyncNotice] = useState<SyncNotice | null>(null)
+  const syncInFlightRef = useRef<number | null>(null)
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -185,7 +283,51 @@ export function ConnectionsScreen() {
     }
   }, [attempt, clearSession])
 
+  const startSync = useCallback(
+    (connectionId: number) => {
+      if (syncInFlightRef.current !== null) return
+      syncInFlightRef.current = connectionId
+      setSyncNotice({ status: 'in-flight', connectionId })
+      void syncPlaidConnection(connectionId)
+        .then((result) => {
+          if (syncInFlightRef.current !== connectionId) return
+          syncInFlightRef.current = null
+          if (result.status === 'processing') {
+            setSyncNotice({ status: 'processing', connectionId })
+          } else {
+            setSyncNotice({
+              status: 'done',
+              connectionId,
+              added: result.added,
+              modified: result.modified,
+              removed: result.removed,
+            })
+          }
+          setAttempt((current) => current + 1)
+        })
+        .catch((caught: unknown) => {
+          if (syncInFlightRef.current !== connectionId) return
+          syncInFlightRef.current = null
+          if (caught instanceof ApiError && caught.status === 401) {
+            setSyncNotice(null)
+            clearSession()
+            return
+          }
+          setSyncNotice({
+            status: 'error',
+            connectionId,
+            message:
+              caught instanceof ApiError
+                ? userMessage(caught)
+                : GENERIC_ERROR_MESSAGE,
+          })
+        })
+    },
+    [clearSession],
+  )
+
   const handleRetry = () => {
+    setSyncNotice(null)
     setState({ status: 'loading' })
     setAttempt((current) => current + 1)
   }
@@ -232,6 +374,8 @@ export function ConnectionsScreen() {
               key={connection.id}
               connection={connection}
               now={now}
+              syncNotice={syncNotice}
+              onSync={startSync}
             />
           ))}
         </ul>

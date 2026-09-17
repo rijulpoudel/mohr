@@ -1,6 +1,6 @@
-import { act, screen, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   calls,
   deferred,
@@ -8,6 +8,7 @@ import {
   jsonResponse,
   renderApp,
   requestLog,
+  setCsrfCookie,
 } from '../test/testUtils'
 import {
   CONNECTION_STALE_AFTER_MS,
@@ -763,5 +764,425 @@ describe('connections accessibility', () => {
       screen.getByRole('list', { name: 'Accounts linked to First Plaid Bank' }),
     ).toBeInTheDocument()
     expect(screen.queryByText('5')).not.toBeInTheDocument()
+  })
+})
+
+describe('connections manual sync', () => {
+  const SYNC_URL = '/api/plaid/connections/5/sync/'
+  // The exact detail the backend sends for every blocked or disabled sync run:
+  // backend/plaid_integration/gateway.py PLAID_UNAVAILABLE_DETAIL, returned by
+  // connection_sync in backend/plaid_integration/views.py. The client renders
+  // the server's detail verbatim, so this test must assert the real string
+  // rather than a convenient stand-in.
+  const SAFE_503_MESSAGE = 'Plaid service is unavailable. Try again later.'
+
+  function syncFixture(overrides: Record<string, unknown> = {}) {
+    return {
+      connection_id: 5,
+      status: 'active',
+      added: 12,
+      modified: 3,
+      removed: 1,
+      ...overrides,
+    }
+  }
+
+  function syncAuthenticatedHandler(
+    overrides: Partial<{
+      connections: (url: string, init?: RequestInit) => Response | Promise<Response>
+      sync: (url: string, init?: RequestInit) => Response | Promise<Response>
+    }> = {},
+  ) {
+    return (url: string, init?: RequestInit) => {
+      if (url === '/api/auth/me/') {
+        return jsonResponse({ id: 1, email: 'student@example.com' })
+      }
+      if (url === '/api/auth/csrf/') {
+        return jsonResponse({ detail: 'CSRF cookie set.' })
+      }
+      if (url === '/api/dashboard/summary/') return dashboardSummary()
+      if (url === '/api/plaid/connections/' && init?.method !== 'POST') {
+        return overrides.connections
+          ? overrides.connections(url, init)
+          : jsonResponse([connectionFixture()])
+      }
+      if (url === SYNC_URL && init?.method === 'POST') {
+        return overrides.sync
+          ? overrides.sync(url, init)
+          : jsonResponse(syncFixture())
+      }
+      return jsonResponse({}, 404)
+    }
+  }
+
+  beforeEach(() => {
+    setCsrfCookie()
+  })
+
+  it('renders a Sync now control only for active connections with a distinct accessible name', async () => {
+    installFetchMock(
+      syncAuthenticatedHandler({
+        connections: () =>
+          jsonResponse([
+            connectionFixture({ id: 1, institution_name: 'Alpha', status: 'active' }),
+            connectionFixture({ id: 2, institution_name: 'Beta', status: 'updating' }),
+            connectionFixture({ id: 3, institution_name: 'Gamma', status: 'error' }),
+            connectionFixture({ id: 4, institution_name: 'Delta', status: 'revoked' }),
+            connectionFixture({
+              id: 5,
+              institution_name: 'Epsilon',
+              status: 'disconnected',
+            }),
+          ]),
+      }),
+    )
+    renderApp('/connections')
+
+    expect(await screen.findByText('Alpha')).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: /^Sync now for / })).toHaveLength(1)
+    const alphaButton = screen.getByRole('button', { name: 'Sync now for Alpha' })
+    expect(alphaButton).toHaveAttribute('type', 'button')
+    expect(alphaButton).toBeEnabled()
+    for (const name of ['Beta', 'Gamma', 'Delta', 'Epsilon']) {
+      expect(
+        screen.queryByRole('button', { name: `Sync now for ${name}` }),
+      ).not.toBeInTheDocument()
+    }
+  })
+
+  it('issues exactly one sync POST for the clicked connection and refetches the list', async () => {
+    let connectionsCalls = 0
+    const mock = installFetchMock(
+      syncAuthenticatedHandler({
+        connections: () => {
+          connectionsCalls += 1
+          return jsonResponse([
+            connectionFixture({ id: 5, institution_name: 'First Plaid Bank' }),
+          ])
+        },
+      }),
+    )
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole('button', { name: 'Sync now for First Plaid Bank' }),
+    )
+
+    await waitFor(() => expect(calls(mock, SYNC_URL, 'POST')).toHaveLength(1))
+    await waitFor(() => expect(connectionsCalls).toBe(2))
+    expect(calls(mock, '/api/plaid/connections/', 'GET')).toHaveLength(2)
+  })
+
+  it('allows only one sync in flight: two clicks in the same tick produce one request and every control disables', async () => {
+    const pendingSync = deferred<Response>()
+    const mock = installFetchMock(
+      syncAuthenticatedHandler({
+        connections: () =>
+          jsonResponse([
+            connectionFixture({ id: 5, institution_name: 'First Plaid Bank' }),
+            connectionFixture({ id: 6, institution_name: 'Second Bank' }),
+          ]),
+        sync: () => pendingSync.promise,
+      }),
+    )
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const firstButton = screen.getByRole('button', {
+      name: 'Sync now for First Plaid Bank',
+    })
+    act(() => {
+      const click = new MouseEvent('click', { bubbles: true, cancelable: true })
+      firstButton.dispatchEvent(click)
+      firstButton.dispatchEvent(click)
+    })
+
+    await waitFor(() => expect(calls(mock, SYNC_URL, 'POST')).toHaveLength(1))
+    const secondButton = screen.getByRole('button', {
+      name: 'Sync now for Second Bank',
+    })
+    expect(firstButton).toBeDisabled()
+    expect(secondButton).toBeDisabled()
+    expect(screen.getByRole('status')).toHaveTextContent(
+      /Syncing First Plaid Bank/,
+    )
+
+    await act(async () => {
+      pendingSync.resolve(jsonResponse(syncFixture()))
+    })
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: 'Sync now for First Plaid Bank' }),
+      ).toBeEnabled(),
+    )
+    expect(calls(mock, SYNC_URL, 'POST')).toHaveLength(1)
+  })
+
+  it('renders the real counts only on the requested connection and keeps them readable afterwards', async () => {
+    const refetch = deferred<Response>()
+    let connectionsCalls = 0
+    installFetchMock(
+      syncAuthenticatedHandler({
+        connections: () => {
+          connectionsCalls += 1
+          if (connectionsCalls === 1) {
+            return jsonResponse([
+              connectionFixture({ id: 5, institution_name: 'First Plaid Bank' }),
+              connectionFixture({ id: 6, institution_name: 'Second Bank' }),
+            ])
+          }
+          return refetch.promise
+        },
+      }),
+    )
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole('button', { name: 'Sync now for First Plaid Bank' }),
+    )
+
+    expect(
+      await screen.findByText('12 added, 3 updated, 1 removed.'),
+    ).toBeInTheDocument()
+    const requested = connectionItem('First Plaid Bank')
+    expect(
+      within(requested).getByText('12 added, 3 updated, 1 removed.'),
+    ).toBeInTheDocument()
+    const other = connectionItem('Second Bank')
+    expect(
+      within(other).queryByText('12 added, 3 updated, 1 removed.'),
+    ).not.toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent(
+      '12 added, 3 updated, 1 removed.',
+    )
+    expect(connectionsCalls).toBe(2)
+
+    await act(async () => {
+      refetch.resolve(
+        jsonResponse([
+          connectionFixture({
+            id: 5,
+            institution_name: 'First Plaid Bank',
+            last_synced_at: '2026-09-12T09:00:00.000000Z',
+          }),
+          connectionFixture({ id: 6, institution_name: 'Second Bank' }),
+        ]),
+      )
+    })
+
+    // The refetched list has landed, which is proven by the connection's new
+    // last-sync time. The result of the synchronization the user just asked for
+    // is still the most recent thing that happened to this connection, so it
+    // stays readable until another synchronization replaces it. Clearing it the
+    // moment its own refetch landed would make the result effectively invisible.
+    expect(
+      await screen.findByText('Sep 12, 2026, 9:00 AM UTC'),
+    ).toBeInTheDocument()
+    expect(
+      within(connectionItem('First Plaid Bank')).getByText(
+        '12 added, 3 updated, 1 removed.',
+      ),
+    ).toBeInTheDocument()
+    expect(
+      within(connectionItem('Second Bank')).queryByText(
+        '12 added, 3 updated, 1 removed.',
+      ),
+    ).not.toBeInTheDocument()
+    expect(connectionsCalls).toBe(2)
+  })
+
+  it('shows an honest still-importing state for a 202 sync and still refetches', async () => {
+    const refetch = deferred<Response>()
+    let connectionsCalls = 0
+    const mock = installFetchMock(
+      syncAuthenticatedHandler({
+        connections: () => {
+          connectionsCalls += 1
+          if (connectionsCalls === 1) {
+            return jsonResponse([
+              connectionFixture({ id: 5, institution_name: 'First Plaid Bank' }),
+            ])
+          }
+          return refetch.promise
+        },
+        sync: () => jsonResponse({ connection_id: 5, status: 'processing' }, 202),
+      }),
+    )
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole('button', { name: 'Sync now for First Plaid Bank' }),
+    )
+
+    expect(await screen.findByRole('status')).toHaveTextContent(/Still importing/)
+    expect(screen.queryByText(/\d+ added/)).not.toBeInTheDocument()
+    expect(connectionsCalls).toBe(2)
+    expect(calls(mock, SYNC_URL, 'POST')).toHaveLength(1)
+
+    await act(async () => {
+      refetch.resolve(
+        jsonResponse([
+          connectionFixture({
+            id: 5,
+            institution_name: 'First Plaid Bank',
+            last_synced_at: '2026-09-12T09:00:00.000000Z',
+          }),
+        ]),
+      )
+    })
+    expect(
+      await screen.findByText('Sep 12, 2026, 9:00 AM UTC'),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent(/Still importing/)
+  })
+
+  it('surfaces the safe user message for a 503 with a Retry that re-issues the same sync', async () => {
+    const secondSync = deferred<Response>()
+    const refetch = deferred<Response>()
+    let syncCalls = 0
+    let connectionsCalls = 0
+    const mock = installFetchMock(
+      syncAuthenticatedHandler({
+        connections: () => {
+          connectionsCalls += 1
+          if (connectionsCalls === 1) {
+            return jsonResponse([
+              connectionFixture({ id: 5, institution_name: 'First Plaid Bank' }),
+            ])
+          }
+          return refetch.promise
+        },
+        sync: () => {
+          syncCalls += 1
+          if (syncCalls === 1) {
+            return jsonResponse({ detail: SAFE_503_MESSAGE }, 503)
+          }
+          return secondSync.promise
+        },
+      }),
+    )
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole('button', { name: 'Sync now for First Plaid Bank' }),
+    )
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(SAFE_503_MESSAGE)
+    expect(calls(mock, SYNC_URL, 'POST')).toHaveLength(1)
+
+    await user.click(
+      within(alert).getByRole('button', {
+        name: 'Retry sync for First Plaid Bank',
+      }),
+    )
+
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(calls(mock, SYNC_URL, 'POST')).toHaveLength(2)
+    expect(screen.getByRole('status')).toHaveTextContent(/Syncing/)
+
+    await act(async () => {
+      secondSync.resolve(jsonResponse(syncFixture({ added: 4, modified: 0, removed: 0 })))
+    })
+    expect(await screen.findByText('4 added.')).toBeInTheDocument()
+
+    await act(async () => {
+      refetch.resolve(
+        jsonResponse([
+          connectionFixture({
+            id: 5,
+            institution_name: 'First Plaid Bank',
+            last_synced_at: '2026-09-12T09:00:00.000000Z',
+          }),
+        ]),
+      )
+    })
+    expect(
+      await screen.findByText('Sep 12, 2026, 9:00 AM UTC'),
+    ).toBeInTheDocument()
+    expect(screen.getByText('4 added.')).toBeInTheDocument()
+    expect(connectionsCalls).toBe(2)
+  })
+
+  it('clears the session on a 401 sync with no alert and no storage writes', async () => {
+    const mock = installFetchMock(
+      syncAuthenticatedHandler({
+        sync: () =>
+          jsonResponse(
+            { detail: 'Authentication credentials were not provided.' },
+            401,
+          ),
+      }),
+    )
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole('button', { name: 'Sync now for First Plaid Bank' }),
+    )
+
+    expect(await screen.findByLabelText('Email')).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/login')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(calls(mock, SYNC_URL, 'POST')).toHaveLength(1)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  it('never writes token material to storage, cookies, or the console on the sync success path', async () => {
+    const refetch = deferred<Response>()
+    let connectionsCalls = 0
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      installFetchMock(
+        syncAuthenticatedHandler({
+          connections: () => {
+            connectionsCalls += 1
+            if (connectionsCalls === 1) {
+              return jsonResponse([
+                connectionFixture({ id: 5, institution_name: 'First Plaid Bank' }),
+              ])
+            }
+            return refetch.promise
+          },
+        }),
+      )
+      renderApp('/connections')
+      expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+      const user = userEvent.setup()
+      await user.click(
+        screen.getByRole('button', { name: 'Sync now for First Plaid Bank' }),
+      )
+      expect(
+        await screen.findByText('12 added, 3 updated, 1 removed.'),
+      ).toBeInTheDocument()
+
+      const output = [
+        ...consoleSpy.mock.calls,
+        ...warnSpy.mock.calls,
+        ...errorSpy.mock.calls,
+      ]
+        .flat()
+        .join('\n')
+      expect(output).not.toContain('test-csrf-token')
+      expect(localStorage.length).toBe(0)
+      expect(sessionStorage.length).toBe(0)
+    } finally {
+      consoleSpy.mockRestore()
+      warnSpy.mockRestore()
+      errorSpy.mockRestore()
+    }
   })
 })
