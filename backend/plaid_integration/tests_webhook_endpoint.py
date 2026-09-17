@@ -681,8 +681,15 @@ class WebhookEndpointRateLimitTests(WebhookEndpointBase):
             throttled = self.post_webhook(b"{}")
             self.assertEqual(throttled.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
 
-        unrelated = self.client.post(reverse("plaid-exchange"))
-        self.assertEqual(unrelated.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.client.force_login(self.user)
+        with patch(
+            "plaid_integration.views.PlaidWebhookRateThrottle.allow_request",
+            side_effect=AssertionError("webhook throttle leaked to another route"),
+        ) as webhook_throttle:
+            unrelated = self.client.post(reverse("plaid-link-token"))
+
+        self.assertEqual(unrelated.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        webhook_throttle.assert_not_called()
 
 
 class WebhookEndpointOrderingTests(WebhookEndpointBase):
