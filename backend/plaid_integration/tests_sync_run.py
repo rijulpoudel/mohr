@@ -189,6 +189,8 @@ class SyncRunPaginationTests(TestCase):
         )
 
     def test_first_sync_spans_two_pages_imports_accounts_and_completes(self):
+        self.connection.sync_due = True
+        self.connection.save(update_fields=["sync_due"])
         gateway = FakeSyncGateway(
             [
                 make_page(
@@ -274,8 +276,11 @@ class SyncRunPaginationTests(TestCase):
             TransactionsUpdateStatus.HISTORICAL_UPDATE_COMPLETE,
         )
         self.assertEqual(self.connection.last_sync_error, "")
+        self.assertFalse(self.connection.sync_due)
 
     def test_page_cap_stops_run_with_committed_cursor_reported_not_complete(self):
+        self.connection.sync_due = True
+        self.connection.save(update_fields=["sync_due"])
         gateway = FakeSyncGateway(
             [
                 make_page(
@@ -311,6 +316,7 @@ class SyncRunPaginationTests(TestCase):
             self.connection.transactions_update_status,
             TransactionsUpdateStatus.INITIAL_UPDATE_COMPLETE,
         )
+        self.assertTrue(self.connection.sync_due)
 
     def test_resumed_run_continues_from_committed_cursor_without_duplicates(self):
         first = perform_sync(

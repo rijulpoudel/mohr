@@ -10,6 +10,7 @@ dependencies = [
     "gunicorn>=26.2.0",
     "plaid-python>=44,<45",
     "psycopg[binary]>=3.2,<4",
+    "pyjwt[crypto]>=2.10,<3",
     "whitenoise>=6.12.0",
 ]
 

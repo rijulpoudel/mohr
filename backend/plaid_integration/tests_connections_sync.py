@@ -221,6 +221,35 @@ class ConnectionListAPITests(APITestCase):
         self.assertEqual(anchored["account_type"], AccountType.SAVINGS)
         self.assertFalse(anchored["sync_pending"])
 
+    def test_sync_pending_combines_pending_webhook_with_readiness(self):
+        self.client.force_login(self.user)
+        self.completed_connection.sync_due = True
+        self.completed_connection.save(update_fields=["sync_due"])
+        idle = PlaidConnection.objects.create(
+            user=self.user,
+            item_id="item-sandbox-conn-list-00004",
+            institution_name="Idle Bank",
+            transactions_update_status=TransactionsUpdateStatus.HISTORICAL_UPDATE_COMPLETE,
+            sync_due=False,
+        )
+        not_ready = PlaidConnection.objects.create(
+            user=self.user,
+            item_id="item-sandbox-conn-list-00005",
+            institution_name="Fresh Bank",
+            transactions_update_status=None,
+            sync_due=False,
+        )
+
+        response = self.client.get(self.list_url())
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        by_id = {item["id"]: item for item in response.data}
+        self.assertTrue(by_id[self.completed_connection.pk]["sync_pending"])
+        self.assertFalse(by_id[idle.pk]["sync_pending"])
+        self.assertTrue(by_id[not_ready.pk]["sync_pending"])
+        for item in response.data:
+            self.assertNotIn("sync_due", item)
+
     def test_account_sync_pending_flips_after_anchor_is_applied(self):
         self.client.force_login(self.user)
         before = self.client.get(self.list_url())

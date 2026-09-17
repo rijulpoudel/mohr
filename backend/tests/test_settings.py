@@ -176,6 +176,20 @@ DUMP_PLAID_ENABLED = textwrap.dedent(
 )
 
 
+DUMP_PLAID_INBOX = textwrap.dedent(
+    """\
+    print(
+        json.dumps(
+            {
+                "cap": settings.PLAID_WEBHOOK_INBOX_CAP,
+                "retention_days": settings.PLAID_WEBHOOK_PROCESSED_RETENTION_DAYS,
+            }
+        )
+    )
+    """
+)
+
+
 def run_settings(env_overrides, body="pass"):
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -642,3 +656,45 @@ class PlaidSettingsTests(TestCase):
         self.assertIn("ImproperlyConfigured", result.stderr)
         self.assertIn("invalid Fernet key", result.stderr)
         self.assertNotIn("not-a-fernet-key", result.stderr)
+
+
+class PlaidInboxSettingsTests(TestCase):
+    def test_defaults_are_bounded(self):
+        result = run_settings({}, body=DUMP_PLAID_INBOX)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["cap"], 10000)
+        self.assertEqual(payload["retention_days"], 30)
+
+    def test_configured_positive_values_are_preserved(self):
+        env = {
+            "PLAID_WEBHOOK_INBOX_CAP": "42",
+            "PLAID_WEBHOOK_PROCESSED_RETENTION_DAYS": "7",
+        }
+        result = run_settings(env, body=DUMP_PLAID_INBOX)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["cap"], 42)
+        self.assertEqual(payload["retention_days"], 7)
+
+    def test_invalid_values_fail_closed_at_import(self):
+        cases = [
+            ("PLAID_WEBHOOK_INBOX_CAP", "0"),
+            ("PLAID_WEBHOOK_INBOX_CAP", "-1"),
+            ("PLAID_WEBHOOK_INBOX_CAP", "abc"),
+            ("PLAID_WEBHOOK_INBOX_CAP", ""),
+            ("PLAID_WEBHOOK_INBOX_CAP", "1.5"),
+            ("PLAID_WEBHOOK_PROCESSED_RETENTION_DAYS", "0"),
+            ("PLAID_WEBHOOK_PROCESSED_RETENTION_DAYS", "-5"),
+            ("PLAID_WEBHOOK_PROCESSED_RETENTION_DAYS", "later"),
+            ("PLAID_WEBHOOK_PROCESSED_RETENTION_DAYS", ""),
+        ]
+        for name, value in cases:
+            with self.subTest(name=name, value=value):
+                result = run_settings({name: value})
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("ImproperlyConfigured", result.stderr)
+                self.assertIn(name, result.stderr)

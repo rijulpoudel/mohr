@@ -15,7 +15,8 @@ import json
 import logging
 import secrets
 import traceback
-from datetime import timedelta
+from datetime import date, timedelta
+from decimal import Decimal
 from unittest.mock import patch
 
 from cryptography.fernet import Fernet
@@ -33,6 +34,8 @@ from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
 from urllib3.exceptions import ProtocolError
 
+from accounts.models import Account, AccountType
+from categories.models import Category, CategoryType
 from plaid_integration.gateway import (
     PLAID_REQUEST_TIMEOUT_SECONDS,
     PLAID_UNAVAILABLE_DETAIL,
@@ -43,9 +46,11 @@ from plaid_integration.gateway import (
     PublicTokenExchangeResult,
 )
 from plaid_integration.models import (
+    PlaidAccountLink,
     PlaidConnection,
     PlaidConnectionStatus,
     PlaidExchangeHandle,
+    PlaidItemRemovalRequest,
     TransactionsUpdateStatus,
 )
 from plaid_integration.serializers import EXCHANGE_INVALID_DETAIL
@@ -60,6 +65,7 @@ from plaid_integration.services import (
     persist_exchange_connection,
 )
 from plaid_integration.token_encryption import TokenKeyRing
+from transactions.models import Transaction, TransactionSource, TransactionType
 
 SYNTHETIC_ACCESS_TOKEN = "access-sandbox-00000000-0000-0000-0000-000000000000"
 SYNTHETIC_PUBLIC_TOKEN = "public-sandbox-00000000-0000-0000-0000-000000000000"
@@ -626,8 +632,10 @@ class PersistExchangeConnectionTests(TestCase):
         )
 
     def test_valid_provider_data_persists_normalized_connection(self):
-        connection = self.persist()
+        result = self.persist()
+        connection = result.connection
 
+        self.assertTrue(result.created)
         connection.refresh_from_db()
         self.assertEqual(connection.user, self.user)
         self.assertEqual(connection.item_id, SYNTHETIC_ITEM_ID)
@@ -643,12 +651,15 @@ class PersistExchangeConnectionTests(TestCase):
     def test_blank_institution_name_normalizes_to_unknown(self):
         for index, institution_name in enumerate((None, "", "   ")):
             with self.subTest(institution_name=institution_name):
-                connection = self.persist(
+                result = self.persist(
                     item_id=f"{SYNTHETIC_ITEM_ID}-blank-{index}",
                     institution_name=institution_name,
                 )
 
-                self.assertEqual(connection.institution_name, UNKNOWN_INSTITUTION)
+                self.assertTrue(result.created)
+                self.assertEqual(
+                    result.connection.institution_name, UNKNOWN_INSTITUTION
+                )
 
     def test_non_string_or_empty_item_id_raises_provider_data_error(self):
         for item_id in (None, "", 123, ["item"]):
@@ -678,19 +689,294 @@ class PersistExchangeConnectionTests(TestCase):
 
         self.assertEqual(PlaidConnection.objects.count(), 0)
 
-    def test_exact_duplicate_translates_without_diagnostic_constraint_name(self):
+    def test_same_user_same_item_heals_preserving_cursor_links_and_history(self):
+        synced_at = timezone.now() - timedelta(days=3)
         existing = PlaidConnection.objects.create(
             user=self.user,
             item_id=SYNTHETIC_ITEM_ID,
             institution_name="Existing Bank",
             access_token_encrypted="key-a:original-package",
             encryption_key_id="key-a",
+            status=PlaidConnectionStatus.ERROR,
+            sync_cursor="cursor-opaque-heal-001",
+            transactions_update_status=(
+                TransactionsUpdateStatus.HISTORICAL_UPDATE_COMPLETE
+            ),
+            last_synced_at=synced_at,
+            sync_due=False,
+        )
+        account = Account.objects.create(
+            user=self.user,
+            name="Heal Checking",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("100.00"),
+            is_archived=True,
+        )
+        link = PlaidAccountLink.objects.create(
+            connection=existing,
+            user=self.user,
+            account=account,
+            plaid_account_id="plaid-account-heal-0001",
+            plaid_type="depository",
+            plaid_subtype="checking",
+            mask="1111",
+        )
+        category = Category.objects.create(
+            user=self.user,
+            name="Heal Salary",
+            category_type=CategoryType.INCOME,
+        )
+        synced_tx = Transaction.objects.create(
+            user=self.user,
+            connection=existing,
+            account=account,
+            category=category,
+            transaction_type=TransactionType.INCOME,
+            amount=Decimal("25.00"),
+            date=date(2026, 9, 1),
+            provider_name="Synthetic Payroll",
+            source=TransactionSource.PLAID,
+            plaid_transaction_id="plaid-tx-heal-0001",
+        )
+        PlaidItemRemovalRequest.objects.create(
+            connection=existing,
+            access_token_encrypted="key-a:relocated-package",
+            encryption_key_id="key-a",
+            status="pending",
         )
 
-        with patch("plaid_integration.services._constraint_name", return_value=None):
-            with self.assertRaises(PlaidExchangeDuplicateItem):
-                self.persist()
+        result = persist_exchange_connection(
+            self.user,
+            SYNTHETIC_ITEM_ID,
+            "Healed Bank",
+            "key-b:new-package",
+            "key-b",
+        )
 
+        self.assertFalse(result.created)
+        self.assertEqual(PlaidConnection.objects.count(), 1)
+        healed = result.connection
+        healed.refresh_from_db()
+        self.assertEqual(healed.pk, existing.pk)
+        self.assertEqual(healed.access_token_encrypted, "key-b:new-package")
+        self.assertEqual(healed.encryption_key_id, "key-b")
+        self.assertEqual(healed.status, PlaidConnectionStatus.ACTIVE)
+        self.assertTrue(healed.sync_due)
+        self.assertEqual(healed.institution_name, "Healed Bank")
+        # Preserved readiness and history inputs.
+        self.assertEqual(healed.sync_cursor, "cursor-opaque-heal-001")
+        self.assertEqual(
+            healed.transactions_update_status,
+            TransactionsUpdateStatus.HISTORICAL_UPDATE_COMPLETE,
+        )
+        self.assertEqual(healed.last_synced_at, synced_at)
+        self.assertTrue(PlaidAccountLink.objects.filter(pk=link.pk).exists())
+        self.assertTrue(Transaction.objects.filter(pk=synced_tx.pk).exists())
+        # Un-archived own account and deleted the stale removal row.
+        account.refresh_from_db()
+        self.assertFalse(account.is_archived)
+        self.assertFalse(
+            PlaidItemRemovalRequest.objects.filter(connection_id=existing.pk).exists()
+        )
+
+    def test_heal_preserves_name_on_blank_and_updates_on_bounded(self):
+        PlaidConnection.objects.create(
+            user=self.user,
+            item_id=SYNTHETIC_ITEM_ID,
+            institution_name="Stored Bank",
+            access_token_encrypted="key-a:original-package",
+            encryption_key_id="key-a",
+        )
+
+        for blank in (None, "", "   "):
+            with self.subTest(blank=blank):
+                result = persist_exchange_connection(
+                    self.user,
+                    SYNTHETIC_ITEM_ID,
+                    blank,
+                    "key-b:new-package",
+                    "key-b",
+                )
+                self.assertFalse(result.created)
+                result.connection.refresh_from_db()
+                self.assertEqual(result.connection.institution_name, "Stored Bank")
+
+        result = persist_exchange_connection(
+            self.user,
+            SYNTHETIC_ITEM_ID,
+            "Bounded New Bank",
+            "key-b:new-package-2",
+            "key-b",
+        )
+        self.assertFalse(result.created)
+        result.connection.refresh_from_db()
+        self.assertEqual(result.connection.institution_name, "Bounded New Bank")
+
+    def test_heal_keeps_stored_name_on_overlong_institution(self):
+        PlaidConnection.objects.create(
+            user=self.user,
+            item_id=SYNTHETIC_ITEM_ID,
+            institution_name="Stored Bank",
+            access_token_encrypted="key-a:original-package",
+            encryption_key_id="key-a",
+        )
+
+        result = persist_exchange_connection(
+            self.user,
+            SYNTHETIC_ITEM_ID,
+            "b" * (EXCHANGE_INSTITUTION_MAX_LENGTH + 1),
+            "key-b:new-package",
+            "key-b",
+        )
+
+        self.assertFalse(result.created)
+        result.connection.refresh_from_db()
+        self.assertEqual(result.connection.institution_name, "Stored Bank")
+        self.assertEqual(result.connection.access_token_encrypted, "key-b:new-package")
+
+    def test_cross_user_same_item_still_raises_duplicate_and_mutates_nothing(self):
+        other_user = get_user_model().objects.create_user(
+            email="persist-other@example.com",
+            password="TestOnlyPassword123!",
+        )
+        existing = PlaidConnection.objects.create(
+            user=other_user,
+            item_id=SYNTHETIC_ITEM_ID,
+            institution_name="Other Bank",
+            access_token_encrypted="key-a:other-package",
+            encryption_key_id="key-a",
+            status=PlaidConnectionStatus.ERROR,
+            sync_cursor="cursor-other-001",
+            sync_due=False,
+        )
+
+        with self.assertRaises(PlaidExchangeDuplicateItem):
+            self.persist()
+
+        existing.refresh_from_db()
+        self.assertEqual(existing.access_token_encrypted, "key-a:other-package")
+        self.assertEqual(existing.encryption_key_id, "key-a")
+        self.assertEqual(existing.institution_name, "Other Bank")
+        self.assertEqual(existing.status, PlaidConnectionStatus.ERROR)
+        self.assertEqual(existing.sync_cursor, "cursor-other-001")
+        self.assertFalse(existing.sync_due)
+        self.assertEqual(PlaidConnection.objects.count(), 1)
+
+    def test_named_unique_race_translates_to_duplicate(self):
+        """Concurrent-insert race with a named unique diagnostic heals nothing.
+
+        The initial locked lookup observes ``DoesNotExist`` (the concurrent
+        winner has not committed yet from this transaction's view), then the
+        new-row save raises the exact item-id unique violation. Only the
+        named-constraint translation can convert it: the user-mismatch
+        branch is unreachable (no existing row was returned) and the save
+        mock proves the insert was attempted.
+        """
+        other_user = get_user_model().objects.create_user(
+            email="persist-named-race-other@example.com",
+            password="TestOnlyPassword123!",
+        )
+        existing = PlaidConnection.objects.create(
+            user=other_user,
+            item_id=SYNTHETIC_ITEM_ID,
+            institution_name="Existing Bank",
+            access_token_encrypted="key-a:original-package",
+            encryption_key_id="key-a",
+        )
+        race_marker = "race-named-marker-8f2c"
+
+        class NamedDiag:
+            constraint_name = "plaid_connection_item_id_unique"
+
+        def racing_save(*args, **kwargs):
+            cause = IntegrityError("synthetic named unique cause")
+            cause.diag = NamedDiag()
+            raise IntegrityError(
+                f"duplicate key value violates unique constraint ({race_marker})"
+            ) from cause
+
+        with (
+            patch.object(
+                PlaidConnection.objects, "select_for_update"
+            ) as mock_locked_lookup,
+            patch(
+                "plaid_integration.services.PlaidConnection.save",
+                side_effect=racing_save,
+            ) as mock_save,
+        ):
+            mock_locked_lookup.return_value.get.side_effect = (
+                PlaidConnection.DoesNotExist
+            )
+            with self.assertRaises(PlaidExchangeDuplicateItem) as raised:
+                self.persist()
+            mock_locked_lookup.assert_called_once_with()
+            mock_locked_lookup.return_value.get.assert_called_once_with(
+                item_id=SYNTHETIC_ITEM_ID
+            )
+            mock_save.assert_called_once()
+
+        self.assertNotIn(race_marker, str(raised.exception))
+        self.assertNotIn(race_marker, repr(raised.exception))
+        existing.refresh_from_db()
+        self.assertEqual(existing.access_token_encrypted, "key-a:original-package")
+        self.assertEqual(existing.institution_name, "Existing Bank")
+        self.assertEqual(PlaidConnection.objects.count(), 1)
+
+    def test_exact_duplicate_translates_without_diagnostic_constraint_name(self):
+        """No-diagnostic fallback translates only via the exact item_id row.
+
+        Same race shape as the named test, but the backend yields no
+        constraint diagnostic (SQLite): translation happens exclusively
+        through the exact-``item_id`` fallback ``.exists()`` against the
+        concurrently committed row. Removing that fallback re-raises the
+        raw ``IntegrityError`` and this test fails.
+        """
+        other_user = get_user_model().objects.create_user(
+            email="persist-race-other@example.com",
+            password="TestOnlyPassword123!",
+        )
+        existing = PlaidConnection.objects.create(
+            user=other_user,
+            item_id=SYNTHETIC_ITEM_ID,
+            institution_name="Existing Bank",
+            access_token_encrypted="key-a:original-package",
+            encryption_key_id="key-a",
+        )
+        race_marker = "race-fallback-marker-4d1e"
+
+        class NoDiagCause(Exception):
+            pass
+
+        def racing_save(*args, **kwargs):
+            error = IntegrityError(
+                f"UNIQUE constraint failed: plaid_connection.item_id ({race_marker})"
+            )
+            error.__cause__ = NoDiagCause()
+            raise error
+
+        with (
+            patch.object(
+                PlaidConnection.objects, "select_for_update"
+            ) as mock_locked_lookup,
+            patch(
+                "plaid_integration.services.PlaidConnection.save",
+                side_effect=racing_save,
+            ) as mock_save,
+            patch("plaid_integration.services._constraint_name", return_value=None),
+        ):
+            mock_locked_lookup.return_value.get.side_effect = (
+                PlaidConnection.DoesNotExist
+            )
+            with self.assertRaises(PlaidExchangeDuplicateItem) as raised:
+                self.persist()
+            mock_locked_lookup.assert_called_once_with()
+            mock_locked_lookup.return_value.get.assert_called_once_with(
+                item_id=SYNTHETIC_ITEM_ID
+            )
+            mock_save.assert_called_once()
+
+        self.assertNotIn(race_marker, str(raised.exception))
+        self.assertNotIn(race_marker, repr(raised.exception))
         existing.refresh_from_db()
         self.assertEqual(existing.access_token_encrypted, "key-a:original-package")
         self.assertEqual(existing.institution_name, "Existing Bank")
@@ -1139,7 +1425,117 @@ class ExchangeAPITests(APITestCase):
         self.assertIsNone(row.consumed_at)
         self.assertEqual(PlaidConnection.objects.count(), 0)
 
-    def test_duplicate_item_for_same_user_returns_400_and_preserves_existing_row(self):
+    def test_same_user_same_item_heals_with_200_and_exact_shape(self):
+        synced_at = timezone.now() - timedelta(days=3)
+        existing = PlaidConnection.objects.create(
+            user=self.user,
+            item_id=SYNTHETIC_ITEM_ID,
+            institution_name="Existing Bank",
+            access_token_encrypted="key-a:original-package",
+            encryption_key_id="key-a",
+            status=PlaidConnectionStatus.ERROR,
+            sync_cursor="cursor-opaque-heal-001",
+            transactions_update_status=(
+                TransactionsUpdateStatus.HISTORICAL_UPDATE_COMPLETE
+            ),
+            last_synced_at=synced_at,
+            sync_due=False,
+        )
+        account = Account.objects.create(
+            user=self.user,
+            name="Heal Checking",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("100.00"),
+            is_archived=True,
+        )
+        link = PlaidAccountLink.objects.create(
+            connection=existing,
+            user=self.user,
+            account=account,
+            plaid_account_id="plaid-account-heal-0001",
+            plaid_type="depository",
+            plaid_subtype="checking",
+            mask="1111",
+        )
+        category = Category.objects.create(
+            user=self.user,
+            name="Heal Salary",
+            category_type=CategoryType.INCOME,
+        )
+        synced_tx = Transaction.objects.create(
+            user=self.user,
+            connection=existing,
+            account=account,
+            category=category,
+            transaction_type=TransactionType.INCOME,
+            amount=Decimal("25.00"),
+            date=date(2026, 9, 1),
+            provider_name="Synthetic Payroll",
+            source=TransactionSource.PLAID,
+            plaid_transaction_id="plaid-tx-heal-0001",
+        )
+        PlaidItemRemovalRequest.objects.create(
+            connection=existing,
+            access_token_encrypted="key-a:relocated-package",
+            encryption_key_id="key-a",
+            status="pending",
+        )
+
+        with self.patched_gateway(FakePlaidApi()):
+            with self.assertNoLogs("plaid_integration", level=logging.WARNING):
+                response = self.post_exchange(data=self.valid_payload())
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(set(response.data.keys()), {"connection"})
+        body = response.data["connection"]
+        self.assertEqual(
+            set(body.keys()),
+            {"id", "institution_name", "status", "linked_accounts"},
+        )
+        self.assertEqual(body["id"], existing.pk)
+        self.assertEqual(body["institution_name"], "Synthetic Test Bank")
+        self.assertEqual(body["status"], PlaidConnectionStatus.ACTIVE)
+        self.assertEqual(body["linked_accounts"], [])
+        self.assertEqual(PlaidConnection.objects.count(), 1)
+        existing.refresh_from_db()
+        decrypted = SYNTHETIC_RING.decrypt(
+            existing.access_token_encrypted,
+            existing.encryption_key_id,
+        )
+        self.assertEqual(decrypted.plaintext.decode("ascii"), SYNTHETIC_ACCESS_TOKEN)
+        self.assertNotEqual(existing.access_token_encrypted, "key-a:original-package")
+        self.assertNotEqual(existing.access_token_encrypted, "key-a:relocated-package")
+        self.assertEqual(existing.status, PlaidConnectionStatus.ACTIVE)
+        self.assertTrue(existing.sync_due)
+        self.assertEqual(existing.sync_cursor, "cursor-opaque-heal-001")
+        self.assertEqual(
+            existing.transactions_update_status,
+            TransactionsUpdateStatus.HISTORICAL_UPDATE_COMPLETE,
+        )
+        self.assertEqual(existing.last_synced_at, synced_at)
+        self.assertTrue(PlaidAccountLink.objects.filter(pk=link.pk).exists())
+        self.assertTrue(Transaction.objects.filter(pk=synced_tx.pk).exists())
+        account.refresh_from_db()
+        self.assertFalse(account.is_archived)
+        self.assertFalse(
+            PlaidItemRemovalRequest.objects.filter(connection_id=existing.pk).exists()
+        )
+        raw = response.content.decode()
+        for forbidden in (
+            SYNTHETIC_ACCESS_TOKEN,
+            SYNTHETIC_PUBLIC_TOKEN,
+            "access_token",
+            "public_token",
+            "item_id",
+            SYNTHETIC_ITEM_ID,
+            "cursor-opaque-heal-001",
+            "key-a",
+            "secret-test",
+            "client-id-test",
+        ):
+            self.assertNotIn(forbidden, raw)
+
+    def test_heal_unarchives_own_accounts_only(self):
         existing = PlaidConnection.objects.create(
             user=self.user,
             item_id=SYNTHETIC_ITEM_ID,
@@ -1147,15 +1543,122 @@ class ExchangeAPITests(APITestCase):
             access_token_encrypted="key-a:original-package",
             encryption_key_id="key-a",
         )
+        own_account = Account.objects.create(
+            user=self.user,
+            name="Own Archived",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("10.00"),
+            is_archived=True,
+        )
+        PlaidAccountLink.objects.create(
+            connection=existing,
+            user=self.user,
+            account=own_account,
+            plaid_account_id="plaid-account-own-0001",
+            plaid_type="depository",
+            plaid_subtype="checking",
+            mask="2222",
+        )
+        other_connection = PlaidConnection.objects.create(
+            user=self.user,
+            item_id="item-sandbox-other-connection-0001",
+            institution_name="Other Connection Bank",
+            access_token_encrypted="key-a:other-package",
+            encryption_key_id="key-a",
+        )
+        foreign_archived = Account.objects.create(
+            user=self.user,
+            name="Foreign Archived",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("20.00"),
+            is_archived=True,
+        )
+        PlaidAccountLink.objects.create(
+            connection=other_connection,
+            user=self.user,
+            account=foreign_archived,
+            plaid_account_id="plaid-account-foreign-0001",
+            plaid_type="depository",
+            plaid_subtype="checking",
+            mask="3333",
+        )
+
+        with self.patched_gateway(FakePlaidApi()):
+            response = self.post_exchange(data=self.valid_payload())
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        own_account.refresh_from_db()
+        foreign_archived.refresh_from_db()
+        self.assertFalse(own_account.is_archived)
+        self.assertTrue(foreign_archived.is_archived)
+
+    def test_heal_preserves_name_on_blank_and_updates_on_bounded(self):
+        existing = PlaidConnection.objects.create(
+            user=self.user,
+            item_id=SYNTHETIC_ITEM_ID,
+            institution_name="Stored Bank",
+            access_token_encrypted="key-a:original-package",
+            encryption_key_id="key-a",
+        )
+        for blank in (None, "", "   "):
+            with self.subTest(blank=blank):
+                fake_api = FakePlaidApi(
+                    item_response=FakeItemGetResponse(institution_name=blank)
+                )
+                with self.patched_gateway(fake_api):
+                    response = self.post_exchange(data=self.valid_payload())
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                existing.refresh_from_db()
+                self.assertEqual(existing.institution_name, "Stored Bank")
+                self.assertEqual(
+                    response.data["connection"]["institution_name"],
+                    "Stored Bank",
+                )
+
+        with self.patched_gateway(
+            FakePlaidApi(
+                item_response=FakeItemGetResponse(institution_name="Bounded Bank")
+            )
+        ):
+            response = self.post_exchange(data=self.valid_payload())
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        existing.refresh_from_db()
+        self.assertEqual(existing.institution_name, "Bounded Bank")
+
+    def test_cross_user_same_item_returns_400_and_mutates_nothing(self):
+        existing = PlaidConnection.objects.create(
+            user=self.other_user,
+            item_id=SYNTHETIC_ITEM_ID,
+            institution_name="Other Bank",
+            access_token_encrypted="key-a:other-package",
+            encryption_key_id="key-a",
+            status=PlaidConnectionStatus.ERROR,
+            sync_cursor="cursor-other-001",
+            sync_due=False,
+        )
+        before = list(PlaidConnection.objects.order_by("pk").values())
 
         with self.patched_gateway(FakePlaidApi()):
             response = self.post_exchange(data=self.valid_payload())
 
         self.assert_generic_400(response)
         existing.refresh_from_db()
-        self.assertEqual(existing.access_token_encrypted, "key-a:original-package")
-        self.assertEqual(existing.institution_name, "Existing Bank")
+        self.assertEqual(existing.access_token_encrypted, "key-a:other-package")
+        self.assertEqual(existing.status, PlaidConnectionStatus.ERROR)
+        self.assertEqual(existing.sync_cursor, "cursor-other-001")
+        self.assertFalse(existing.sync_due)
+        self.assertFalse(self.user.plaid_connections.exists())
+        self.assertEqual(list(PlaidConnection.objects.order_by("pk").values()), before)
         self.assertEqual(PlaidConnection.objects.count(), 1)
+
+    def test_new_item_id_still_creates_with_201(self):
+        with self.patched_gateway(FakePlaidApi()):
+            response = self.post_exchange(data=self.valid_payload())
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(PlaidConnection.objects.count(), 1)
+        created = PlaidConnection.objects.get(user=self.user)
+        self.assertEqual(created.item_id, SYNTHETIC_ITEM_ID)
 
     def test_duplicate_item_for_other_user_returns_400_and_preserves_their_row(self):
         existing = PlaidConnection.objects.create(
@@ -1176,7 +1679,7 @@ class ExchangeAPITests(APITestCase):
 
     def test_duplicate_item_race_surfaces_generic_400_and_preserves_row(self):
         existing = PlaidConnection.objects.create(
-            user=self.user,
+            user=self.other_user,
             item_id=SYNTHETIC_ITEM_ID,
             institution_name="Existing Bank",
             access_token_encrypted="key-a:original-package",
@@ -1218,7 +1721,7 @@ class ExchangeAPITests(APITestCase):
         self,
     ):
         existing = PlaidConnection.objects.create(
-            user=self.user,
+            user=self.other_user,
             item_id=SYNTHETIC_ITEM_ID,
             institution_name="Existing Bank",
             access_token_encrypted="key-a:original-package",

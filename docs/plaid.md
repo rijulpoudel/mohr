@@ -111,6 +111,7 @@ POST   /api/plaid/link-token/        authenticated, CSRF protected
 POST   /api/plaid/exchange/          authenticated, CSRF protected
 GET    /api/plaid/connections/       authenticated list of user's connections
 POST   /api/plaid/connections/<id>/sync/      authenticated manual sync trigger
+POST   /api/plaid/connections/<id>/link-token/ authenticated update-mode Link token
 POST   /api/plaid/connections/<id>/disconnect/ authenticated disconnect
 POST   /api/plaid/webhooks/transactions/      public, signature-verified, CSRF-exempt
 ```
@@ -126,14 +127,24 @@ Response boundaries:
   `request.user` returns a generic `400` and persists nothing.
 - `GET /api/plaid/connections/` -> `200 [{id, institution_name, status,
   sync_pending, last_synced_at, linked_accounts: [{id, name, account_type,
-  mask, sync_pending}]}]`, where `sync_pending` derives from
-  `transactions_update_status != HISTORICAL_UPDATE_COMPLETE`. No tokens,
-  cursors, raw provider payloads, or other users' data.
+  mask, sync_pending}]}]`, where connection `sync_pending` is true when a
+  verified webhook awaits the explicit bounded sync path (`sync_due`) or
+  when `transactions_update_status != HISTORICAL_UPDATE_COMPLETE` (a null
+  status is still pending); the raw `sync_due` flag is never exposed as a
+  separate field. No tokens, cursors, raw provider payloads, or other
+  users' data.
 - `POST .../sync/` -> `200 {connection_id, status, added, modified,
   removed}` only once the opening-balance anchor is set (section 5), or
   `202 {connection_id, status: "processing"}` while the requested history
   window is still incomplete. Manual trigger only; see section 7.
+- `POST .../link-token/` -> `200 {link_token, expiration}` for update mode.
+  The server decrypts the owned connection's existing access token only for
+  Plaid's request; it creates no exchange handle because update mode does not
+  replace or exchange the permanent access token.
 - `POST .../disconnect/` -> `200 {connection_id, status: "disconnected"}`.
+  The response never varies with remote Plaid success, because the user is
+  locally disconnected either way, and never carries the token, key id,
+  `item_id`, cursor, or provider detail.
 - Webhook endpoint returns `200` on verified receipt (even if processing is
   deferred) and `4xx` without mutation on verification failure. It returns
   no financial data.
@@ -199,14 +210,40 @@ provider-reported removals (`is_provider_removed`) and supersession
   `user` FK (nullable likewise), `webhook_type`, `webhook_code`, provider
   `item_id`, `idempotency_key` (SHA-256 of the verified raw body, never the
   body itself), `initial_update_complete`, `historical_update_complete`,
-  `received_at`, `processed_at` (nullable). The raw payload is excluded;
-  parsed fields only, never secrets.
+  `received_at`, `processed_at` (nullable). Recognized matched rows are
+  accepted with `processed_at` equal to `received_at`: the notification was
+  safely converted into durable sync state, which is not proof that the
+  provider cursor was fully drained (that stays the separate `sync_due`
+  flag); a null `processed_at` remains possible only for legacy rows. The
+  raw payload is excluded; parsed fields only, never secrets.
 - A verified webhook whose `item_id` matches no `PlaidConnection` is not
   stored as a normal inbox row: the endpoint returns `200` without
   persisting, or quarantines it only within the bounded cap below.
 - Retention and purge: processed inbox rows are purged after 30 days by a
   bounded management sweep, and the table is capped (oldest processed rows
   evicted first) so a flood cannot grow it without limit.
+
+`PlaidItemRemovalRequest` (bounded outbox for a relocated token package):
+
+- `id`, `connection` FK (`OneToOneField`, `CASCADE`), the moved
+  `access_token_encrypted` package and `encryption_key_id` **verbatim**
+  (never re-encrypted), `status` (`pending | failed`), `attempts`,
+  `next_retry_at`, `last_attempt_at`, `last_error` (fixed redacted reason
+  only), timestamps.
+- Section 9 requires disconnect to null the encrypted access token locally
+  AND retry `/item/remove` later, but the remote call requires that token.
+  The disconnect transaction therefore relocates the ciphertext here
+  instead of destroying it, so the connection row holds no credential while
+  the bounded retry driver can still decrypt the moved package. Decryption
+  on retry uses the same key-ring and key-rotation path as any stored
+  token; the package is never rewritten.
+- One row per connection, so no second disconnect can orphan a row. A
+  successful remote removal deletes the row (ciphertext gone). A
+  `pending` row becomes `failed` only when the package is undecryptable or
+  the attempt budget is exhausted; a `failed` row is never retried again.
+- The outbox is server-only: it is excluded from every serializer,
+  response, and log line, and only counts or a fixed redacted reason may
+  ever be surfaced.
 
 ### Extensions to existing tables
 
@@ -235,6 +272,9 @@ Deletion graph (final, verified with the repository migration workflow):
 - `PlaidWebhookEvent.user`: `CASCADE`, nullable likewise.
 - `Transaction.connection`: `RESTRICT`, nullable for manual rows.
 - `Transaction.superseded_by`: `RESTRICT`, nullable self-reference.
+- `PlaidItemRemovalRequest.connection`: `CASCADE` on the connection, which
+  the `RESTRICT` edges above already make non-deletable while imported
+  history exists, so a relocated package is never silently orphaned.
 
 Direct deletion of a connection that still has synced transactions raises
 `RestrictedError` and preserves every row. Full user deletion preserves
@@ -547,14 +587,15 @@ No Celery, Redis, or Kubernetes in this milestone. The design therefore is:
   UI), bounded per request (page cap + statement timeout); large initial
   imports return `202` and resume on the next manual trigger via the
   committed cursor.
-- Webhooks only flip `sync_due` and append the durable inbox row, then
-  attempt a bounded inline sync; anything unfinished converges only
-  through a later verified webhook or an explicit manual `POST .../sync/`.
-  A GET route may report state (for example a stale-`sync_due`/age
-  indicator in `GET /api/plaid/connections/`) but never performs Plaid
-  calls, cursor writes, or any mutation. Read-path reconciliation is out
-  of scope; if it is ever wanted, it needs a separately specified endpoint
-  with its own route, lock, and timeout.
+- Webhooks only flip `sync_due` (plus the lifecycle transition for verified
+  Item events) and append the durable inbox row, marked processed inline;
+  they never synchronize inside the webhook request. Anything unfinished
+  remains visible through `sync_pending` and converges through an explicit
+  manual `POST .../sync/`. A GET route may report state (for example a
+  stale-`sync_due`/age indicator in `GET /api/plaid/connections/`) but
+  never performs Plaid calls, cursor writes, or any mutation. Read-path
+  reconciliation is out of scope; if it is ever wanted, it needs a
+  separately specified endpoint with its own route, lock, and timeout.
 
 ## 8. Webhook verification and endpoint contract
 
@@ -569,6 +610,18 @@ No Celery, Redis, or Kubernetes in this milestone. The design therefore is:
   `historical_update_complete` flags when present to drive the
   sync-pending state of section 7. Ignore unknown codes after logging
   their redacted shape.
+- Handle the `ITEM` lifecycle notifications `ERROR` (using the nested
+  `error.error_code`, notably `ITEM_LOGIN_REQUIRED`), `LOGIN_REPAIRED`,
+  and `USER_PERMISSION_REVOKED`. A verified supported Item event mutates
+  only the monotonic connection lifecycle (`status`, plus `sync_due` where
+  applicable) and never writes ledger facts directly; its inbox row is
+  marked processed inline exactly like every other accepted row.
+  Unsupported Item codes (for example `PENDING_EXPIRATION`,
+  `NEW_ACCOUNTS_AVAILABLE`) are safe fixed `200` no-ops. Malformed
+  recognized Item events (a missing or invalid nested `error.error_code`
+  or a bad `item_id`) go to the bounded quarantine, never to an unprocessed
+  matched row. Terminal `revoked` and `disconnected` states never
+  resurrect on any later Item event.
 - Verification runs **before any mutation**, in this exact order, failing
   closed on the first failure:
 
@@ -592,8 +645,12 @@ No Celery, Redis, or Kubernetes in this milestone. The design therefore is:
      A verified webhook whose `item_id` matches no connection returns
      `200` without persisting an inbox row (or is quarantined only within
      the bounded cap of section 4). A matched event appends the idempotent
-     inbox row, flips `sync_due`, and returns `200` within Plaid's
-     10-second receiver deadline.
+     inbox row with `processed_at` equal to its `received_at` (the
+     notification was safely accepted and converted into durable sync
+     state, not proof that the provider cursor drained; the separate
+     `sync_due` flag stays set until the explicit bounded sync path
+     finishes), applies the connection transition, and returns `200`
+     within Plaid's 10-second receiver deadline.
 
 - The endpoint is rate limited (for example 60 requests per minute per
   source IP), and the inbox is bounded per section 4.
@@ -616,27 +673,39 @@ No Celery, Redis, or Kubernetes in this milestone. The design therefore is:
   replay re-applies already-committed pages of the same update and never
   moves the cursor backward past a committed value.
 - Missing webhooks: covered by manual `POST .../sync/` and by surfacing a
-  stale-`sync_due`/age indicator in `GET /api/plaid/connections/`; the next
-  verified webhook or manual trigger converges state.
-- Slow receiver path: verify first (fast), persist inbox + `sync_due`,
-  return `200`, and finish the bounded inline sync if time remains;
-  leftovers converge on the next trigger.
+  stale-`sync_due` indicator as `sync_pending` in
+  `GET /api/plaid/connections/`; the explicit manual trigger converges state.
+- Slow receiver path: verify first (fast), persist the inbox row and the
+  connection state (`sync_due` and/or lifecycle transition), return `200`.
+  Synchronization never runs inside the webhook request; it runs through
+  the explicit bounded `POST .../sync/` path, and page-capped leftovers
+  converge on the next manual trigger.
 - Update mode: provider `ITEM_LOGIN_REQUIRED` (or equivalent Item error)
   flips the connection to `updating`, surfaces "reconnect needed" in the
-  connection list, and pauses sync writes; Link update mode reuses the
-  existing connection row (same `item_id`, token re-encrypted, cursor
-  preserved), then resumes.
+  connection list, and pauses sync writes. The authenticated owner requests
+  `POST /api/plaid/connections/<id>/link-token/`; Link update mode reuses the
+  existing connection row and permanent access token (same `item_id`, cursor,
+  account links, history, and user overrides), then resumes without another
+  public-token exchange.
 - Revoked consent / `ITEM_ERROR` unrecoverable: connection -> `revoked`;
   sync stops; history stays; relink creates or heals per `item_id` match.
 - Relink: same `item_id` heals the existing connection (new token,
   preserved cursor and links); new `item_id` is a new connection.
 - Disconnect (`POST .../disconnect/`) is local-first: in one transaction,
-  null `access_token_encrypted`, mark the connection `disconnected`, and
-  set linked Mohr accounts `is_archived=true`; every imported transaction
-  is preserved for history. Only after the local teardown succeeds, attempt
-  Plaid `/item/remove` as best effort; a failed remote revocation is
-  recorded in `last_sync_error` and retried later, but it never traps the
-  user in a connected state. Disconnect never hard-deletes financial rows.
+  relocate the encrypted access-token package and its key id verbatim into
+  `PlaidItemRemovalRequest`, null both columns on the connection, mark the
+  connection `disconnected`, and set linked Mohr accounts
+  `is_archived=true`; the cursor, readiness status, `last_sync_error`, link
+  rows, and every imported transaction are preserved for history. Only
+  after the local teardown commits, attempt Plaid `/item/remove` outside
+  the transaction as best effort. Success deletes the outbox row, so no
+  ciphertext remains at rest; a failed remote revocation leaves the row
+  `pending` with only a fixed redacted reason and is retried by the bounded
+  `process_plaid_removals` driver (exponential backoff from 1 hour capped
+  at 24 hours, then `failed` after 5 attempts). A remote failure never
+  traps the user in a connected state and never changes the `200` response.
+  Disconnect never hard-deletes financial rows, and the disconnected state
+  is terminal against later Item webhooks.
 - Provider outage: Plaid API errors map to `last_sync_error` + `error`
   status with exponential-backoff manual retry; no cursor is advanced on
   failure, so retry is always safe.
@@ -658,6 +727,10 @@ Store and log the minimum needed to reconcile:
   webhook type/code, counts of added/modified/removed, sync duration, and
   error codes without payloads. Verification failures log reason + key id,
   never the body or token.
+- The `PlaidItemRemovalRequest` outbox holds the relocated ciphertext and
+  is server-only: no serializer, response, or log line ever includes it.
+  Only counts (`removed`, `retried`, `failed`, `skipped`) or the fixed
+  redacted failure reason may be surfaced.
 
 ## 11. Threat table
 

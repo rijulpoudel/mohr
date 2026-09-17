@@ -27,11 +27,25 @@ behind the committed cursor never advances it and contributes nothing to the
 run totals), fails closed on outage, token, anchor, and blocked-page
 conditions without ever advancing the cursor past a committed value, and
 heals the ``error`` status back to ``active`` on a later successful run.
+The verified webhook ingest (issue #39 slices B and C) persists the durable
+inbox row and connection flags in one atomic block; every recognized matched
+row is accepted with ``processed_at`` equal to its own ``received_at`` (the
+notification was safely converted into durable sync state, not proof that the
+provider cursor drained, which remains the separate ``sync_due`` flag), the
+block enforces the bounded ``PLAID_WEBHOOK_INBOX_CAP`` inside that same block
+by evicting only oldest processed rows and then oldest quarantine rows (never
+an unprocessed matched event, never the just-created row), raises the fixed
+repr-safe :class:`WebhookInboxFull` when a recognized event cannot fit, and
+quarantines verified but malformed deliveries as minimized null-pair rows
+without ever retrying poison forever. A module-level process lock serializes
+webhook ingress; this is safe because Render Free runs exactly one web
+process, and the database transaction remains the correctness boundary.
 """
 
 import hashlib
 import hmac
 import secrets
+import threading
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
@@ -52,6 +66,8 @@ from plaid_integration.models import (
     PlaidConnection,
     PlaidConnectionStatus,
     PlaidExchangeHandle,
+    PlaidItemRemovalRequest,
+    PlaidWebhookEvent,
     TransactionsUpdateStatus,
 )
 from plaid_integration.token_encryption import TokenCryptoError
@@ -182,49 +198,113 @@ def _constraint_name(integrity_error):
     return getattr(getattr(cause, "diag", None), "constraint_name", None)
 
 
-def persist_exchange_connection(user, item_id, institution_name, token_package, key_id):
-    """Persist one encrypted connection from provider exchange data.
+@dataclass(frozen=True)
+class PlaidExchangeResult:
+    """Safe outcome of one exchange persistence; never carries provider data.
 
-    Provider-derived values are validated before anything is persisted: the
-    ``item_id`` must be a nonempty string within the model bound, and the
-    ``institution_name`` must be None or a string. Blank institution names
-    normalize to ``UNKNOWN_INSTITUTION``; values that exceed the model
-    bounds, or the wrong type, fail as a safe provider error and nothing is
-    persisted. The provider item id is never truncated (the display
-    institution name is bounded deliberately to the model maximum).
-    ``full_clean()`` enforces the model bounds; the database constraints
-    (the globally unique item id and the status checks) are enforced by the
-    insert itself. An already-existing Item (the globally unique item id)
-    surfaces as :class:`PlaidExchangeDuplicateItem` without touching the
-    existing row, whether detected as the concurrent-insert race at save
-    time or against an already-committed duplicate. Unrelated integrity
-    errors propagate.
+    Carries the persisted (created or healed) connection and whether it was
+    newly created, so the view can choose 201 vs 200 with the same body
+    shape. Never carries token material, key ids, item ids, or cursors.
+    """
+
+    connection: PlaidConnection
+    created: bool
+
+
+def _heal_institution_name(institution_name):
+    """Return the stripped bounded name to store, or None to keep stored."""
+    if not isinstance(institution_name, str):
+        return None
+    stripped = institution_name.strip()
+    if not stripped:
+        return None
+    if len(stripped) > EXCHANGE_INSTITUTION_MAX_LENGTH:
+        return None
+    return stripped
+
+
+def persist_exchange_connection(user, item_id, institution_name, token_package, key_id):
+    """Persist one encrypted connection or heal the same-user same-Item row.
+
+    ``docs/plaid.md`` section 9 relink: a same-``item_id`` exchange by the
+    SAME authenticated user HEALS the existing connection (new token package
+    pair verbatim, ``status=active``, ``sync_due=True``, conditional
+    institution-name update, un-archived own linked accounts, deleted stale
+    removal row) while preserving ``sync_cursor``,
+    ``transactions_update_status``, ``last_synced_at``, link rows, and
+    ``Transaction`` rows. A same-``item_id`` exchange by a DIFFERENT user
+    raises :class:`PlaidExchangeDuplicateItem` without mutating anything. A
+    genuinely new ``item_id`` creates a new connection with the existing
+    validation (blank names normalize to ``UNKNOWN_INSTITUTION``, overlong
+    or wrong-type values raise :class:`PlaidExchangeProviderDataError`).
+
+    The lookup, heal, and create run inside one ``transaction.atomic()``
+    block with ``select_for_update()`` on the existing row when one exists;
+    the item-id unique violation still translates to the same safe duplicate
+    failure for the concurrent-insert race. Unrelated integrity errors
+    propagate. Returns the repr-safe :class:`PlaidExchangeResult`.
     """
     if not isinstance(item_id, str) or not item_id:
         raise PlaidExchangeProviderDataError()
     if len(item_id) > EXCHANGE_ITEM_ID_MAX_LENGTH:
         raise PlaidExchangeProviderDataError()
-    if institution_name is not None and not isinstance(institution_name, str):
-        raise PlaidExchangeProviderDataError()
-    display_name = (institution_name or "").strip() or UNKNOWN_INSTITUTION
-    if len(display_name) > EXCHANGE_INSTITUTION_MAX_LENGTH:
-        raise PlaidExchangeProviderDataError()
-    connection = PlaidConnection(
-        user=user,
-        item_id=item_id,
-        access_token_encrypted=token_package,
-        encryption_key_id=key_id,
-        institution_name=display_name,
-        status=PlaidConnectionStatus.ACTIVE,
-        transactions_update_status=TransactionsUpdateStatus.NOT_READY,
-    )
-    try:
-        connection.full_clean(validate_unique=False, validate_constraints=False)
-    except ValidationError:
-        raise PlaidExchangeProviderDataError() from None
     try:
         with transaction.atomic():
+            try:
+                existing = PlaidConnection.objects.select_for_update().get(
+                    item_id=item_id
+                )
+            except PlaidConnection.DoesNotExist:
+                existing = None
+            if existing is not None:
+                if existing.user_id != user.pk:
+                    raise PlaidExchangeDuplicateItem()
+                existing.access_token_encrypted = token_package
+                existing.encryption_key_id = key_id
+                existing.status = PlaidConnectionStatus.ACTIVE
+                existing.sync_due = True
+                new_name = _heal_institution_name(institution_name)
+                update_fields = [
+                    "access_token_encrypted",
+                    "encryption_key_id",
+                    "status",
+                    "sync_due",
+                ]
+                if new_name is not None:
+                    existing.institution_name = new_name
+                    update_fields.append("institution_name")
+                existing.save(update_fields=update_fields)
+                PlaidItemRemovalRequest.objects.filter(connection=existing).delete()
+                links = PlaidAccountLink.objects.filter(
+                    connection=existing
+                ).select_related("account")
+                for link in links:
+                    if link.account.user_id != existing.user_id:
+                        continue
+                    if link.account.is_archived:
+                        link.account.is_archived = False
+                        link.account.save(update_fields=["is_archived"])
+                return PlaidExchangeResult(connection=existing, created=False)
+            if institution_name is not None and not isinstance(institution_name, str):
+                raise PlaidExchangeProviderDataError()
+            display_name = (institution_name or "").strip() or UNKNOWN_INSTITUTION
+            if len(display_name) > EXCHANGE_INSTITUTION_MAX_LENGTH:
+                raise PlaidExchangeProviderDataError()
+            connection = PlaidConnection(
+                user=user,
+                item_id=item_id,
+                access_token_encrypted=token_package,
+                encryption_key_id=key_id,
+                institution_name=display_name,
+                status=PlaidConnectionStatus.ACTIVE,
+                transactions_update_status=TransactionsUpdateStatus.NOT_READY,
+            )
+            try:
+                connection.full_clean(validate_unique=False, validate_constraints=False)
+            except ValidationError:
+                raise PlaidExchangeProviderDataError() from None
             connection.save()
+            return PlaidExchangeResult(connection=connection, created=True)
     except IntegrityError as exc:
         constraint_name = _constraint_name(exc)
         if constraint_name is not None:
@@ -238,7 +318,364 @@ def persist_exchange_connection(user, item_id, institution_name, token_package, 
         if PlaidConnection.objects.filter(item_id=item_id).exists():
             raise PlaidExchangeDuplicateItem() from None
         raise
-    return connection
+
+
+_WEBHOOK_EVENT_IDEMPOTENCY_UNIQUE = "plaid_webhook_event_idempotency_key_unique"
+
+QUARANTINE_UNKNOWN_WEBHOOK_TYPE = "UNKNOWN"
+QUARANTINE_UNKNOWN_WEBHOOK_CODE = "UNKNOWN"
+QUARANTINE_UNKNOWN_ITEM_ID = "UNKNOWN"
+
+_WEBHOOK_INGEST_LOCK = threading.Lock()
+
+
+class WebhookDuplicateEvent(Exception):
+    """A verified webhook with this exact body was already persisted.
+
+    Raised only for the exact ``plaid_webhook_event_idempotency_key_unique``
+    constraint violation (or, on a backend without a constraint diagnostic,
+    an existing row with the same idempotency key). Never carries the body,
+    its hash, or any connection state.
+    """
+
+
+class WebhookInboxFull(Exception):
+    """The bounded webhook inbox cannot accept another recognized event.
+
+    Raised only when the cap consists entirely of unprocessed matched events
+    (or rows the priority order forbids evicting) after the inserting
+    transaction rolled back, so nothing changed. The exception carries no
+    body, hash, item id, connection state, cause, or context by construction,
+    and its ``repr`` is a fixed string; the endpoint maps it to a fixed 503
+    so Plaid can retry.
+    """
+
+    def __repr__(self):
+        return "<WebhookInboxFull>"
+
+
+class _InboxCapExceeded(Exception):
+    """Internal marker: the inserted row does not fit inside the cap.
+
+    Raised inside the inserting atomic block after every legal eviction was
+    applied; the block rolls back and the caller translates the marker to
+    :class:`WebhookInboxFull` (recognized events) or drops the insert
+    (quarantine rows) outside the failed transaction. Never carries data.
+    """
+
+
+def _enforce_webhook_inbox_cap(keep_pk):
+    """Evict enough oldest rows so the inbox fits, or return False.
+
+    Runs inside the inserting atomic block after the insert, so a duplicate
+    that violated the idempotency constraint before this point rolled back
+    with zero eviction. ``keep_pk`` is the just-created row, which is never
+    evicted. Priority order (``docs/plaid.md`` section 4): oldest processed
+    rows first (``processed_at`` set, oldest first), then oldest quarantine
+    rows (null connection and user pair), oldest first; an unprocessed
+    matched event is never evicted merely to accept another event. Returns
+    True when the table fits inside ``PLAID_WEBHOOK_INBOX_CAP`` and False
+    when only forbidden rows remain.
+    """
+    cap = settings.PLAID_WEBHOOK_INBOX_CAP
+    overflow = PlaidWebhookEvent.objects.count() - cap
+    if overflow <= 0:
+        return True
+    remaining = overflow
+    processed_pks = list(
+        PlaidWebhookEvent.objects.filter(processed_at__isnull=False)
+        .exclude(pk=keep_pk)
+        .order_by("received_at", "id")
+        .values_list("pk", flat=True)[:remaining]
+    )
+    if processed_pks:
+        PlaidWebhookEvent.objects.filter(pk__in=processed_pks).delete()
+        remaining -= len(processed_pks)
+    if remaining > 0:
+        quarantine_pks = list(
+            PlaidWebhookEvent.objects.filter(connection__isnull=True, user__isnull=True)
+            .exclude(pk=keep_pk)
+            .order_by("received_at", "id")
+            .values_list("pk", flat=True)[:remaining]
+        )
+        if quarantine_pks:
+            PlaidWebhookEvent.objects.filter(pk__in=quarantine_pks).delete()
+            remaining -= len(quarantine_pks)
+    return remaining <= 0
+
+
+def _advance_transactions_update_status(
+    current, *, initial_complete, historical_complete
+):
+    """Return the monotonic next status from received webhook flags.
+
+    ``initial_complete`` advances only a null or NOT_READY status to
+    INITIAL_UPDATE_COMPLETE; ``historical_complete`` always advances to
+    HISTORICAL_UPDATE_COMPLETE and wins, so the status never regresses.
+    """
+    if historical_complete:
+        return TransactionsUpdateStatus.HISTORICAL_UPDATE_COMPLETE
+    if initial_complete and current in (
+        None,
+        TransactionsUpdateStatus.NOT_READY,
+    ):
+        return TransactionsUpdateStatus.INITIAL_UPDATE_COMPLETE
+    return current
+
+
+def persist_verified_webhook(
+    connection,
+    claims,
+    *,
+    webhook_type,
+    webhook_code,
+    initial_update_complete,
+    historical_update_complete,
+):
+    """Persist one verified supported webhook and flip its connection.
+
+    ``claims`` is the frozen :class:`~plaid_integration.webhook_verification.
+    VerifiedWebhookClaims` produced by ``verify_plaid_webhook``; its
+    ``idempotency_key`` is the authoritative duplicate detector and is stored
+    (never the raw body). ``connection`` is the matched
+    :class:`PlaidConnection` for the parsed ``item_id``. In ONE
+    ``transaction.atomic()`` block the durable inbox row is inserted and the
+    connection's ``sync_due`` is set and ``transactions_update_status``
+    advances monotonically (``docs/plaid.md`` sections 4, 7, and 8); the
+    status, cursor, token, error, ``last_synced_at``, accounts, and
+    transactions are never touched. The inserted row carries one captured
+    ``received_at`` and ``processed_at`` equal to it: the notification was
+    safely accepted and converted into durable sync state, which is not proof
+    that the provider cursor was fully drained; ``sync_due`` remains the
+    separate unfinished-sync flag and the explicit bounded sync path does the
+    draining. The same block then enforces the
+    ``PLAID_WEBHOOK_INBOX_CAP``: only the oldest processed rows and then the
+    oldest quarantine rows are evicted (never an unprocessed matched event,
+    never the just-created row), and when no legal eviction makes room the
+    block rolls back entirely and :class:`WebhookInboxFull` is raised outside
+    the failed transaction, so the recognized event never displaces an
+    unprocessed matched event and the connection changes never exist.
+
+    A re-delivered exact body raises :class:`WebhookDuplicateEvent` after the
+    failed atomic block rolls back, so the duplicate changes neither the
+    connection nor the inbox and evicts nothing. An unrelated
+    ``IntegrityError`` propagates. The module-level process lock serializes
+    ingress under the Render Free single-process architecture; the database
+    transaction remains the correctness boundary.
+    """
+    with _WEBHOOK_INGEST_LOCK:
+        try:
+            with transaction.atomic():
+                conn = PlaidConnection.objects.select_for_update().get(pk=connection.pk)
+                received_at = timezone.now()
+                event = PlaidWebhookEvent.objects.create(
+                    connection=conn,
+                    user=conn.user,
+                    webhook_type=webhook_type,
+                    webhook_code=webhook_code,
+                    item_id=conn.item_id,
+                    idempotency_key=claims.idempotency_key,
+                    initial_update_complete=initial_update_complete,
+                    historical_update_complete=historical_update_complete,
+                    received_at=received_at,
+                    processed_at=received_at,
+                )
+                conn.sync_due = True
+                conn.transactions_update_status = _advance_transactions_update_status(
+                    conn.transactions_update_status,
+                    initial_complete=initial_update_complete,
+                    historical_complete=historical_update_complete,
+                )
+                conn.save(update_fields=["sync_due", "transactions_update_status"])
+                if not _enforce_webhook_inbox_cap(event.pk):
+                    raise _InboxCapExceeded()
+        except _InboxCapExceeded:
+            raise WebhookInboxFull() from None
+        except IntegrityError as exc:
+            constraint_name = _constraint_name(exc)
+            if constraint_name is not None:
+                if constraint_name == _WEBHOOK_EVENT_IDEMPOTENCY_UNIQUE:
+                    raise WebhookDuplicateEvent() from None
+                raise
+            if PlaidWebhookEvent.objects.filter(
+                idempotency_key=claims.idempotency_key
+            ).exists():
+                raise WebhookDuplicateEvent() from None
+            raise
+
+
+def quarantine_verified_webhook(
+    claims,
+    *,
+    webhook_type,
+    webhook_code,
+    item_id,
+):
+    """Quarantine one verified but unprocessable webhook delivery.
+
+    Persists the minimized null-pair quarantine row: no connection, no user,
+    only the bounded sentinel strings already chosen by the caller for
+    missing or invalid type/code/item values, the verified body hash as the
+    ``idempotency_key``, ``received_at`` and ``processed_at`` equal to now,
+    and both completeness flags false. The raw body, parsed extras, provider
+    error details, JWT, JWK, and digest are never stored. The insert and the
+    bounded-cap enforcement run in one atomic block under the same process
+    lock as :func:`persist_verified_webhook`.
+
+    Returns True when the quarantine row was persisted (any legal eviction
+    already applied) and False when the row was safely dropped instead:
+    accepting it at a full cap would have required deleting the row itself
+    (only unprocessed matched rows or forbidden rows remain), so the insert
+    rolls back, nothing is evicted, and the caller still returns 200 so a
+    poison delivery is never retried forever. A re-delivered exact body
+    raises :class:`WebhookDuplicateEvent` after the failed atomic block rolls
+    back, evicting and mutating nothing; an unrelated ``IntegrityError``
+    propagates.
+    """
+    with _WEBHOOK_INGEST_LOCK:
+        try:
+            with transaction.atomic():
+                received_at = timezone.now()
+                event = PlaidWebhookEvent.objects.create(
+                    connection=None,
+                    user=None,
+                    webhook_type=webhook_type,
+                    webhook_code=webhook_code,
+                    item_id=item_id,
+                    idempotency_key=claims.idempotency_key,
+                    initial_update_complete=False,
+                    historical_update_complete=False,
+                    received_at=received_at,
+                    processed_at=received_at,
+                )
+                if not _enforce_webhook_inbox_cap(event.pk):
+                    raise _InboxCapExceeded()
+        except _InboxCapExceeded:
+            return False
+        except IntegrityError as exc:
+            constraint_name = _constraint_name(exc)
+            if constraint_name is not None:
+                if constraint_name == _WEBHOOK_EVENT_IDEMPOTENCY_UNIQUE:
+                    raise WebhookDuplicateEvent() from None
+                raise
+            if PlaidWebhookEvent.objects.filter(
+                idempotency_key=claims.idempotency_key
+            ).exists():
+                raise WebhookDuplicateEvent() from None
+            raise
+    return True
+
+
+ITEM_LOGIN_REQUIRED_CODE = "ITEM_LOGIN_REQUIRED"
+
+
+def _next_item_connection_state(current_status, *, webhook_code, error_code):
+    """Return (new_status, set_sync_due) for one verified Item event.
+
+    Terminal monotonicity for issue #39 D2: ``revoked`` and ``disconnected``
+    never resurrect on LOGIN_REPAIRED, login-required, or generic errors;
+    ``disconnected`` is terminal even for USER_PERMISSION_REVOKED; generic
+    errors preserve ``updating`` so the actionable repair state is not lost.
+    Only LOGIN_REPAIRED sets ``sync_due``, including on an already-active
+    connection. Never touches cursor, tokens, readiness, or history.
+    """
+    if webhook_code == "USER_PERMISSION_REVOKED":
+        if current_status == PlaidConnectionStatus.DISCONNECTED:
+            return current_status, False
+        return PlaidConnectionStatus.REVOKED, False
+    if webhook_code == "LOGIN_REPAIRED":
+        if current_status in (
+            PlaidConnectionStatus.UPDATING,
+            PlaidConnectionStatus.ERROR,
+        ):
+            return PlaidConnectionStatus.ACTIVE, True
+        if current_status == PlaidConnectionStatus.ACTIVE:
+            return current_status, True
+        return current_status, False
+    # ITEM + ERROR.
+    if error_code == ITEM_LOGIN_REQUIRED_CODE:
+        if current_status in (
+            PlaidConnectionStatus.ACTIVE,
+            PlaidConnectionStatus.ERROR,
+        ):
+            return PlaidConnectionStatus.UPDATING, False
+        return current_status, False
+    if current_status == PlaidConnectionStatus.ACTIVE:
+        return PlaidConnectionStatus.ERROR, False
+    return current_status, False
+
+
+def persist_verified_item_webhook(
+    connection,
+    claims,
+    *,
+    webhook_type,
+    webhook_code,
+    error_code=None,
+):
+    """Persist one verified Item lifecycle event and apply its transition.
+
+    Dedicated Item path for issue #39 D2: does not reuse transaction
+    persistence semantics. In ONE ``transaction.atomic()`` block under the
+    shared ingest lock, the durable inbox row is inserted with
+    ``processed_at`` set (the state transition completes inline) and the
+    connection's lifecycle ``status`` (and ``sync_due`` for LOGIN_REPAIRED)
+    advances per ``_next_item_connection_state``; cursor, tokens,
+    ``transactions_update_status``, ``last_sync_error``, ``last_synced_at``,
+    accounts, and transactions are never touched. The same block enforces
+    ``PLAID_WEBHOOK_INBOX_CAP`` with the existing priority; a full cap of
+    unprocessed matched rows raises :class:`WebhookInboxFull` with nothing
+    mutated. An exact re-delivery raises :class:`WebhookDuplicateEvent`
+    with no repeat mutation. ``PlaidConnection.DoesNotExist`` propagates
+    for the caller to treat as unmatched. Unrelated ``IntegrityError``
+    propagates; no body or provider message is stored.
+    """
+    with _WEBHOOK_INGEST_LOCK:
+        try:
+            with transaction.atomic():
+                conn = PlaidConnection.objects.select_for_update().get(pk=connection.pk)
+                new_status, set_sync_due = _next_item_connection_state(
+                    conn.status,
+                    webhook_code=webhook_code,
+                    error_code=error_code,
+                )
+                now = timezone.now()
+                event = PlaidWebhookEvent.objects.create(
+                    connection=conn,
+                    user=conn.user,
+                    webhook_type=webhook_type,
+                    webhook_code=webhook_code,
+                    item_id=conn.item_id,
+                    idempotency_key=claims.idempotency_key,
+                    initial_update_complete=False,
+                    historical_update_complete=False,
+                    received_at=now,
+                    processed_at=now,
+                )
+                update_fields = []
+                if new_status != conn.status:
+                    conn.status = new_status
+                    update_fields.append("status")
+                if set_sync_due and not conn.sync_due:
+                    conn.sync_due = True
+                    update_fields.append("sync_due")
+                if update_fields:
+                    conn.save(update_fields=update_fields)
+                if not _enforce_webhook_inbox_cap(event.pk):
+                    raise _InboxCapExceeded()
+        except _InboxCapExceeded:
+            raise WebhookInboxFull() from None
+        except IntegrityError as exc:
+            constraint_name = _constraint_name(exc)
+            if constraint_name is not None:
+                if constraint_name == _WEBHOOK_EVENT_IDEMPOTENCY_UNIQUE:
+                    raise WebhookDuplicateEvent() from None
+                raise
+            if PlaidWebhookEvent.objects.filter(
+                idempotency_key=claims.idempotency_key
+            ).exists():
+                raise WebhookDuplicateEvent() from None
+            raise
 
 
 @dataclass(frozen=True)
@@ -737,6 +1174,19 @@ def _decrypt_access_token(connection):
     return decrypted.plaintext.decode()
 
 
+def decrypt_connection_access_token(connection):
+    """Return the decrypted stored access token for ONE owned connection.
+
+    Narrow safe accessor for server-only flows that must reuse a stored
+    Item's permanent token (update-mode Link token issuance). A missing,
+    cleared, wrong-key, malformed, or undecryptable token returns None so
+    the caller fails closed; the plaintext is held in memory only for the
+    outgoing gateway call and is never logged, stored, interpolated, or
+    returned.
+    """
+    return _decrypt_access_token(connection)
+
+
 def _record_owned_error(connection, message):
     """Record ``message`` through the owned-error convention, nothing else.
 
@@ -780,21 +1230,28 @@ def _record_anchor_error(connection):
         conn.save(update_fields=["last_sync_error"])
 
 
-def _restore_active_status(connection):
-    """Heal the connection status back to ``active`` after a successful run.
+def _restore_successful_sync_state(connection, *, clear_sync_due):
+    """Heal lifecycle state and clear a fully drained webhook notification.
 
     Called only when a pagination attempt completed without blocking. Sets
     ``status`` to ``active`` if and only if it is currently ``error`` (the
-    single transient provider-outage symptom); every other status is left
-    untouched, and the cursor and ``last_sync_error`` are never written. The
-    row is briefly locked so the status-only update is atomic and never
-    bypasses the page commit block (``docs/plaid.md`` section 9).
+    single transient provider-outage symptom). ``sync_due`` is cleared only
+    when provider pagination was fully drained; a run stopped at the page cap
+    keeps the flag set so pending pages are not forgotten. Every other field
+    is untouched. The row is briefly locked so these lifecycle updates are
+    atomic and never bypass the page commit block.
     """
     with transaction.atomic():
         conn = PlaidConnection.objects.select_for_update().get(pk=connection.pk)
+        update_fields = []
         if conn.status == PlaidConnectionStatus.ERROR:
             conn.status = PlaidConnectionStatus.ACTIVE
-            conn.save(update_fields=["status"])
+            update_fields.append("status")
+        if clear_sync_due and conn.sync_due:
+            conn.sync_due = False
+            update_fields.append("sync_due")
+        if update_fields:
+            conn.save(update_fields=update_fields)
 
 
 def _import_page_accounts(connection, page):
@@ -930,6 +1387,7 @@ class _SyncRunState:
     quarantined: int = 0
     anchors_applied: int = 0
     history_complete: bool = False
+    drained: bool = False
 
 
 def _run_pagination_attempt(
@@ -993,6 +1451,7 @@ def _run_pagination_attempt(
             state.quarantined += page_result.quarantined
         request_cursor = page.next_cursor
         if not page.has_more:
+            state.drained = True
             state.history_complete = (
                 page.transactions_update_status == PROVIDER_HISTORICAL_UPDATE_COMPLETE
             )
@@ -1072,7 +1531,7 @@ def perform_sync(
             )
             if result is not None:
                 return result
-            _restore_active_status(conn)
+            _restore_successful_sync_state(conn, clear_sync_due=state.drained)
             return SyncRunResult(
                 blocked=False,
                 pages_applied=state.pages_applied,
@@ -1096,3 +1555,346 @@ def perform_sync(
         except PlaidGatewayError as exc:
             _record_outage_error(conn, str(exc))
             return _blocked_run(state)
+
+
+@dataclass(frozen=True)
+class PlaidStateCleanupResult:
+    """Counts-only outcome of one bounded cleanup invocation.
+
+    Carries nothing but integer counts; never digests, item ids, bodies,
+    tokens, or user details, so the caller can print it verbatim.
+    """
+
+    webhook_events_deleted: int = 0
+    exchange_handles_deleted: int = 0
+
+
+def cleanup_plaid_state(batch_size, now=None):
+    """Bound the webhook inbox and purge expired handles in one invocation.
+
+    Runs the ``cleanup_plaid_state`` management command's work with a
+    deterministic injected ``now`` (defaults to the current time). In one
+    bounded invocation it deletes, oldest first and each kind capped at
+    ``batch_size``:
+
+    1. processed webhook rows older than the configured
+       ``PLAID_WEBHOOK_PROCESSED_RETENTION_DAYS`` window (strictly older: a
+       row whose ``processed_at`` equals the cutoff is retained);
+    2. exchange handles that are expired (``expires_at <= now``) OR consumed
+       (``consumed_at`` set), never an unconsumed unexpired handle;
+    3. additional oldest processed webhook rows when the table remains above
+       ``PLAID_WEBHOOK_INBOX_CAP``, again at most ``batch_size``.
+
+    Unprocessed matched webhook rows are never deleted. Deletion uses PK
+    lists gathered first, then one bounded delete per kind, so behavior is
+    deterministic across PostgreSQL and Django. The whole invocation commits
+    atomically. Returns the counts-only :class:`PlaidStateCleanupResult`;
+    ``batch_size`` validation belongs to the command.
+    """
+    if now is None:
+        now = timezone.now()
+    retention_days = settings.PLAID_WEBHOOK_PROCESSED_RETENTION_DAYS
+    cutoff = now - timedelta(days=retention_days)
+    cap = settings.PLAID_WEBHOOK_INBOX_CAP
+    with transaction.atomic():
+        events_deleted = 0
+        expired_pks = list(
+            PlaidWebhookEvent.objects.filter(
+                processed_at__isnull=False, processed_at__lt=cutoff
+            )
+            .order_by("received_at", "id")
+            .values_list("pk", flat=True)[:batch_size]
+        )
+        if expired_pks:
+            events_deleted += PlaidWebhookEvent.objects.filter(
+                pk__in=expired_pks
+            ).delete()[0]
+        handles_deleted = 0
+        spent_pks = list(
+            PlaidExchangeHandle.objects.filter(
+                Q(expires_at__lte=now) | Q(consumed_at__isnull=False)
+            )
+            .order_by("created_at", "id")
+            .values_list("pk", flat=True)[:batch_size]
+        )
+        if spent_pks:
+            handles_deleted += PlaidExchangeHandle.objects.filter(
+                pk__in=spent_pks
+            ).delete()[0]
+        overflow = PlaidWebhookEvent.objects.count() - cap
+        if overflow > 0:
+            extra_pks = list(
+                PlaidWebhookEvent.objects.filter(processed_at__isnull=False)
+                .order_by("received_at", "id")
+                .values_list("pk", flat=True)[: min(overflow, batch_size)]
+            )
+            if extra_pks:
+                events_deleted += PlaidWebhookEvent.objects.filter(
+                    pk__in=extra_pks
+                ).delete()[0]
+    return PlaidStateCleanupResult(
+        webhook_events_deleted=events_deleted,
+        exchange_handles_deleted=handles_deleted,
+    )
+
+
+ITEM_REMOVAL_MAX_ATTEMPTS = 5
+ITEM_REMOVAL_BACKOFF_BASE = timedelta(hours=1)
+ITEM_REMOVAL_BACKOFF_CAP = timedelta(hours=24)
+ITEM_REMOVAL_FAILED_DETAIL = "Plaid item removal is unavailable."
+
+
+@dataclass(frozen=True)
+class DisconnectConnectionResult:
+    """Safe outcome of one local-first disconnect; counts/strings only.
+
+    Carries the connection id, the resulting status string, and whether the
+    best-effort remote ``/item/remove`` call succeeded. Never carries token
+    material, key ids, cursors, or provider detail by construction.
+    """
+
+    connection_id: int
+    status: str
+    remote_removed: bool = False
+
+
+@dataclass(frozen=True)
+class ItemRemovalRunResult:
+    """Counts-only outcome of one bounded item-removal retry run.
+
+    Carries nothing but integer counts; never tokens, key ids, item ids,
+    cursors, or provider detail, so the caller can print it verbatim.
+    """
+
+    removed: int = 0
+    retried: int = 0
+    failed: int = 0
+    skipped: int = 0
+
+
+def _item_removal_backoff_delay(attempts_before_claim):
+    """Return the backoff delay for a row claimed at ``attempts_before_claim``.
+
+    Exponential ``base * 2**attempts`` bounded by the cap, using only module
+    constants; never touches tokens or provider state.
+    """
+    delay = ITEM_REMOVAL_BACKOFF_BASE * (2**attempts_before_claim)
+    if delay > ITEM_REMOVAL_BACKOFF_CAP:
+        return ITEM_REMOVAL_BACKOFF_CAP
+    return delay
+
+
+def disconnect_connection(connection, *, gateway=None):
+    """Disconnect ONE connection local-first with a relocated removal outbox.
+
+    In ONE ``transaction.atomic()`` block the connection row is locked with
+    ``select_for_update()``, an already-``disconnected`` connection returns
+    idempotently with no duplicate outbox row, otherwise the stored token
+    package (both columns) is moved VERBATIM into the
+    :class:`PlaidItemRemovalRequest` outbox (``update_or_create`` with
+    ``status="pending"`` and ``next_retry_at`` now so the row is immediately
+    due; never re-encrypted) and nulled on the connection, the status becomes
+    ``disconnected`` (only the changed fields are saved), and every linked
+    Mohr account owned by the connection owner is archived. ``sync_cursor``,
+    ``last_synced_at``, ``transactions_update_status``, ``last_sync_error``,
+    ``Transaction`` rows, and ``PlaidAccountLink`` rows are never touched.
+
+    After the transaction commits, a best-effort remote ``/item/remove`` runs
+    OUTSIDE the atomic block when ``PLAID_ENABLED`` and a token was moved:
+    the moved package is decrypted with the configured ring and sent through
+    the injected (or settings-built) gateway. Success deletes the outbox row;
+    a :class:`TokenCryptoError` marks it failed immediately (an undecryptable
+    package can never succeed later) while a :class:`PlaidGatewayError`
+    leaves it pending; both record only the fixed redacted reason, never the
+    token, key id, or provider text. A remote failure never raises out of
+    this function. Returns the repr-safe :class:`DisconnectConnectionResult`.
+    """
+    with transaction.atomic():
+        conn = PlaidConnection.objects.select_for_update().get(pk=connection.pk)
+        if conn.status == PlaidConnectionStatus.DISCONNECTED:
+            return DisconnectConnectionResult(
+                connection_id=conn.pk,
+                status=conn.status,
+                remote_removed=False,
+            )
+        moved_package = None
+        moved_key_id = None
+        token_moved = bool(conn.access_token_encrypted and conn.encryption_key_id)
+        if token_moved:
+            moved_package = conn.access_token_encrypted
+            moved_key_id = conn.encryption_key_id
+            PlaidItemRemovalRequest.objects.update_or_create(
+                connection=conn,
+                defaults={
+                    "access_token_encrypted": moved_package,
+                    "encryption_key_id": moved_key_id,
+                    "status": "pending",
+                    "next_retry_at": timezone.now(),
+                },
+            )
+            conn.access_token_encrypted = None
+            conn.encryption_key_id = None
+        conn.status = PlaidConnectionStatus.DISCONNECTED
+        if token_moved:
+            conn.save(
+                update_fields=[
+                    "access_token_encrypted",
+                    "encryption_key_id",
+                    "status",
+                ]
+            )
+        else:
+            conn.save(update_fields=["status"])
+        links = PlaidAccountLink.objects.filter(connection=conn).select_related(
+            "account"
+        )
+        for link in links:
+            if link.account.user_id != conn.user_id:
+                continue
+            if not link.account.is_archived:
+                link.account.is_archived = True
+                link.account.save(update_fields=["is_archived"])
+        connection_id = conn.pk
+        connection_status = conn.status
+
+    remote_removed = False
+    if token_moved and settings.PLAID_ENABLED:
+        try:
+            ring = settings.PLAID_TOKEN_RING
+            if ring is None:
+                raise TokenCryptoError("Token could not be decrypted.")
+            if gateway is None:
+                gateway = PlaidGateway.from_settings()
+            decrypted = ring.decrypt(moved_package, moved_key_id)
+            plaintext = decrypted.plaintext.decode()
+            gateway.remove_item(plaintext)
+        except TokenCryptoError:
+            PlaidItemRemovalRequest.objects.filter(connection_id=connection_id).update(
+                status="failed", last_error=ITEM_REMOVAL_FAILED_DETAIL
+            )
+        except PlaidGatewayError:
+            PlaidItemRemovalRequest.objects.filter(connection_id=connection_id).update(
+                last_error=ITEM_REMOVAL_FAILED_DETAIL
+            )
+        else:
+            PlaidItemRemovalRequest.objects.filter(connection_id=connection_id).delete()
+            remote_removed = True
+    return DisconnectConnectionResult(
+        connection_id=connection_id,
+        status=connection_status,
+        remote_removed=remote_removed,
+    )
+
+
+def process_plaid_item_removals(batch_size, *, gateway=None, now=None):
+    """Retry due Plaid item removals with a bounded exponential backoff.
+
+    Selects at most ``batch_size`` ``status="pending"`` rows where
+    ``next_retry_at IS NULL OR next_retry_at <= now``, ordered by
+    ``("next_retry_at", "id")``. Each row is claimed with ONE conditional
+    UPDATE (``attempts = F("attempts") + 1``, ``last_attempt_at = now``,
+    ``next_retry_at = now + min(base * 2**attempts, cap)``) filtered by pk,
+    pending status, and the same due predicate; only a claim that updates
+    exactly one row proceeds (mirroring ``claim_exchange_handle``), so the
+    claim commits BEFORE any network call and a lost race counts ``skipped``.
+
+    The moved package is then decrypted and sent through the gateway OUTSIDE
+    any transaction. Success deletes the row (``removed``). A
+    :class:`PlaidGatewayError` records the fixed redacted reason: rows whose
+    ``attempts`` reached ``ITEM_REMOVAL_MAX_ATTEMPTS`` become ``failed``,
+    others stay ``pending`` (``retried``). An undecryptable package becomes
+    ``failed`` immediately. One row never aborts the batch, and tokens or
+    provider text are never logged or stored. Returns the counts-only
+    :class:`ItemRemovalRunResult`.
+    """
+    if now is None:
+        now = timezone.now()
+    due = Q(next_retry_at__isnull=True) | Q(next_retry_at__lte=now)
+    candidates = list(
+        PlaidItemRemovalRequest.objects.filter(status="pending")
+        .filter(due)
+        .order_by("next_retry_at", "id")
+        .values_list("pk", flat=True)[:batch_size]
+    )
+    if gateway is None:
+        try:
+            gateway = PlaidGateway.from_settings()
+        except PlaidGatewayError:
+            gateway = None
+    removed = 0
+    retried = 0
+    failed = 0
+    skipped = 0
+    for pk in candidates:
+        snapshot = (
+            PlaidItemRemovalRequest.objects.filter(pk=pk).values(
+                "attempts", "access_token_encrypted", "encryption_key_id"
+            )
+        ).first()
+        if snapshot is None:
+            skipped += 1
+            continue
+        attempts_before = snapshot["attempts"]
+        delay = _item_removal_backoff_delay(attempts_before)
+        claimed = (
+            PlaidItemRemovalRequest.objects.filter(pk=pk, status="pending")
+            .filter(due)
+            .update(
+                attempts=F("attempts") + 1,
+                last_attempt_at=now,
+                next_retry_at=now + delay,
+            )
+        )
+        if claimed != 1:
+            skipped += 1
+            continue
+        new_attempts = attempts_before + 1
+        try:
+            ring = settings.PLAID_TOKEN_RING
+            if ring is None:
+                raise TokenCryptoError("Token could not be decrypted.")
+            decrypted = ring.decrypt(
+                snapshot["access_token_encrypted"],
+                snapshot["encryption_key_id"],
+            )
+            plaintext = decrypted.plaintext.decode()
+        except TokenCryptoError:
+            PlaidItemRemovalRequest.objects.filter(pk=pk).update(
+                status="failed", last_error=ITEM_REMOVAL_FAILED_DETAIL
+            )
+            failed += 1
+            continue
+        if gateway is None:
+            PlaidItemRemovalRequest.objects.filter(pk=pk).update(
+                last_error=ITEM_REMOVAL_FAILED_DETAIL,
+            )
+            if new_attempts >= ITEM_REMOVAL_MAX_ATTEMPTS:
+                PlaidItemRemovalRequest.objects.filter(pk=pk).update(
+                    status="failed",
+                )
+                failed += 1
+            else:
+                retried += 1
+            continue
+        try:
+            gateway.remove_item(plaintext)
+        except PlaidGatewayError:
+            PlaidItemRemovalRequest.objects.filter(pk=pk).update(
+                last_error=ITEM_REMOVAL_FAILED_DETAIL,
+            )
+            if new_attempts >= ITEM_REMOVAL_MAX_ATTEMPTS:
+                PlaidItemRemovalRequest.objects.filter(pk=pk).update(
+                    status="failed",
+                )
+                failed += 1
+            else:
+                retried += 1
+            continue
+        PlaidItemRemovalRequest.objects.filter(pk=pk).delete()
+        removed += 1
+    return ItemRemovalRunResult(
+        removed=removed,
+        retried=retried,
+        failed=failed,
+        skipped=skipped,
+    )
