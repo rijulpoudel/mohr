@@ -31,6 +31,8 @@ env = environ.Env(
     PLAID_CLIENT_ID=(str, ""),
     PLAID_SECRET=(str, ""),
     PLAID_TOKEN_KEYS=(str, ""),
+    PLAID_WEBHOOK_INBOX_CAP=(int, 10000),
+    PLAID_WEBHOOK_PROCESSED_RETENTION_DAYS=(int, 30),
 )
 
 environ.Env.read_env(BASE_DIR / ".env")
@@ -105,6 +107,28 @@ if PLAID_ENABLED:
     PLAID_TOKEN_RING = TokenKeyRing.from_config(env("PLAID_TOKEN_KEYS"))
 else:
     PLAID_TOKEN_RING = None
+
+
+# Bounded webhook inbox tuning (docs/plaid.md sections 4 and 8): non-secret
+# operational constants that fail closed at import so a misconfigured
+# deployment never runs with an unbounded inbox or a nonsensical retention
+# window. Zero, negative, and non-integer values are rejected.
+
+
+def _positive_integer_setting(name, default):
+    try:
+        value = env(name, default=default)
+    except ValueError:
+        raise ImproperlyConfigured(f"{name} must be a positive integer.") from None
+    if value < 1:
+        raise ImproperlyConfigured(f"{name} must be a positive integer.")
+    return value
+
+
+PLAID_WEBHOOK_INBOX_CAP = _positive_integer_setting("PLAID_WEBHOOK_INBOX_CAP", 10000)
+PLAID_WEBHOOK_PROCESSED_RETENTION_DAYS = _positive_integer_setting(
+    "PLAID_WEBHOOK_PROCESSED_RETENTION_DAYS", 30
+)
 
 
 # Application definition

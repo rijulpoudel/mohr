@@ -27,11 +27,22 @@ behind the committed cursor never advances it and contributes nothing to the
 run totals), fails closed on outage, token, anchor, and blocked-page
 conditions without ever advancing the cursor past a committed value, and
 heals the ``error`` status back to ``active`` on a later successful run.
+The verified webhook ingest (issue #39 slices B and C) persists the durable
+inbox row and connection flags in one atomic block, enforces the bounded
+``PLAID_WEBHOOK_INBOX_CAP`` inside that same block by evicting only oldest
+processed rows and then oldest quarantine rows (never an unprocessed matched
+event, never the just-created row), raises the fixed repr-safe
+:class:`WebhookInboxFull` when a recognized event cannot fit, and
+quarantines verified but malformed deliveries as minimized null-pair rows
+without ever retrying poison forever. A module-level process lock serializes
+webhook ingress; this is safe because Render Free runs exactly one web
+process, and the database transaction remains the correctness boundary.
 """
 
 import hashlib
 import hmac
 import secrets
+import threading
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
@@ -244,6 +255,12 @@ def persist_exchange_connection(user, item_id, institution_name, token_package, 
 
 _WEBHOOK_EVENT_IDEMPOTENCY_UNIQUE = "plaid_webhook_event_idempotency_key_unique"
 
+QUARANTINE_UNKNOWN_WEBHOOK_TYPE = "UNKNOWN"
+QUARANTINE_UNKNOWN_WEBHOOK_CODE = "UNKNOWN"
+QUARANTINE_UNKNOWN_ITEM_ID = "UNKNOWN"
+
+_WEBHOOK_INGEST_LOCK = threading.Lock()
+
 
 class WebhookDuplicateEvent(Exception):
     """A verified webhook with this exact body was already persisted.
@@ -253,6 +270,71 @@ class WebhookDuplicateEvent(Exception):
     an existing row with the same idempotency key). Never carries the body,
     its hash, or any connection state.
     """
+
+
+class WebhookInboxFull(Exception):
+    """The bounded webhook inbox cannot accept another recognized event.
+
+    Raised only when the cap consists entirely of unprocessed matched events
+    (or rows the priority order forbids evicting) after the inserting
+    transaction rolled back, so nothing changed. The exception carries no
+    body, hash, item id, connection state, cause, or context by construction,
+    and its ``repr`` is a fixed string; the endpoint maps it to a fixed 503
+    so Plaid can retry.
+    """
+
+    def __repr__(self):
+        return "<WebhookInboxFull>"
+
+
+class _InboxCapExceeded(Exception):
+    """Internal marker: the inserted row does not fit inside the cap.
+
+    Raised inside the inserting atomic block after every legal eviction was
+    applied; the block rolls back and the caller translates the marker to
+    :class:`WebhookInboxFull` (recognized events) or drops the insert
+    (quarantine rows) outside the failed transaction. Never carries data.
+    """
+
+
+def _enforce_webhook_inbox_cap(keep_pk):
+    """Evict enough oldest rows so the inbox fits, or return False.
+
+    Runs inside the inserting atomic block after the insert, so a duplicate
+    that violated the idempotency constraint before this point rolled back
+    with zero eviction. ``keep_pk`` is the just-created row, which is never
+    evicted. Priority order (``docs/plaid.md`` section 4): oldest processed
+    rows first (``processed_at`` set, oldest first), then oldest quarantine
+    rows (null connection and user pair), oldest first; an unprocessed
+    matched event is never evicted merely to accept another event. Returns
+    True when the table fits inside ``PLAID_WEBHOOK_INBOX_CAP`` and False
+    when only forbidden rows remain.
+    """
+    cap = settings.PLAID_WEBHOOK_INBOX_CAP
+    overflow = PlaidWebhookEvent.objects.count() - cap
+    if overflow <= 0:
+        return True
+    remaining = overflow
+    processed_pks = list(
+        PlaidWebhookEvent.objects.filter(processed_at__isnull=False)
+        .exclude(pk=keep_pk)
+        .order_by("received_at", "id")
+        .values_list("pk", flat=True)[:remaining]
+    )
+    if processed_pks:
+        PlaidWebhookEvent.objects.filter(pk__in=processed_pks).delete()
+        remaining -= len(processed_pks)
+    if remaining > 0:
+        quarantine_pks = list(
+            PlaidWebhookEvent.objects.filter(connection__isnull=True, user__isnull=True)
+            .exclude(pk=keep_pk)
+            .order_by("received_at", "id")
+            .values_list("pk", flat=True)[:remaining]
+        )
+        if quarantine_pks:
+            PlaidWebhookEvent.objects.filter(pk__in=quarantine_pks).delete()
+            remaining -= len(quarantine_pks)
+    return remaining <= 0
 
 
 def _advance_transactions_update_status(
@@ -294,44 +376,121 @@ def persist_verified_webhook(
     connection's ``sync_due`` is set and ``transactions_update_status``
     advances monotonically (``docs/plaid.md`` sections 4, 7, and 8); the
     status, cursor, token, error, ``last_synced_at``, accounts, and
-    transactions are never touched. A re-delivered exact body raises
-    :class:`WebhookDuplicateEvent` after the failed atomic block rolls back,
-    so the duplicate changes neither the connection nor the inbox. An
-    unrelated ``IntegrityError`` propagates.
+    transactions are never touched. The same block then enforces the
+    ``PLAID_WEBHOOK_INBOX_CAP``: only the oldest processed rows and then the
+    oldest quarantine rows are evicted (never an unprocessed matched event,
+    never the just-created row), and when no legal eviction makes room the
+    block rolls back entirely and :class:`WebhookInboxFull` is raised outside
+    the failed transaction, so the recognized event never displaces an
+    unprocessed matched event and the connection changes never exist.
+
+    A re-delivered exact body raises :class:`WebhookDuplicateEvent` after the
+    failed atomic block rolls back, so the duplicate changes neither the
+    connection nor the inbox and evicts nothing. An unrelated
+    ``IntegrityError`` propagates. The module-level process lock serializes
+    ingress under the Render Free single-process architecture; the database
+    transaction remains the correctness boundary.
     """
-    try:
-        with transaction.atomic():
-            conn = PlaidConnection.objects.select_for_update().get(pk=connection.pk)
-            PlaidWebhookEvent.objects.create(
-                connection=conn,
-                user=conn.user,
-                webhook_type=webhook_type,
-                webhook_code=webhook_code,
-                item_id=conn.item_id,
-                idempotency_key=claims.idempotency_key,
-                initial_update_complete=initial_update_complete,
-                historical_update_complete=historical_update_complete,
-                received_at=timezone.now(),
-                processed_at=None,
-            )
-            conn.sync_due = True
-            conn.transactions_update_status = _advance_transactions_update_status(
-                conn.transactions_update_status,
-                initial_complete=initial_update_complete,
-                historical_complete=historical_update_complete,
-            )
-            conn.save(update_fields=["sync_due", "transactions_update_status"])
-    except IntegrityError as exc:
-        constraint_name = _constraint_name(exc)
-        if constraint_name is not None:
-            if constraint_name == _WEBHOOK_EVENT_IDEMPOTENCY_UNIQUE:
+    with _WEBHOOK_INGEST_LOCK:
+        try:
+            with transaction.atomic():
+                conn = PlaidConnection.objects.select_for_update().get(pk=connection.pk)
+                event = PlaidWebhookEvent.objects.create(
+                    connection=conn,
+                    user=conn.user,
+                    webhook_type=webhook_type,
+                    webhook_code=webhook_code,
+                    item_id=conn.item_id,
+                    idempotency_key=claims.idempotency_key,
+                    initial_update_complete=initial_update_complete,
+                    historical_update_complete=historical_update_complete,
+                    received_at=timezone.now(),
+                    processed_at=None,
+                )
+                conn.sync_due = True
+                conn.transactions_update_status = _advance_transactions_update_status(
+                    conn.transactions_update_status,
+                    initial_complete=initial_update_complete,
+                    historical_complete=historical_update_complete,
+                )
+                conn.save(update_fields=["sync_due", "transactions_update_status"])
+                if not _enforce_webhook_inbox_cap(event.pk):
+                    raise _InboxCapExceeded()
+        except _InboxCapExceeded:
+            raise WebhookInboxFull() from None
+        except IntegrityError as exc:
+            constraint_name = _constraint_name(exc)
+            if constraint_name is not None:
+                if constraint_name == _WEBHOOK_EVENT_IDEMPOTENCY_UNIQUE:
+                    raise WebhookDuplicateEvent() from None
+                raise
+            if PlaidWebhookEvent.objects.filter(
+                idempotency_key=claims.idempotency_key
+            ).exists():
                 raise WebhookDuplicateEvent() from None
             raise
-        if PlaidWebhookEvent.objects.filter(
-            idempotency_key=claims.idempotency_key
-        ).exists():
-            raise WebhookDuplicateEvent() from None
-        raise
+
+
+def quarantine_verified_webhook(
+    claims,
+    *,
+    webhook_type,
+    webhook_code,
+    item_id,
+):
+    """Quarantine one verified but unprocessable webhook delivery.
+
+    Persists the minimized null-pair quarantine row: no connection, no user,
+    only the bounded sentinel strings already chosen by the caller for
+    missing or invalid type/code/item values, the verified body hash as the
+    ``idempotency_key``, ``received_at`` and ``processed_at`` equal to now,
+    and both completeness flags false. The raw body, parsed extras, provider
+    error details, JWT, JWK, and digest are never stored. The insert and the
+    bounded-cap enforcement run in one atomic block under the same process
+    lock as :func:`persist_verified_webhook`.
+
+    Returns True when the quarantine row was persisted (any legal eviction
+    already applied) and False when the row was safely dropped instead:
+    accepting it at a full cap would have required deleting the row itself
+    (only unprocessed matched rows or forbidden rows remain), so the insert
+    rolls back, nothing is evicted, and the caller still returns 200 so a
+    poison delivery is never retried forever. A re-delivered exact body
+    raises :class:`WebhookDuplicateEvent` after the failed atomic block rolls
+    back, evicting and mutating nothing; an unrelated ``IntegrityError``
+    propagates.
+    """
+    with _WEBHOOK_INGEST_LOCK:
+        try:
+            with transaction.atomic():
+                received_at = timezone.now()
+                event = PlaidWebhookEvent.objects.create(
+                    connection=None,
+                    user=None,
+                    webhook_type=webhook_type,
+                    webhook_code=webhook_code,
+                    item_id=item_id,
+                    idempotency_key=claims.idempotency_key,
+                    initial_update_complete=False,
+                    historical_update_complete=False,
+                    received_at=received_at,
+                    processed_at=received_at,
+                )
+                if not _enforce_webhook_inbox_cap(event.pk):
+                    raise _InboxCapExceeded()
+        except _InboxCapExceeded:
+            return False
+        except IntegrityError as exc:
+            constraint_name = _constraint_name(exc)
+            if constraint_name is not None:
+                if constraint_name == _WEBHOOK_EVENT_IDEMPOTENCY_UNIQUE:
+                    raise WebhookDuplicateEvent() from None
+                raise
+            if PlaidWebhookEvent.objects.filter(
+                idempotency_key=claims.idempotency_key
+            ).exists():
+                raise WebhookDuplicateEvent() from None
+            raise
+    return True
 
 
 @dataclass(frozen=True)
@@ -1189,3 +1348,84 @@ def perform_sync(
         except PlaidGatewayError as exc:
             _record_outage_error(conn, str(exc))
             return _blocked_run(state)
+
+
+@dataclass(frozen=True)
+class PlaidStateCleanupResult:
+    """Counts-only outcome of one bounded cleanup invocation.
+
+    Carries nothing but integer counts; never digests, item ids, bodies,
+    tokens, or user details, so the caller can print it verbatim.
+    """
+
+    webhook_events_deleted: int = 0
+    exchange_handles_deleted: int = 0
+
+
+def cleanup_plaid_state(batch_size, now=None):
+    """Bound the webhook inbox and purge expired handles in one invocation.
+
+    Runs the ``cleanup_plaid_state`` management command's work with a
+    deterministic injected ``now`` (defaults to the current time). In one
+    bounded invocation it deletes, oldest first and each kind capped at
+    ``batch_size``:
+
+    1. processed webhook rows older than the configured
+       ``PLAID_WEBHOOK_PROCESSED_RETENTION_DAYS`` window (strictly older: a
+       row whose ``processed_at`` equals the cutoff is retained);
+    2. exchange handles that are expired (``expires_at <= now``) OR consumed
+       (``consumed_at`` set), never an unconsumed unexpired handle;
+    3. additional oldest processed webhook rows when the table remains above
+       ``PLAID_WEBHOOK_INBOX_CAP``, again at most ``batch_size``.
+
+    Unprocessed matched webhook rows are never deleted. Deletion uses PK
+    lists gathered first, then one bounded delete per kind, so behavior is
+    deterministic across PostgreSQL and Django. The whole invocation commits
+    atomically. Returns the counts-only :class:`PlaidStateCleanupResult`;
+    ``batch_size`` validation belongs to the command.
+    """
+    if now is None:
+        now = timezone.now()
+    retention_days = settings.PLAID_WEBHOOK_PROCESSED_RETENTION_DAYS
+    cutoff = now - timedelta(days=retention_days)
+    cap = settings.PLAID_WEBHOOK_INBOX_CAP
+    with transaction.atomic():
+        events_deleted = 0
+        expired_pks = list(
+            PlaidWebhookEvent.objects.filter(
+                processed_at__isnull=False, processed_at__lt=cutoff
+            )
+            .order_by("received_at", "id")
+            .values_list("pk", flat=True)[:batch_size]
+        )
+        if expired_pks:
+            events_deleted += PlaidWebhookEvent.objects.filter(
+                pk__in=expired_pks
+            ).delete()[0]
+        handles_deleted = 0
+        spent_pks = list(
+            PlaidExchangeHandle.objects.filter(
+                Q(expires_at__lte=now) | Q(consumed_at__isnull=False)
+            )
+            .order_by("created_at", "id")
+            .values_list("pk", flat=True)[:batch_size]
+        )
+        if spent_pks:
+            handles_deleted += PlaidExchangeHandle.objects.filter(
+                pk__in=spent_pks
+            ).delete()[0]
+        overflow = PlaidWebhookEvent.objects.count() - cap
+        if overflow > 0:
+            extra_pks = list(
+                PlaidWebhookEvent.objects.filter(processed_at__isnull=False)
+                .order_by("received_at", "id")
+                .values_list("pk", flat=True)[: min(overflow, batch_size)]
+            )
+            if extra_pks:
+                events_deleted += PlaidWebhookEvent.objects.filter(
+                    pk__in=extra_pks
+                ).delete()[0]
+    return PlaidStateCleanupResult(
+        webhook_events_deleted=events_deleted,
+        exchange_handles_deleted=handles_deleted,
+    )

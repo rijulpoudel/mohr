@@ -12,13 +12,17 @@ Free single-process constraint, the GET route only reports persisted state;
 it never performs Plaid calls, cursor writes, or any mutation.
 
 The public ``POST /api/plaid/webhooks/transactions/`` receiver (issue #39
-slice B) is a server-to-server Plaid callback per ``docs/plaid.md`` section
-8: it reads the exact raw body and the ``Plaid-Verification`` JWT first,
-verifies the ES256 signature through the gateway before any JSON parsing or
-database access, and only then parses, validates, matches, and persists a
-supported ``TRANSACTIONS`` webhook. It requires no session authentication
-and is CSRF exempt only here because signature verification replaces browser
-CSRF protection; the exemption never weakens the authenticated Plaid routes.
+slices B and C) is a server-to-server Plaid callback per ``docs/plaid.md``
+section 8: it reads the exact raw body and the ``Plaid-Verification`` JWT
+first, verifies the ES256 signature through the gateway before any JSON
+parsing or database access, and only then parses, validates, matches, and
+persists a supported ``TRANSACTIONS`` webhook inside the bounded inbox.
+Verified but malformed deliveries are quarantined as minimized rows and
+answered with the fixed ``200`` so Plaid never retries poison forever; a
+recognized event that cannot fit the bounded cap is answered with a fixed
+``503`` so Plaid can retry. It requires no session authentication and is CSRF
+exempt only here because signature verification replaces browser CSRF
+protection; the exemption never weakens the authenticated Plaid routes.
 """
 
 import json
@@ -52,15 +56,20 @@ from plaid_integration.serializers import (
     ExchangeRequestSerializer,
 )
 from plaid_integration.services import (
+    QUARANTINE_UNKNOWN_ITEM_ID,
+    QUARANTINE_UNKNOWN_WEBHOOK_CODE,
+    QUARANTINE_UNKNOWN_WEBHOOK_TYPE,
     PlaidExchangeDuplicateItem,
     PlaidExchangeProviderDataError,
     WebhookDuplicateEvent,
+    WebhookInboxFull,
     claim_exchange_handle,
     issue_exchange_handle,
     perform_sync,
     persist_exchange_connection,
     persist_verified_webhook,
     plaid_client_user_id,
+    quarantine_verified_webhook,
 )
 from plaid_integration.webhook_verification import (
     WEBHOOK_VERIFICATION_FAILED_DETAIL,
@@ -70,8 +79,10 @@ from plaid_integration.webhook_verification import (
 
 logger = logging.getLogger(__name__)
 
-WEBHOOK_PAYLOAD_INVALID_DETAIL = "Invalid webhook payload."
 WEBHOOK_RECEIVED_RESPONSE = {"status": "ok"}
+WEBHOOK_INBOX_FULL_DETAIL = "Webhook inbox is full."
+
+_QUARANTINE_MARKER = "Quarantined unprocessable verified Plaid webhook."
 
 _WEBHOOK_TYPE_TRANSACTIONS = "TRANSACTIONS"
 _WEBHOOK_TRANSACTIONS_SUPPORTED_CODES = frozenset(
@@ -138,11 +149,12 @@ def _parse_webhook_payload(raw_body):
     ``webhook_type``, ``webhook_code``, and ``item_id`` are bounded nonempty
     strings (model max lengths) and whose ``initial_update_complete`` and
     ``historical_update_complete`` flags, when present, are actual booleans.
-    Any deviation returns None and the endpoint mutates nothing.
+    Any deviation (including a deeply nested body that exhausts the parser
+    stack) returns None and the endpoint quarantines the delivery.
     """
     try:
         data = json.loads(raw_body.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+    except (UnicodeDecodeError, ValueError, RecursionError):
         return None
     if not isinstance(data, dict):
         return None
@@ -170,6 +182,47 @@ def _parse_webhook_payload(raw_body):
     )
 
 
+@dataclass(frozen=True)
+class _QuarantineFields:
+    webhook_type: str
+    webhook_code: str
+    item_id: str
+
+
+def _quarantine_fields(raw_body):
+    """Best-effort bounded field extraction for a verified unprocessable body.
+
+    Runs only after verification and only when ``_parse_webhook_payload``
+    returned None. Each of ``webhook_type``, ``webhook_code``, and
+    ``item_id`` is kept only when it is a bounded nonempty string in the
+    parsed JSON object; every missing or invalid value is replaced by the
+    fixed bounded sentinel. Never returns the raw body, parsed extras, or
+    the digest.
+    """
+    webhook_type = QUARANTINE_UNKNOWN_WEBHOOK_TYPE
+    webhook_code = QUARANTINE_UNKNOWN_WEBHOOK_CODE
+    item_id = QUARANTINE_UNKNOWN_ITEM_ID
+    try:
+        data = json.loads(raw_body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        data = None
+    if isinstance(data, dict):
+        candidate = data.get("webhook_type")
+        if _is_bounded_nonempty_string(candidate, _WEBHOOK_TYPE_MAX_LENGTH):
+            webhook_type = candidate
+        candidate = data.get("webhook_code")
+        if _is_bounded_nonempty_string(candidate, _WEBHOOK_CODE_MAX_LENGTH):
+            webhook_code = candidate
+        candidate = data.get("item_id")
+        if _is_bounded_nonempty_string(candidate, _WEBHOOK_ITEM_ID_MAX_LENGTH):
+            item_id = candidate
+    return _QuarantineFields(
+        webhook_type=webhook_type,
+        webhook_code=webhook_code,
+        item_id=item_id,
+    )
+
+
 @api_view(["POST"])
 @authentication_classes([])
 @permission_classes([AllowAny])
@@ -183,13 +236,19 @@ def webhook_transactions(request):
     read first; the ES256 signature is verified through the injected-or-built
     gateway before any JSON parsing or ORM query, and an unverifiable
     delivery returns the fixed 400 and mutates nothing. Only after
-    verification is the body parsed and validated; verified unsupported
-    type/code and unmatched ``item_id`` deliveries return the fixed 200 and
-    persist nothing. A supported matched event is persisted inside one atomic
-    block (inbox row + ``sync_due`` + monotonic status advance), and a
-    re-delivered exact body is translated from the idempotency constraint to
-    the same fixed 200. Responses never reflect provider or body data, the
-    raw body is never stored, and requests are rate limited per source IP.
+    verification is the body parsed and validated. A verified but malformed
+    or unprocessable delivery is stored as a minimized quarantine row (never
+    the raw body, parsed extras, provider error detail, JWT, JWK, or digest)
+    and answered with the fixed 200, so Plaid never retries poison forever; a
+    re-delivered exact body is idempotent through the idempotency-key
+    constraint and also answers 200 without evicting or mutating anything.
+    Verified unsupported type/code and unmatched ``item_id`` deliveries
+    return the fixed 200 and persist nothing. A supported matched event is
+    persisted inside one atomic block (inbox row + ``sync_due`` + monotonic
+    status advance) under the bounded inbox cap, and a recognized event that
+    cannot fit inside the cap returns the fixed 503 with nothing mutated so
+    Plaid can retry. Responses never reflect provider or body data, the raw
+    body is never stored, and requests are rate limited per source IP.
     """
     raw_body = request.body
     verification_header = request.META.get("HTTP_PLAID_VERIFICATION")
@@ -206,10 +265,7 @@ def webhook_transactions(request):
         )
     payload = _parse_webhook_payload(raw_body)
     if payload is None:
-        return Response(
-            {"detail": WEBHOOK_PAYLOAD_INVALID_DETAIL},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+        return _quarantine_response(raw_body, claims)
     if (
         payload.webhook_type != _WEBHOOK_TYPE_TRANSACTIONS
         or payload.webhook_code not in _WEBHOOK_TRANSACTIONS_SUPPORTED_CODES
@@ -238,6 +294,36 @@ def webhook_transactions(request):
             payload.webhook_type,
             payload.webhook_code,
         )
+    except WebhookInboxFull:
+        return Response(
+            {"detail": WEBHOOK_INBOX_FULL_DETAIL},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    return Response(WEBHOOK_RECEIVED_RESPONSE)
+
+
+def _quarantine_response(raw_body, claims):
+    """Quarantine a verified unprocessable delivery and answer the fixed 200.
+
+    Extracts only bounded type/code/item sentinels from the verified body,
+    persists the minimized null-pair quarantine row through the service
+    (which applies the same bounded cap; a row that cannot fit is safely
+    dropped and the delivery is still acknowledged), translates a duplicate
+    exact body to the same 200, and logs only the fixed redacted marker. The
+    response and logs never carry the raw body, a digest, provider error
+    detail, JWT, or JWK.
+    """
+    fields = _quarantine_fields(raw_body)
+    try:
+        quarantine_verified_webhook(
+            claims,
+            webhook_type=fields.webhook_type,
+            webhook_code=fields.webhook_code,
+            item_id=fields.item_id,
+        )
+    except WebhookDuplicateEvent:
+        pass
+    logger.warning(_QUARANTINE_MARKER)
     return Response(WEBHOOK_RECEIVED_RESPONSE)
 
 

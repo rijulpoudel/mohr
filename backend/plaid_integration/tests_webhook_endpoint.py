@@ -58,7 +58,6 @@ UNKNOWN_ITEM_ID = "item-sandbox-webhook-unknown-00001"
 BODY_MARKER = "RAW-BODY-MARKER"
 JWT_MARKER = "JWT-TOKEN-MARKER"
 
-WEBHOOK_PAYLOAD_INVALID_DETAIL = "Invalid webhook payload."
 WEBHOOK_RECEIVED_RESPONSE = {"status": "ok"}
 
 
@@ -505,47 +504,57 @@ class WebhookEndpointVerificationFailureTests(WebhookEndpointBase):
 
 
 class WebhookEndpointPayloadValidationTests(WebhookEndpointBase):
-    def assert_payload_rejected(self, body):
+    def assert_payload_quarantined(self, body):
         header = signed_header(body)
         with patched_gateway():
             response = self.post_webhook(body, header=header)
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(response.json(), {"detail": WEBHOOK_PAYLOAD_INVALID_DETAIL})
-        self.assertEqual(PlaidWebhookEvent.objects.count(), 0)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json(), WEBHOOK_RECEIVED_RESPONSE)
+        event = PlaidWebhookEvent.objects.get()
+        self.assertIsNone(event.connection)
+        self.assertIsNone(event.user)
+        self.assertEqual(event.idempotency_key, hashlib.sha256(body).hexdigest())
+        self.assertEqual(event.processed_at, event.received_at)
+        self.assertFalse(event.initial_update_complete)
+        self.assertFalse(event.historical_update_complete)
         self.connection.refresh_from_db()
         self.assertFalse(self.connection.sync_due)
         return response
 
-    def test_malformed_json_bytes_are_rejected(self):
-        self.assert_payload_rejected(b"{not json")
+    def test_malformed_json_bytes_are_quarantined(self):
+        self.assert_payload_quarantined(b"{not json")
 
-    def test_non_utf8_bytes_are_rejected(self):
-        self.assert_payload_rejected(b"\xff\xfe\x00 not utf-8")
+    def test_non_utf8_bytes_are_quarantined(self):
+        self.assert_payload_quarantined(b"\xff\xfe\x00 not utf-8")
 
-    def test_json_array_and_scalar_bodies_are_rejected(self):
+    def test_json_array_and_scalar_bodies_are_quarantined(self):
         for value in ([1, 2], "text", 42, True, None):
             with self.subTest(value=value):
-                self.assert_payload_rejected(json.dumps(value).encode())
+                PlaidWebhookEvent.objects.all().delete()
+                self.assert_payload_quarantined(json.dumps(value).encode())
 
-    def test_missing_required_field_is_rejected(self):
+    def test_missing_required_field_is_quarantined(self):
         for field in ("webhook_type", "webhook_code", "item_id"):
             with self.subTest(field=field):
+                PlaidWebhookEvent.objects.all().delete()
                 payload = json.loads(webhook_body())
                 del payload[field]
-                self.assert_payload_rejected(json.dumps(payload).encode())
+                self.assert_payload_quarantined(json.dumps(payload).encode())
 
-    def test_empty_required_field_is_rejected(self):
+    def test_empty_required_field_is_quarantined(self):
         for field in ("webhook_type", "webhook_code", "item_id"):
             with self.subTest(field=field):
-                self.assert_payload_rejected(webhook_body(**{field: ""}))
+                PlaidWebhookEvent.objects.all().delete()
+                self.assert_payload_quarantined(webhook_body(**{field: ""}))
 
-    def test_non_string_required_field_is_rejected(self):
+    def test_non_string_required_field_is_quarantined(self):
         for field in ("webhook_type", "webhook_code", "item_id"):
             for bad in (123, None, [], {}):
                 with self.subTest(field=field, bad=bad):
-                    self.assert_payload_rejected(webhook_body(**{field: bad}))
+                    PlaidWebhookEvent.objects.all().delete()
+                    self.assert_payload_quarantined(webhook_body(**{field: bad}))
 
-    def test_oversized_required_field_is_rejected(self):
+    def test_oversized_required_field_is_quarantined(self):
         cases = [
             {"webhook_type": "T" * 51},
             {"webhook_code": "C" * 51},
@@ -553,7 +562,8 @@ class WebhookEndpointPayloadValidationTests(WebhookEndpointBase):
         ]
         for overrides in cases:
             with self.subTest(overrides=overrides):
-                self.assert_payload_rejected(webhook_body(**overrides))
+                PlaidWebhookEvent.objects.all().delete()
+                self.assert_payload_quarantined(webhook_body(**overrides))
 
     def test_max_length_required_field_is_accepted(self):
         max_item_id = "i" * 100
@@ -573,13 +583,14 @@ class WebhookEndpointPayloadValidationTests(WebhookEndpointBase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(PlaidWebhookEvent.objects.count(), 1)
 
-    def test_non_bool_flags_are_rejected(self):
+    def test_non_bool_flags_are_quarantined(self):
         for flag in ("initial_update_complete", "historical_update_complete"):
             for bad in ("true", 1, 0, None, [], {}):
                 with self.subTest(flag=flag, bad=bad):
-                    self.assert_payload_rejected(webhook_body(**{flag: bad}))
+                    PlaidWebhookEvent.objects.all().delete()
+                    self.assert_payload_quarantined(webhook_body(**{flag: bad}))
 
-    def test_payload_failure_response_reflects_no_parsed_field_data(self):
+    def test_payload_quarantine_response_reflects_no_parsed_field_data(self):
         body = json.dumps(
             {
                 "webhook_type": [BODY_MARKER],
@@ -588,11 +599,15 @@ class WebhookEndpointPayloadValidationTests(WebhookEndpointBase):
             }
         ).encode()
 
-        response = self.assert_payload_rejected(body)
+        response = self.assert_payload_quarantined(body)
 
         raw = response.content.decode()
         self.assertNotIn(BODY_MARKER, raw)
         self.assertNotIn(ITEM_ID, raw)
+        event = PlaidWebhookEvent.objects.get()
+        self.assertEqual(event.webhook_type, "UNKNOWN")
+        self.assertEqual(event.webhook_code, "SYNC_UPDATES_AVAILABLE")
+        self.assertEqual(event.item_id, ITEM_ID)
 
 
 class WebhookEndpointMethodTests(WebhookEndpointBase):
