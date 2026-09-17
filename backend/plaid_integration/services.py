@@ -1157,21 +1157,28 @@ def _record_anchor_error(connection):
         conn.save(update_fields=["last_sync_error"])
 
 
-def _restore_active_status(connection):
-    """Heal the connection status back to ``active`` after a successful run.
+def _restore_successful_sync_state(connection, *, clear_sync_due):
+    """Heal lifecycle state and clear a fully drained webhook notification.
 
     Called only when a pagination attempt completed without blocking. Sets
     ``status`` to ``active`` if and only if it is currently ``error`` (the
-    single transient provider-outage symptom); every other status is left
-    untouched, and the cursor and ``last_sync_error`` are never written. The
-    row is briefly locked so the status-only update is atomic and never
-    bypasses the page commit block (``docs/plaid.md`` section 9).
+    single transient provider-outage symptom). ``sync_due`` is cleared only
+    when provider pagination was fully drained; a run stopped at the page cap
+    keeps the flag set so pending pages are not forgotten. Every other field
+    is untouched. The row is briefly locked so these lifecycle updates are
+    atomic and never bypass the page commit block.
     """
     with transaction.atomic():
         conn = PlaidConnection.objects.select_for_update().get(pk=connection.pk)
+        update_fields = []
         if conn.status == PlaidConnectionStatus.ERROR:
             conn.status = PlaidConnectionStatus.ACTIVE
-            conn.save(update_fields=["status"])
+            update_fields.append("status")
+        if clear_sync_due and conn.sync_due:
+            conn.sync_due = False
+            update_fields.append("sync_due")
+        if update_fields:
+            conn.save(update_fields=update_fields)
 
 
 def _import_page_accounts(connection, page):
@@ -1307,6 +1314,7 @@ class _SyncRunState:
     quarantined: int = 0
     anchors_applied: int = 0
     history_complete: bool = False
+    drained: bool = False
 
 
 def _run_pagination_attempt(
@@ -1370,6 +1378,7 @@ def _run_pagination_attempt(
             state.quarantined += page_result.quarantined
         request_cursor = page.next_cursor
         if not page.has_more:
+            state.drained = True
             state.history_complete = (
                 page.transactions_update_status == PROVIDER_HISTORICAL_UPDATE_COMPLETE
             )
@@ -1449,7 +1458,7 @@ def perform_sync(
             )
             if result is not None:
                 return result
-            _restore_active_status(conn)
+            _restore_successful_sync_state(conn, clear_sync_due=state.drained)
             return SyncRunResult(
                 blocked=False,
                 pages_applied=state.pages_applied,
