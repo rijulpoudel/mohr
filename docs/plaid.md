@@ -844,3 +844,55 @@ Store and log the minimum needed to reconcile:
 - Acceptance: Sandbox end-to-end (connect -> import -> webhook/manual sync
   -> disconnect) verified; no token material in bundles or browser
   storage; responsive and consistent with the one-accent minimal design.
+
+## 13. Deployed Sandbox acceptance record
+
+The issue #40 UI was deployed to the Render same-origin application and
+exercised against a real Plaid Sandbox Item on 2026-09-18. This record separates
+observed provider behavior from mocked contract coverage.
+
+Verified on the deployed application:
+
+- Initial Link completed, the public token exchanged server-side, and the
+  connection persisted without any provider token entering a browser response.
+- Automatic first synchronization imported Tartan Bank checking, savings, and
+  credit-card accounts plus 42 transactions. Provider current balances rendered
+  as `110.00`, `210.00`, and `-410.00`; the credit-card liability therefore kept
+  the required negative Mohr sign.
+- Manual synchronization completed with the truthful zero-change result, "No
+  changes were found."
+- A user category and note override on a provider transaction survived a later
+  synchronization.
+- Plaid delivered real `INITIAL_UPDATE` and `HISTORICAL_UPDATE` webhooks. The
+  Dashboard logs showed `200` responses and a successful
+  `/webhook_verification_key/get` request, proving that the public receiver was
+  reached and signature verification completed.
+- Disconnect required the named destructive confirmation, focused Cancel first,
+  removed the remote Sandbox Item with a `200`, marked the connection
+  disconnected, archived all three linked accounts, and retained all 42
+  provider transactions and the user override.
+- A fresh post-disconnect Link created one active replacement connection and
+  imported 42 rows. The previous three accounts remained archived. The active
+  account sum and dashboard total both remained `-90.00`, proving that retained
+  history was not double-counted.
+- The deployed browser had empty local and session storage. The session cookie
+  was Secure, HttpOnly, and SameSite=Lax; the CSRF cookie was Secure and readable
+  for Django's double-submit contract. Connection responses, request URLs,
+  console output, browser logs, and the production bundle contained no access,
+  public, or Link token marker, exchange handle, cursor, Item id, Plaid secret,
+  or provider-account identifier.
+- At 390 CSS pixels the page had no horizontal overflow or clipped controls;
+  Connect, Sync, and Disconnect controls were at least 44 pixels high.
+
+Not claimed as live-verified:
+
+- Update-mode repair after `ITEM_LOGIN_REQUIRED`. Plaid requires the hidden
+  Item access token for `/sandbox/item/reset_login`; the Dashboard correctly did
+  not reveal it and the Render Free service did not provide shell access.
+- A synthetic `SYNC_UPDATES_AVAILABLE` delivery and pending-to-posted or provider
+  removal transition. Those Sandbox controls also require the hidden Item access
+  token. The corresponding backend state machines remain covered by the mocked
+  contract suite, but this deployed run did not execute those provider controls.
+
+No temporary testing endpoint, token-exposure path, or weakened authorization was
+added to bypass these provider and hosting boundaries.
