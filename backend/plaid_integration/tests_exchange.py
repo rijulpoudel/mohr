@@ -98,6 +98,7 @@ class FakeExchangeResponse:
 class FakeItem:
     def __init__(self, institution_name="Synthetic Test Bank"):
         self.institution_name = institution_name
+        self.error = None
 
 
 class FakeItemGetResponse:

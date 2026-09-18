@@ -79,6 +79,12 @@ export interface PlaidDisconnectResult {
   status: 'disconnected'
 }
 
+export interface PlaidUpdateCompleteResult {
+  connection_id: number
+  status: 'active'
+  sync_pending: true
+}
+
 const CONNECTION_STATUSES: ReadonlySet<string> = new Set([
   'active',
   'updating',
@@ -127,6 +133,7 @@ const SYNC_RESULT_KEYS = [
 ] as const
 const SYNC_PROCESSING_KEYS = ['connection_id', 'status'] as const
 const DISCONNECT_KEYS = ['connection_id', 'status'] as const
+const UPDATE_COMPLETE_KEYS = ['connection_id', 'status', 'sync_pending'] as const
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/
 const TIMESTAMP_PATTERN =
@@ -402,6 +409,36 @@ function parseDisconnectResult(
   }
 }
 
+function parseUpdateCompleteResult(
+  expectedConnectionId: number,
+): (payload: unknown, status: number) => PlaidUpdateCompleteResult {
+  return (payload, status) => {
+    if (status !== 200) {
+      throw new ApiError(MALFORMED_RESPONSE_MESSAGE, status, null, {})
+    }
+    if (!isRecord(payload) || !hasExactKeys(payload, UPDATE_COMPLETE_KEYS)) {
+      throw new ApiError(MALFORMED_RESPONSE_MESSAGE, status, null, {})
+    }
+    if (
+      !isPositiveInteger(payload.connection_id) ||
+      payload.connection_id !== expectedConnectionId
+    ) {
+      throw new ApiError(MALFORMED_RESPONSE_MESSAGE, status, null, {})
+    }
+    if (payload.status !== 'active') {
+      throw new ApiError(MALFORMED_RESPONSE_MESSAGE, status, null, {})
+    }
+    if (payload.sync_pending !== true) {
+      throw new ApiError(MALFORMED_RESPONSE_MESSAGE, status, null, {})
+    }
+    return {
+      connection_id: payload.connection_id,
+      status: 'active',
+      sync_pending: true,
+    }
+  }
+}
+
 function assertValidConnectionId(connectionId: number): void {
   if (!isPositiveInteger(connectionId)) {
     throw new ApiError(INVALID_CONNECTION_ID_MESSAGE, null, null, {})
@@ -500,5 +537,17 @@ export async function disconnectPlaidConnection(
     `/api/plaid/connections/${connectionId}/disconnect/`,
     { method: 'POST', headers: { 'X-CSRFToken': token } },
     parseDisconnectResult(connectionId),
+  )
+}
+
+export async function completePlaidUpdate(
+  connectionId: number,
+): Promise<PlaidUpdateCompleteResult> {
+  assertValidConnectionId(connectionId)
+  const token = await getCsrfToken()
+  return apiFetch(
+    `/api/plaid/connections/${connectionId}/update-complete/`,
+    { method: 'POST', headers: { 'X-CSRFToken': token } },
+    parseUpdateCompleteResult(connectionId),
   )
 }

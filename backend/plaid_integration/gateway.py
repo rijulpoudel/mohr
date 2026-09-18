@@ -96,9 +96,15 @@ class PublicTokenExchangeResult:
 
 @dataclass(frozen=True)
 class ItemGetResult:
-    """Safe item lookup outcome; institution name only, never secrets."""
+    """Safe item lookup outcome; institution name only, never secrets.
+
+    ``has_error`` is True only when the healthy provider response carried an
+    Item-level error (for example ``ITEM_LOGIN_REQUIRED``); the provider
+    error itself is never retained, exposed, or logged.
+    """
 
     institution_name: str | None
+    has_error: bool = False
 
 
 @dataclass(frozen=True)
@@ -199,6 +205,34 @@ def _environment_host():
         logger.warning("Plaid environment is not sandbox; refusing to build a client.")
         raise PlaidGatewayError(PLAID_UNAVAILABLE_DETAIL)
     return Environment.Sandbox
+
+
+def _normalize_item_error(item):
+    """Return whether the Item carries a provider error, or fail closed.
+
+    The installed SDK models ``Item.error`` as the ``PlaidError`` model
+    (declared in ``Item.openapi_types``), so an Item without the attribute
+    at all is malformed provider data and fails closed with the fixed safe
+    error exactly like a missing item or a malformed institution name. A
+    provider-compatible error value is a dict-like or object carrying a
+    string ``error_code`` (the SDK ``PlaidError`` shape); any other non-None
+    shape (a string, bool, list, or number) is malformed and fails closed
+    too. The error value itself is never retained, exposed, or logged.
+    """
+    if not hasattr(item, "error"):
+        logger.warning("Plaid item lookup returned malformed data.")
+        raise PlaidGatewayError(PLAID_UNAVAILABLE_DETAIL)
+    item_error = item.error
+    if item_error is None:
+        return False
+    if isinstance(item_error, dict):
+        error_code = item_error.get("error_code")
+    else:
+        error_code = getattr(item_error, "error_code", None)
+    if isinstance(error_code, str):
+        return True
+    logger.warning("Plaid item lookup returned malformed data.")
+    raise PlaidGatewayError(PLAID_UNAVAILABLE_DETAIL)
 
 
 class PlaidGateway:
@@ -332,12 +366,17 @@ class PlaidGateway:
     def get_item(self, access_token):
         """Look up the Item with the permanent access token, server-side.
 
-        Returns only ``item.institution_name`` (None or a string); the
-        browser never supplies institution metadata. Every provider,
-        transport, timeout, or malformed-response condition (including a 400
-        from a now-invalid access token or a missing/non-string institution
-        name) raises the fixed safe :class:`PlaidGatewayError`. The access
-        token is never logged or interpolated.
+        Returns only ``item.institution_name`` (None or a string) plus a
+        ``has_error`` boolean that is True exactly when the healthy provider
+        response reported an Item-level error (for example
+        ``ITEM_LOGIN_REQUIRED``); the provider error itself is never
+        retained, exposed, or logged. The browser never supplies institution
+        metadata. Every provider, transport, timeout, or malformed-response
+        condition (including a 400 from a now-invalid access token, a
+        missing/non-string institution name, a missing ``error`` attribute,
+        or an incompatible ``error`` shape) raises the fixed safe
+        :class:`PlaidGatewayError`. The access token is never logged or
+        interpolated.
         """
         request = ItemGetRequest(
             client_id=self._client_id,
@@ -360,7 +399,11 @@ class PlaidGateway:
         if institution_name is not None and not isinstance(institution_name, str):
             logger.warning("Plaid item lookup returned malformed data.")
             raise PlaidGatewayError(PLAID_UNAVAILABLE_DETAIL)
-        return ItemGetResult(institution_name=institution_name)
+        has_error = _normalize_item_error(item)
+        return ItemGetResult(
+            institution_name=institution_name,
+            has_error=has_error,
+        )
 
     def remove_item(self, access_token):
         """Revoke the Item for a relocated access token, server-side.
