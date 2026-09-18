@@ -432,7 +432,10 @@ function AccountItem({
         </div>
       </dl>
       {account.sync_pending && (
-        <p className="account-balance-pending">
+        <p
+          id={`account-balance-pending-${account.id}`}
+          className="account-balance-pending"
+        >
           <span className="account-balance-pending-mark">Balance pending</span>{' '}
           <span>
             Balances are temporarily excluded while transaction history
@@ -445,6 +448,12 @@ function AccountItem({
           type="button"
           className="btn btn-secondary"
           aria-label={`Edit ${account.name}`}
+          aria-describedby={
+            account.sync_pending
+              ? `account-balance-pending-${account.id}`
+              : undefined
+          }
+          disabled={account.sync_pending}
           onClick={onEdit}
         >
           Edit

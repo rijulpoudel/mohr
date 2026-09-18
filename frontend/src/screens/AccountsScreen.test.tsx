@@ -354,23 +354,63 @@ describe('account sync pending', () => {
     ).not.toBeInTheDocument()
   })
 
-  it('keeps Edit and Archive controls with their accessible names on a sync_pending account', async () => {
-    installFetchMock(
+  it('keeps Archive enabled and Edit visible but disabled on a sync_pending account, with Edit described by the pending-balance explanation', async () => {
+    const mock = installFetchMock(
       authenticatedHandler(() =>
         jsonResponse([
-          accountFixture({ id: 1, name: 'Checking One', sync_pending: true }),
+          accountFixture({
+            id: 1,
+            name: 'Checking One',
+            sync_pending: true,
+            opening_balance: '0.00',
+            current_balance: '0.00',
+          }),
         ]),
       ),
     )
     renderApp('/accounts')
 
     const item = (await screen.findAllByRole('listitem'))[0]
-    expect(
-      within(item).getByRole('button', { name: 'Edit Checking One' }),
-    ).toBeInTheDocument()
+    const editButton = within(item).getByRole('button', {
+      name: 'Edit Checking One',
+    })
+    expect(editButton).toBeInTheDocument()
+    expect(editButton).toBeDisabled()
     expect(
       within(item).getByRole('button', { name: 'Archive Checking One' }),
-    ).toBeInTheDocument()
+    ).toBeEnabled()
+
+    const explanation = within(item)
+      .getByText(
+        'Balances are temporarily excluded while transaction history finishes and the opening balance is anchored.',
+      )
+      .closest('p')
+    expect(explanation).toHaveAttribute('id', 'account-balance-pending-1')
+    expect(editButton).toHaveAttribute(
+      'aria-describedby',
+      'account-balance-pending-1',
+    )
+
+    const user = userEvent.setup()
+    await user.click(editButton)
+    expect(
+      screen.queryByRole('form', { name: 'Edit account' }),
+    ).not.toBeInTheDocument()
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(0)
+    expect(calls(mock, '/api/accounts/1/', 'PATCH')).toHaveLength(0)
+  })
+
+  it('leaves Edit enabled on an account with sync_pending false', async () => {
+    installFetchMock(authenticatedHandler(() => jsonResponse([accountFixture()])))
+    renderApp('/accounts')
+
+    const item = (await screen.findAllByRole('listitem'))[0]
+    expect(
+      within(item).getByRole('button', { name: 'Edit Everyday Checking' }),
+    ).toBeEnabled()
+    expect(
+      within(item).getByRole('button', { name: 'Edit Everyday Checking' }),
+    ).not.toHaveAttribute('aria-describedby')
   })
 })
 
