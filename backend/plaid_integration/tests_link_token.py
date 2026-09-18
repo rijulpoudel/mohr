@@ -40,6 +40,8 @@ from plaid_integration.tests import assert_constraint_violation
 
 RAW_PROVIDER_BODY_MARKER = "RAW-PROVIDER-BODY-MARKER"
 
+WEBHOOK_URL = "https://testserver/api/plaid/webhooks/transactions/"
+
 
 class FakeLinkTokenResponse:
     def __init__(
@@ -90,7 +92,7 @@ class PlaidGatewayTests(SimpleTestCase):
     def test_create_link_token_builds_exact_sdk_request(self):
         fake_api = FakePlaidApi()
 
-        gateway_for(fake_api).create_link_token("opaque-client-user-id")
+        gateway_for(fake_api).create_link_token("opaque-client-user-id", WEBHOOK_URL)
 
         self.assertEqual(len(fake_api.calls), 1)
         request, timeout = fake_api.calls[0]
@@ -99,6 +101,7 @@ class PlaidGatewayTests(SimpleTestCase):
         self.assertEqual(request.country_codes, [CountryCode("US")])
         self.assertEqual(request.products, [Products("transactions")])
         self.assertEqual(request.transactions.days_requested, 90)
+        self.assertEqual(request.webhook, WEBHOOK_URL)
         self.assertEqual(request.user.client_user_id, "opaque-client-user-id")
         self.assertIsInstance(timeout, (int, float))
         self.assertGreater(timeout, 0)
@@ -131,7 +134,9 @@ class PlaidGatewayTests(SimpleTestCase):
             response=FakeLinkTokenResponse("link-sandbox-gateway", expiration)
         )
 
-        response = gateway_for(fake_api).create_link_token("opaque-client-user-id")
+        response = gateway_for(fake_api).create_link_token(
+            "opaque-client-user-id", WEBHOOK_URL
+        )
 
         self.assertEqual(response.link_token, "link-sandbox-gateway")
         self.assertEqual(response.expiration, expiration)
@@ -144,7 +149,7 @@ class PlaidGatewayTests(SimpleTestCase):
 
         with self.assertRaises(PlaidGatewayError) as raised:
             gateway_for(FakePlaidApi(error=error)).create_link_token(
-                "opaque-client-user-id"
+                "opaque-client-user-id", WEBHOOK_URL
             )
 
         self.assertEqual(str(raised.exception), PLAID_UNAVAILABLE_DETAIL)
@@ -153,7 +158,7 @@ class PlaidGatewayTests(SimpleTestCase):
         with self.assertRaises(PlaidGatewayError) as raised:
             gateway_for(
                 FakePlaidApi(error=TimeoutError("Connection timed out"))
-            ).create_link_token("opaque-client-user-id")
+            ).create_link_token("opaque-client-user-id", WEBHOOK_URL)
 
         self.assertEqual(str(raised.exception), PLAID_UNAVAILABLE_DETAIL)
 
@@ -161,7 +166,7 @@ class PlaidGatewayTests(SimpleTestCase):
         with self.assertRaises(PlaidGatewayError) as raised:
             gateway_for(
                 FakePlaidApi(error=ProtocolError("Connection aborted."))
-            ).create_link_token("opaque-client-user-id")
+            ).create_link_token("opaque-client-user-id", WEBHOOK_URL)
 
         self.assertEqual(str(raised.exception), PLAID_UNAVAILABLE_DETAIL)
 
@@ -169,7 +174,7 @@ class PlaidGatewayTests(SimpleTestCase):
         with self.assertRaises(TypeError) as raised:
             gateway_for(
                 FakePlaidApi(error=TypeError("programmer defect"))
-            ).create_link_token("opaque-client-user-id")
+            ).create_link_token("opaque-client-user-id", WEBHOOK_URL)
 
         self.assertEqual(str(raised.exception), "programmer defect")
 
@@ -191,7 +196,7 @@ class PlaidGatewayTests(SimpleTestCase):
         ) as captured:
             with self.assertRaises(PlaidGatewayError):
                 gateway_for(FakePlaidApi(error=error)).create_link_token(
-                    "opaque-client-user-id"
+                    "opaque-client-user-id", WEBHOOK_URL
                 )
 
         log_text = "\n".join(captured.output)
@@ -229,7 +234,7 @@ class PlaidGatewayTests(SimpleTestCase):
                     with self.assertRaises(PlaidGatewayError) as raised:
                         gateway_for(
                             FakePlaidApi(error=provider_error)
-                        ).create_link_token("opaque-client-user-id")
+                        ).create_link_token("opaque-client-user-id", WEBHOOK_URL)
 
                 exception = raised.exception
                 self.assertIsNone(exception.__cause__)
@@ -460,6 +465,25 @@ class LinkTokenAPITests(APITestCase):
             hashlib.sha256(exchange_handle.encode("ascii")).hexdigest(),
         )
 
+    @override_settings(
+        **PLAID_API_SETTINGS,
+        SECURE_PROXY_SSL_HEADER=("HTTP_X_FORWARDED_PROTO", "https"),
+    )
+    def test_secure_request_passes_exact_webhook_url_to_sdk_request(self):
+        fake_api = FakePlaidApi()
+
+        with self.patched_gateway(fake_api):
+            response = self.post_link_token(
+                HTTP_X_FORWARDED_PROTO="https",
+                HTTP_REFERER="https://testserver/",
+                SERVER_PORT="443",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(fake_api.calls), 1)
+        request, _ = fake_api.calls[0]
+        self.assertEqual(request.webhook, WEBHOOK_URL)
+
     @override_settings(**PLAID_API_SETTINGS)
     def test_response_contains_exactly_the_safe_fields(self):
         fake_api = FakePlaidApi()
@@ -478,6 +502,7 @@ class LinkTokenAPITests(APITestCase):
             "item_id",
             "client_id",
             "secret",
+            "webhook",
         ):
             self.assertNotIn(forbidden, raw)
 
