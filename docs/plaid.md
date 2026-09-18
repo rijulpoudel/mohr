@@ -865,8 +865,8 @@ Verified on the deployed application:
   synchronization.
 - Plaid delivered real `INITIAL_UPDATE` and `HISTORICAL_UPDATE` webhooks. The
   Dashboard logs showed `200` responses and a successful
-  `/webhook_verification_key/get` request, proving that the public receiver was
-  reached and signature verification completed.
+  `/webhook_verification_key/get` request. The public receiver returns `200`
+  only after signature verification succeeds.
 - Disconnect required the named destructive confirmation, focused Cancel first,
   removed the remote Sandbox Item with a `200`, marked the connection
   disconnected, archived all three linked accounts, and retained all 42
@@ -877,10 +877,10 @@ Verified on the deployed application:
   history was not double-counted.
 - The deployed browser had empty local and session storage. The session cookie
   was Secure, HttpOnly, and SameSite=Lax; the CSRF cookie was Secure and readable
-  for Django's double-submit contract. Connection responses, request URLs,
-  console output, browser logs, and the production bundle contained no access,
-  public, or Link token marker, exchange handle, cursor, Item id, Plaid secret,
-  or provider-account identifier.
+  for Django's double-submit contract. Connection responses contained no
+  forbidden token or provider-identifier keys. Request URLs, console output,
+  browser logs, and the production bundle contained no provider credential
+  values or token-value prefixes.
 - At 390 CSS pixels the page had no horizontal overflow or clipped controls;
   Connect, Sync, and Disconnect controls were at least 44 pixels high.
 
