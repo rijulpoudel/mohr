@@ -112,6 +112,7 @@ POST   /api/plaid/exchange/          authenticated, CSRF protected
 GET    /api/plaid/connections/       authenticated list of user's connections
 POST   /api/plaid/connections/<id>/sync/      authenticated manual sync trigger
 POST   /api/plaid/connections/<id>/link-token/ authenticated update-mode Link token
+POST   /api/plaid/connections/<id>/update-complete/ authenticated update verification
 POST   /api/plaid/connections/<id>/disconnect/ authenticated disconnect
 POST   /api/plaid/webhooks/transactions/      public, signature-verified, CSRF-exempt
 ```
@@ -141,6 +142,14 @@ Response boundaries:
   The server decrypts the owned connection's existing access token only for
   Plaid's request; it creates no exchange handle because update mode does not
   replace or exchange the permanent access token.
+- `POST .../update-complete/` -> `200 {connection_id, status: "active",
+  sync_pending: true}` after Link update mode succeeds in the browser and the
+  server independently confirms with Plaid `/item/get` that the owned Item has
+  no provider error. The browser's update-mode public token is ignored; the
+  permanent access token stays encrypted at rest and server-only in use.
+  Provider errors, malformed Item responses, decryption/configuration failures,
+  and disconnect/delete races fail closed with the fixed safe unavailable
+  response and no state mutation.
 - `POST .../disconnect/` -> `200 {connection_id, status: "disconnected"}`.
   The response never varies with remote Plaid success, because the user is
   locally disconnected either way, and never carries the token, key id,
@@ -685,8 +694,12 @@ No Celery, Redis, or Kubernetes in this milestone. The design therefore is:
   connection list, and pauses sync writes. The authenticated owner requests
   `POST /api/plaid/connections/<id>/link-token/`; Link update mode reuses the
   existing connection row and permanent access token (same `item_id`, cursor,
-  account links, history, and user overrides), then resumes without another
-  public-token exchange.
+  account links, history, and user overrides). Link `onSuccess` then triggers
+  one authenticated, CSRF-protected `POST .../update-complete/`; the backend
+  verifies Item health directly with Plaid before moving a repair state to
+  `active` and setting `sync_due`. It resumes without another public-token
+  exchange. Plaid's `LOGIN_REPAIRED` webhook remains the independent recovery
+  signal for an Item healed outside Mohr's own update-mode flow.
 - Revoked consent / `ITEM_ERROR` unrecoverable: connection -> `revoked`;
   sync stops; history stays; relink creates or heals per `item_id` match.
 - Relink: same `item_id` heals the existing connection (new token,
@@ -867,6 +880,21 @@ Verified on the deployed application:
   Dashboard logs showed `200` responses and a successful
   `/webhook_verification_key/get` request. The public receiver returns `200`
   only after signature verification succeeds.
+- Plaid's Sandbox `/sandbox/item/fire_webhook` delivered a real signed
+  `SYNC_UPDATES_AVAILABLE` event. Mohr persisted the signal, surfaced pending
+  work, and a deployed manual sync cleared it with the truthful result, "No
+  changes were found."
+- Plaid's Sandbox `/sandbox/item/reset_login` produced a real signed
+  `ITEM / ERROR` carrying `ITEM_LOGIN_REQUIRED`; Mohr moved the connection to
+  `updating` and showed "Reconnect required." Two successful Link repairs then
+  exposed that the original frontend waited for the wrong recovery signal:
+  Plaid reports an in-app update through Link `onSuccess`, while
+  `LOGIN_REPAIRED` is for an Item healed outside the current app. PR #48 added
+  the server-verified completion handshake and deployed as merge commit
+  `207e589`. A fresh production repair moved the same connection to `active`,
+  exposed Sync now, and completed a zero-change sync. A read-only database
+  check confirmed `sync_due` and the fixed local sync error were cleared,
+  transaction readiness remained complete, and prior sync history remained.
 - Disconnect required the named destructive confirmation, focused Cancel first,
   removed the remote Sandbox Item with a `200`, marked the connection
   disconnected, archived all three linked accounts, and retained all 42
@@ -886,13 +914,12 @@ Verified on the deployed application:
 
 Not claimed as live-verified:
 
-- Update-mode repair after `ITEM_LOGIN_REQUIRED`. Plaid requires the hidden
-  Item access token for `/sandbox/item/reset_login`; the Dashboard correctly did
-  not reveal it and the Render Free service did not provide shell access.
-- A synthetic `SYNC_UPDATES_AVAILABLE` delivery and pending-to-posted or provider
-  removal transition. Those Sandbox controls also require the hidden Item access
-  token. The corresponding backend state machines remain covered by the mocked
-  contract suite, but this deployed run did not execute those provider controls.
+- A dynamic pending-to-posted or provider-removal transition. The corresponding
+  backend state machines remain covered by the mocked contract suite, but this
+  deployed run did not execute those provider controls.
 
-No temporary testing endpoint, token-exposure path, or weakened authorization was
-added to bypass these provider and hosting boundaries.
+The additional Sandbox controls were exercised through a one-time local helper
+that accepted deployment values only through masked macOS dialogs, held them in
+process memory, printed only boolean results, cleared the clipboard, and was
+deleted afterward. No temporary testing endpoint, token-exposure path, direct
+database mutation, or weakened authorization was added.
