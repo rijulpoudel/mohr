@@ -1558,6 +1558,80 @@ def perform_sync(
 
 
 @dataclass(frozen=True)
+class UpdateCompleteResult:
+    """Safe outcome of one authenticated update-completion handshake.
+
+    ``blocked`` is True when the handshake failed fixed-safe with zero
+    mutation: token unavailable, provider unhealthy or unreachable, or a
+    ``disconnected`` race. ``connection_id`` is the owned connection's id on
+    success only. Never carries token material, key ids, cursors, or
+    provider detail by construction.
+    """
+
+    connection_id: int | None = None
+    blocked: bool = False
+
+
+def complete_connection_update(connection, *, gateway=None):
+    """Complete one authenticated update-mode repair handshake (issue #40).
+
+    The caller has already owner-scoped the lookup, so a missing or foreign
+    id never reaches this helper. The stored access token is decrypted
+    server-side with the configured key ring; a missing, cleared, wrong-key,
+    malformed, or undecryptable token fails fixed-safe with zero mutation
+    and zero provider work. The permanent token then verifies the Item's
+    health through the gateway's ``/item/get``; a gateway construction
+    failure, provider, transport, timeout, or malformed-response failure, or
+    a healthy response reporting an Item-level error (``has_error``), fails
+    fixed-safe with zero mutation and never exposes the provider error. Only
+    after a healthy provider response is the connection re-read under a row
+    lock: ``disconnected`` is terminal and fails fixed-safe even when a
+    disconnect raced the provider call, and a row deleted between provider
+    verification and the lock fails fixed-safe without resurrecting or
+    recreating anything. The allowed repair states ``updating``, ``error``,
+    and ``revoked`` become ``active`` with ``sync_due=True`` and the owned
+    ``last_sync_error`` cleared; an already-``active`` row is an idempotent
+    race-safe success and also guarantees ``sync_due=True``. Token, cursor,
+    ``transactions_update_status``, ``last_synced_at``, account links,
+    transactions, overrides, and history are never touched. Returns the
+    repr-safe :class:`UpdateCompleteResult`; provider conditions never
+    raise.
+    """
+    access_token = _decrypt_access_token(connection)
+    if access_token is None:
+        return UpdateCompleteResult(blocked=True)
+    try:
+        if gateway is None:
+            gateway = PlaidGateway.from_settings()
+        item = gateway.get_item(access_token)
+    except PlaidGatewayError:
+        return UpdateCompleteResult(blocked=True)
+    if item.has_error:
+        return UpdateCompleteResult(blocked=True)
+    with transaction.atomic():
+        try:
+            conn = PlaidConnection.objects.select_for_update().get(pk=connection.pk)
+        except PlaidConnection.DoesNotExist:
+            return UpdateCompleteResult(blocked=True)
+        if conn.status == PlaidConnectionStatus.DISCONNECTED:
+            return UpdateCompleteResult(blocked=True)
+        update_fields = []
+        if conn.status != PlaidConnectionStatus.ACTIVE:
+            conn.status = PlaidConnectionStatus.ACTIVE
+            update_fields.append("status")
+        if not conn.sync_due:
+            conn.sync_due = True
+            update_fields.append("sync_due")
+        if conn.last_sync_error:
+            conn.last_sync_error = ""
+            update_fields.append("last_sync_error")
+        if update_fields:
+            conn.save(update_fields=update_fields)
+        connection_id = conn.pk
+    return UpdateCompleteResult(connection_id=connection_id)
+
+
+@dataclass(frozen=True)
 class PlaidStateCleanupResult:
     """Counts-only outcome of one bounded cleanup invocation.
 

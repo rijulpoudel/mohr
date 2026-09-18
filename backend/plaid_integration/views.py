@@ -65,6 +65,7 @@ from plaid_integration.services import (
     WebhookDuplicateEvent,
     WebhookInboxFull,
     claim_exchange_handle,
+    complete_connection_update,
     decrypt_connection_access_token,
     disconnect_connection,
     issue_exchange_handle,
@@ -601,6 +602,58 @@ def connection_link_token(request, pk):
         {
             "link_token": response.link_token,
             "expiration": response.expiration,
+        }
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def connection_update_complete(request, pk):
+    """Owner-scoped authenticated completion of an update-mode repair.
+
+    The authenticated owner finishes an update-mode Link repair for ONE
+    connection after Plaid Link reported ``onSuccess``. The disabled-
+    integration 503 check mirrors the link-token, exchange, sync, and
+    update-link-token routes and returns before any lookup, decrypt, or
+    provider work. The lookup is scoped to ``request.user`` before anything
+    is decrypted or called, so a missing id and a foreign id are the same
+    indistinguishable 404 with zero decrypt and provider work. The service
+    decrypts the stored access token server-side (a missing, cleared,
+    wrong-key, malformed, or undecryptable token fails closed with the fixed
+    503 and zero mutation), verifies Item health through ``/item/get``
+    (provider, transport, or malformed failures and a provider-reported Item
+    error all fail closed with the fixed 503 and zero mutation, never
+    exposing the provider error), and only after a healthy provider response
+    re-reads the connection under a row lock and transitions the allowed
+    repair states ``updating``/``error``/``revoked`` to ``active`` with
+    ``sync_due=True`` and the owned error cleared. ``disconnected`` is
+    terminal and fails fixed-safe even if a disconnect raced the provider
+    call; an already-``active`` row is an idempotent race-safe success with
+    ``sync_due=True``. Returns exactly ``200 {connection_id, status:
+    "active", sync_pending: true}`` with no Item id, cursor, token, provider
+    body, or institution metadata.
+    """
+    if not settings.PLAID_ENABLED:
+        return Response(
+            {"detail": PLAID_UNAVAILABLE_DETAIL},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+    connection = get_object_or_404(
+        PlaidConnection.objects.filter(user=request.user),
+        pk=pk,
+    )
+    result = complete_connection_update(connection)
+    if result.blocked:
+        return Response(
+            {"detail": PLAID_UNAVAILABLE_DETAIL},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    return Response(
+        {
+            "connection_id": result.connection_id,
+            "status": "active",
+            "sync_pending": True,
         }
     )
 

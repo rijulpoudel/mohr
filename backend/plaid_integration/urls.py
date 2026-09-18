@@ -5,6 +5,7 @@ from plaid_integration.views import (
     connection_link_token,
     connection_list,
     connection_sync,
+    connection_update_complete,
     exchange,
     link_token,
     webhook_transactions,
@@ -18,6 +19,11 @@ urlpatterns = [
         "connections/<int:pk>/sync/",
         connection_sync,
         name="plaid-connection-sync",
+    ),
+    path(
+        "connections/<int:pk>/update-complete/",
+        connection_update_complete,
+        name="plaid-connection-update-complete",
     ),
     path(
         "connections/<int:pk>/link-token/",

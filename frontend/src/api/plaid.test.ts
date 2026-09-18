@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  completePlaidUpdate,
   createPlaidLinkToken,
   createPlaidUpdateLinkToken,
   disconnectPlaidConnection,
@@ -1485,6 +1486,247 @@ describe('disconnectPlaidConnection', () => {
     )
 
     await disconnectPlaidConnection(5)
+
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+})
+
+describe('completePlaidUpdate', () => {
+  const UPDATE_COMPLETE_URL = '/api/plaid/connections/5/update-complete/'
+
+  function updateCompleteFixture(overrides: Record<string, unknown> = {}) {
+    return {
+      connection_id: 5,
+      status: 'active',
+      sync_pending: true,
+      ...overrides,
+    }
+  }
+
+  it('bootstraps CSRF then POSTs the update-complete path and parses the 200 response', async () => {
+    const mock = installFetchMock(
+      mutationHandler((url) => {
+        if (url === UPDATE_COMPLETE_URL) {
+          return jsonResponse(updateCompleteFixture(), 200)
+        }
+        return jsonResponse({}, 404)
+      }),
+    )
+
+    const result = await completePlaidUpdate(5)
+
+    expect(requestLog(mock)).toEqual([
+      'GET /api/auth/csrf/',
+      `POST ${UPDATE_COMPLETE_URL}`,
+    ])
+    const posts = calls(mock, UPDATE_COMPLETE_URL, 'POST')
+    expect(posts).toHaveLength(1)
+    const [input, init] = posts[0]
+    expect(String(input)).toBe(UPDATE_COMPLETE_URL)
+    expect(init?.method).toBe('POST')
+    const headers = init?.headers as Headers
+    expect(headers.get('X-CSRFToken')).toBe(CSRF_HEADER)
+    expect(init?.body).toBeUndefined()
+    expect(result.connection_id).toBe(5)
+    expect(result.status).toBe('active')
+    expect(result.sync_pending).toBe(true)
+  })
+
+  it('rejects a 200 response with an extra field', async () => {
+    const mock = installFetchMock(
+      mutationHandler((url) => {
+        if (url === UPDATE_COMPLETE_URL) {
+          return jsonResponse(updateCompleteFixture({ surprise: true }), 200)
+        }
+        return jsonResponse({}, 404)
+      }),
+    )
+
+    const error = await rejection(completePlaidUpdate(5))
+    expect(error).toBeInstanceOf(ApiError)
+    if (error instanceof ApiError) {
+      expect(error.status).toBe(200)
+      expect(error.message).toBe('Unexpected server response.')
+    }
+    expect(calls(mock, UPDATE_COMPLETE_URL, 'POST')).toHaveLength(1)
+  })
+
+  it.each([
+    ['connection_id', { status: 'active', sync_pending: true }],
+    ['status', { connection_id: 5, sync_pending: true }],
+    ['sync_pending', { connection_id: 5, status: 'active' }],
+  ])('rejects a 200 response missing %s', async (_label, payload) => {
+    const mock = installFetchMock(
+      mutationHandler((url) => {
+        if (url === UPDATE_COMPLETE_URL) return jsonResponse(payload, 200)
+        return jsonResponse({}, 404)
+      }),
+    )
+
+    const error = await rejection(completePlaidUpdate(5))
+    expect(error).toBeInstanceOf(ApiError)
+    if (error instanceof ApiError) expect(error.status).toBe(200)
+    expect(calls(mock, UPDATE_COMPLETE_URL, 'POST')).toHaveLength(1)
+  })
+
+  it('rejects a 200 response whose connection_id does not match', async () => {
+    const mock = installFetchMock(
+      mutationHandler((url) => {
+        if (url === UPDATE_COMPLETE_URL) {
+          return jsonResponse(updateCompleteFixture({ connection_id: 6 }), 200)
+        }
+        return jsonResponse({}, 404)
+      }),
+    )
+
+    const error = await rejection(completePlaidUpdate(5))
+    expect(error).toBeInstanceOf(ApiError)
+    if (error instanceof ApiError) {
+      expect(error.status).toBe(200)
+      expect(error.message).toBe('Unexpected server response.')
+    }
+    expect(calls(mock, UPDATE_COMPLETE_URL, 'POST')).toHaveLength(1)
+  })
+
+  it('rejects a 200 response whose status is not active', async () => {
+    const mock = installFetchMock(
+      mutationHandler((url) => {
+        if (url === UPDATE_COMPLETE_URL) {
+          return jsonResponse(updateCompleteFixture({ status: 'updating' }), 200)
+        }
+        return jsonResponse({}, 404)
+      }),
+    )
+
+    const error = await rejection(completePlaidUpdate(5))
+    expect(error).toBeInstanceOf(ApiError)
+    if (error instanceof ApiError) {
+      expect(error.status).toBe(200)
+      expect(error.message).toBe('Unexpected server response.')
+    }
+    expect(calls(mock, UPDATE_COMPLETE_URL, 'POST')).toHaveLength(1)
+  })
+
+  it.each([
+    ['false', false],
+    ['the string "true"', 'true'],
+  ])('rejects a 200 response whose sync_pending is %s', async (_label, value) => {
+    const mock = installFetchMock(
+      mutationHandler((url) => {
+        if (url === UPDATE_COMPLETE_URL) {
+          return jsonResponse(updateCompleteFixture({ sync_pending: value }), 200)
+        }
+        return jsonResponse({}, 404)
+      }),
+    )
+
+    const error = await rejection(completePlaidUpdate(5))
+    expect(error).toBeInstanceOf(ApiError)
+    if (error instanceof ApiError) expect(error.status).toBe(200)
+    expect(calls(mock, UPDATE_COMPLETE_URL, 'POST')).toHaveLength(1)
+  })
+
+  it.each([
+    ['a 201 response', () => jsonResponse(updateCompleteFixture(), 201), 201],
+    ['a 202 response', () => jsonResponse(updateCompleteFixture(), 202), 202],
+  ])('rejects %s even with a valid payload', async (_label, respond, status) => {
+    const mock = installFetchMock(
+      mutationHandler((url) => {
+        if (url === UPDATE_COMPLETE_URL) return respond()
+        return jsonResponse({}, 404)
+      }),
+    )
+
+    const error = await rejection(completePlaidUpdate(5))
+    expect(error).toBeInstanceOf(ApiError)
+    if (error instanceof ApiError) expect(error.status).toBe(status)
+    expect(calls(mock, UPDATE_COMPLETE_URL, 'POST')).toHaveLength(1)
+  })
+
+  it.each([
+    ['a zero id', 0],
+    ['a negative id', -4],
+    ['a fractional id', 2.5],
+    ['an unsafe id', 9007199254740992],
+    ['a string id', '7'],
+    ['NaN', Number.NaN],
+  ])('rejects %s before any network call', async (_label, connectionId) => {
+    const mock = installFetchMock(() => jsonResponse({}, 404))
+
+    const error = await rejection(completePlaidUpdate(connectionId as number))
+    expect(error).toBeInstanceOf(ApiError)
+    if (error instanceof ApiError) {
+      expect(error.status).toBeNull()
+      expect(error.message).toBe('Invalid connection id.')
+    }
+    expect(requestLog(mock)).toEqual([])
+  })
+
+  it('aborts before POST when no CSRF cookie is present', async () => {
+    const mock = installFetchMock((url) => {
+      if (url === '/api/auth/csrf/') return jsonResponse(CSRF_RESPONSE)
+      if (url === UPDATE_COMPLETE_URL) return jsonResponse(updateCompleteFixture(), 200)
+      return jsonResponse({}, 404)
+    })
+
+    const error = await rejection(completePlaidUpdate(5))
+    expect(error).toBeInstanceOf(ApiError)
+    if (error instanceof ApiError) expect(error.message).toBe('Missing CSRF token.')
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(1)
+    expect(calls(mock, UPDATE_COMPLETE_URL, 'POST')).toHaveLength(0)
+  })
+
+  const failureStatusCases: Array<[string, () => Response, number]> = [
+    [
+      'a 401 response',
+      () =>
+        jsonResponse(
+          { detail: 'Authentication credentials were not provided.' },
+          401,
+        ),
+      401,
+    ],
+    [
+      'a 404 response',
+      () => jsonResponse({ detail: 'No PlaidConnection matches the given query.' }, 404),
+      404,
+    ],
+    [
+      'a 503 response',
+      () => jsonResponse({ detail: 'Plaid is unavailable.' }, 503),
+      503,
+    ],
+  ]
+
+  it.each(failureStatusCases)(
+    'preserves %s',
+    async (_label, respond, status) => {
+      const mock = installFetchMock(
+        mutationHandler((url) => {
+          if (url === UPDATE_COMPLETE_URL) return respond()
+          return jsonResponse({}, 404)
+        }),
+      )
+
+      const error = await rejection(completePlaidUpdate(5))
+      expect(error).toBeInstanceOf(ApiError)
+      if (error instanceof ApiError) expect(error.status).toBe(status)
+      expect(calls(mock, UPDATE_COMPLETE_URL, 'POST')).toHaveLength(1)
+    },
+  )
+
+  it('never writes to local or session storage', async () => {
+    installFetchMock(
+      mutationHandler((url) => {
+        if (url === UPDATE_COMPLETE_URL) {
+          return jsonResponse(updateCompleteFixture(), 200)
+        }
+        return jsonResponse({}, 404)
+      }),
+    )
+
+    await completePlaidUpdate(5)
 
     expect(localStorage.length).toBe(0)
     expect(sessionStorage.length).toBe(0)

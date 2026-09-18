@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { usePlaidLink, type PlaidLinkError } from 'react-plaid-link'
 import { type AccountType } from '../api/accounts'
 import {
+  completePlaidUpdate,
   createPlaidUpdateLinkToken,
   disconnectPlaidConnection,
   fetchPlaidConnections,
@@ -22,6 +23,7 @@ const LINK_EXIT_ERROR_MESSAGE =
   'The bank connection could not be completed. Please try again.'
 const LINK_LOAD_ERROR_MESSAGE =
   'We could not start the bank connection. Please try again.'
+const VERIFYING_REPAIRED_MESSAGE = 'Verifying the repaired connection…'
 
 export const CONNECTION_STALE_AFTER_MS = 24 * 60 * 60 * 1000
 
@@ -67,11 +69,12 @@ type Mutation =
   | { kind: 'reconnect'; connectionId: number }
   | { kind: 'disconnect'; connectionId: number }
 
-type ReconnectStatus = 'idle' | 'preparing' | 'linking' | 'error'
+type ReconnectStatus = 'idle' | 'preparing' | 'linking' | 'completing' | 'error'
 
 type ReconnectNotice =
   | { status: 'preparing'; connectionId: number }
   | { status: 'linking'; connectionId: number }
+  | { status: 'completing'; connectionId: number }
   | { status: 'error'; connectionId: number; message: string }
 
 type DisconnectNotice =
@@ -299,6 +302,11 @@ function ConnectionCard({
               bank window…
             </p>
           )}
+          {reconnectNoticeForConnection?.status === 'completing' && (
+            <p role="status" className="connection-note">
+              {VERIFYING_REPAIRED_MESSAGE}
+            </p>
+          )}
           {reconnectNoticeForConnection?.status === 'error' && (
             <div className="error-summary" role="alert">
               <p>{reconnectNoticeForConnection.message}</p>
@@ -460,8 +468,43 @@ export function ConnectionsScreen() {
 
   const handleReconnectSuccess = useCallback(() => {
     if (reconnectStatusRef.current !== 'linking') return
-    finishReconnect()
-  }, [finishReconnect])
+    const mutation = mutationInFlightRef.current
+    if (mutation === null || mutation.kind !== 'reconnect') return
+    // Update mode never exchanges a public token: the permanent access token
+    // stays stored server-side, so the browser's onSuccess payload carries no
+    // credential that should be stored, logged, or sent anywhere. The repair
+    // finishes with the authenticated completion handshake.
+    reconnectStatusRef.current = 'completing'
+    setReconnectNotice({ status: 'completing', connectionId: mutation.connectionId })
+    void completePlaidUpdate(mutation.connectionId)
+      .then(() => {
+        if (!mountedRef.current) return
+        if (mutationInFlightRef.current !== mutation) return
+        if (reconnectStatusRef.current !== 'completing') return
+        finishReconnect()
+      })
+      .catch((caught: unknown) => {
+        if (!mountedRef.current) return
+        if (mutationInFlightRef.current !== mutation) return
+        if (caught instanceof ApiError && caught.status === 401) {
+          settleReconnect()
+          reconnectStatusRef.current = 'idle'
+          setReconnectNotice(null)
+          clearSession()
+          return
+        }
+        settleReconnect()
+        reconnectStatusRef.current = 'error'
+        setReconnectNotice({
+          status: 'error',
+          connectionId: mutation.connectionId,
+          message:
+            caught instanceof ApiError
+              ? userMessage(caught)
+              : GENERIC_ERROR_MESSAGE,
+        })
+      })
+  }, [clearSession, finishReconnect, settleReconnect])
 
   const handleReconnectExit = useCallback(
     (error: PlaidLinkError | null) => {

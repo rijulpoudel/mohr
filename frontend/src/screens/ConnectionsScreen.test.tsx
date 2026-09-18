@@ -123,6 +123,7 @@ function connectionItem(name: string): HTMLElement {
 
 const UPDATE_LINK_TOKEN = 'link-sandbox-update-abcdef1234567890'
 const UPDATE_TOKEN_URL = '/api/plaid/connections/5/link-token/'
+const UPDATE_COMPLETE_URL = '/api/plaid/connections/5/update-complete/'
 const EXCHANGE_URL = '/api/plaid/exchange/'
 const DISCONNECT_URL = '/api/plaid/connections/5/disconnect/'
 
@@ -134,6 +135,15 @@ function updateLinkTokenFixture(overrides: Record<string, unknown> = {}) {
   }
 }
 
+function updateCompleteFixture(overrides: Record<string, unknown> = {}) {
+  return {
+    connection_id: 5,
+    status: 'active',
+    sync_pending: true,
+    ...overrides,
+  }
+}
+
 function lifecycleHandler(
   overrides: Partial<{
     connections: (url: string, init?: RequestInit) => Response | Promise<Response>
@@ -141,6 +151,7 @@ function lifecycleHandler(
     disconnect: (url: string, init?: RequestInit) => Response | Promise<Response>
     exchange: (url: string, init?: RequestInit) => Response | Promise<Response>
     sync: (url: string, init?: RequestInit) => Response | Promise<Response>
+    updateComplete: (url: string, init?: RequestInit) => Response | Promise<Response>
   }> = {},
 ) {
   return (url: string, init?: RequestInit) => {
@@ -171,6 +182,11 @@ function lifecycleHandler(
       return overrides.linkToken
         ? overrides.linkToken(url, init)
         : jsonResponse(updateLinkTokenFixture())
+    }
+    if (url === UPDATE_COMPLETE_URL && init?.method === 'POST') {
+      return overrides.updateComplete
+        ? overrides.updateComplete(url, init)
+        : jsonResponse(updateCompleteFixture())
     }
     if (url.endsWith('/sync/') && init?.method === 'POST') {
       return overrides.sync
@@ -1847,6 +1863,269 @@ describe('connections reconnect (update mode)', () => {
       warnSpy.mockRestore()
       errorSpy.mockRestore()
     }
+  })
+})
+
+describe('connections update-mode completion', () => {
+  function reconnectLinkOptions() {
+    const captured = plaidLink.optionsForToken(UPDATE_LINK_TOKEN)
+    if (captured === null) {
+      throw new Error('No update-mode Link options captured')
+    }
+    return captured
+  }
+
+  function openReconnect(user: ReturnType<typeof userEvent.setup>) {
+    return user.click(
+      screen.getByRole('button', { name: 'Reconnect First Plaid Bank' }),
+    )
+  }
+
+  beforeEach(() => {
+    setCsrfCookie()
+    plaidLink.reset()
+  })
+
+  it('completes update mode exactly once for a same-tick double onSuccess, refetches only after completion resolves, and locks competing mutations', async () => {
+    const completion = deferred<Response>()
+    let connectionsCalls = 0
+    const mock = installFetchMock(
+      lifecycleHandler({
+        connections: () => {
+          connectionsCalls += 1
+          return jsonResponse([
+            connectionFixture({
+              id: 5,
+              institution_name: 'First Plaid Bank',
+              status: 'updating',
+            }),
+          ])
+        },
+        updateComplete: () => completion.promise,
+      }),
+    )
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+    expect(connectionsCalls).toBe(1)
+
+    const user = userEvent.setup()
+    await openReconnect(user)
+    await waitFor(() => expect(plaidLink.open).toHaveBeenCalledTimes(1))
+
+    act(() => {
+      reconnectLinkOptions().onSuccess('public-sandbox-update-a', {})
+      reconnectLinkOptions().onSuccess('public-sandbox-update-b', {})
+    })
+
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Verifying the repaired connection…',
+    )
+    await waitFor(() =>
+      expect(calls(mock, UPDATE_COMPLETE_URL, 'POST')).toHaveLength(1),
+    )
+    expect(calls(mock, EXCHANGE_URL, 'POST')).toHaveLength(0)
+    expect(connectionsCalls).toBe(1)
+    expect(
+      screen.getByRole('button', { name: 'Reconnect First Plaid Bank' }),
+    ).toBeDisabled()
+    expect(
+      screen.getByRole('button', { name: 'Disconnect First Plaid Bank' }),
+    ).toBeDisabled()
+
+    await act(async () => {
+      completion.resolve(jsonResponse(updateCompleteFixture()))
+    })
+
+    await waitFor(() => expect(connectionsCalls).toBe(2))
+    expect(calls(mock, UPDATE_COMPLETE_URL, 'POST')).toHaveLength(1)
+    expect(calls(mock, EXCHANGE_URL, 'POST')).toHaveLength(0)
+    await waitFor(() =>
+      expect(
+        screen.queryByText('Verifying the repaired connection…'),
+      ).not.toBeInTheDocument(),
+    )
+    expect(
+      screen.getByRole('button', { name: 'Reconnect First Plaid Bank' }),
+    ).toBeEnabled()
+  })
+
+  it('never stores or logs the onSuccess public token during completion', async () => {
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const publicToken = 'public-sandbox-secret-token-xyz'
+    try {
+      let connectionsCalls = 0
+      const mock = installFetchMock(
+        lifecycleHandler({
+          connections: () => {
+            connectionsCalls += 1
+            return jsonResponse([
+              connectionFixture({
+                id: 5,
+                institution_name: 'First Plaid Bank',
+                status: 'updating',
+              }),
+            ])
+          },
+        }),
+      )
+      renderApp('/connections')
+      expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+      const user = userEvent.setup()
+      await openReconnect(user)
+      await waitFor(() => expect(plaidLink.open).toHaveBeenCalledTimes(1))
+
+      act(() => {
+        reconnectLinkOptions().onSuccess(publicToken, {})
+      })
+
+      await waitFor(() => expect(connectionsCalls).toBe(2))
+      expect(calls(mock, UPDATE_COMPLETE_URL, 'POST')).toHaveLength(1)
+
+      const output = [
+        ...consoleSpy.mock.calls,
+        ...warnSpy.mock.calls,
+        ...errorSpy.mock.calls,
+      ]
+        .flat()
+        .join('\n')
+      expect(output).not.toContain(publicToken)
+      expect(localStorage.length).toBe(0)
+      expect(sessionStorage.length).toBe(0)
+      expect(document.cookie).not.toContain(publicToken)
+    } finally {
+      consoleSpy.mockRestore()
+      warnSpy.mockRestore()
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('shows a retryable alert on a failed completion and a Retry re-issues the link-token flow', async () => {
+    const mock = installFetchMock(
+      lifecycleHandler({
+        updateComplete: () =>
+          jsonResponse(
+            { detail: 'Plaid service is unavailable. Try again later.' },
+            503,
+          ),
+      }),
+    )
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await openReconnect(user)
+    await waitFor(() => expect(plaidLink.open).toHaveBeenCalledTimes(1))
+
+    act(() => {
+      reconnectLinkOptions().onSuccess('public-sandbox-update-a', {})
+    })
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(
+      'Plaid service is unavailable. Try again later.',
+    )
+    expect(calls(mock, UPDATE_COMPLETE_URL, 'POST')).toHaveLength(1)
+    expect(calls(mock, EXCHANGE_URL, 'POST')).toHaveLength(0)
+    expect(
+      screen.getByRole('button', { name: 'Reconnect First Plaid Bank' }),
+    ).toBeEnabled()
+
+    await user.click(
+      within(alert).getByRole('button', {
+        name: 'Retry reconnect for First Plaid Bank',
+      }),
+    )
+
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    await waitFor(() =>
+      expect(calls(mock, UPDATE_TOKEN_URL, 'POST')).toHaveLength(2),
+    )
+    await waitFor(() => expect(plaidLink.open).toHaveBeenCalledTimes(2))
+    expect(calls(mock, EXCHANGE_URL, 'POST')).toHaveLength(0)
+  })
+
+  it('clears the session on a 401 completion with no alert and no storage writes', async () => {
+    const mock = installFetchMock(
+      lifecycleHandler({
+        updateComplete: () =>
+          jsonResponse(
+            { detail: 'Authentication credentials were not provided.' },
+            401,
+          ),
+      }),
+    )
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await openReconnect(user)
+    await waitFor(() => expect(plaidLink.open).toHaveBeenCalledTimes(1))
+
+    act(() => {
+      reconnectLinkOptions().onSuccess('public-sandbox-update-a', {})
+    })
+
+    expect(await screen.findByLabelText('Email')).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/login')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(calls(mock, UPDATE_COMPLETE_URL, 'POST')).toHaveLength(1)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  it('ignores a late completion 401 after navigating to the dashboard', async () => {
+    const pendingCompletion = deferred<Response>()
+    const mock = installFetchMock(
+      lifecycleHandler({
+        updateComplete: () => pendingCompletion.promise,
+      }),
+    )
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await openReconnect(user)
+    await waitFor(() => expect(plaidLink.open).toHaveBeenCalledTimes(1))
+
+    act(() => {
+      reconnectLinkOptions().onSuccess('public-sandbox-update-a', {})
+    })
+    await waitFor(() =>
+      expect(calls(mock, UPDATE_COMPLETE_URL, 'POST')).toHaveLength(1),
+    )
+
+    const nav = screen.getByRole('navigation', { name: 'Primary' })
+    await user.click(within(nav).getByRole('link', { name: 'Dashboard' }))
+
+    expect(await screen.findByText('$1,234.56')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Overview' })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/')
+
+    await act(async () => {
+      pendingCompletion.resolve(
+        jsonResponse(
+          { detail: 'Authentication credentials were not provided.' },
+          401,
+        ),
+      )
+    })
+
+    expect(window.location.pathname).toBe('/')
+    expect(screen.getByRole('heading', { name: 'Overview' })).toBeInTheDocument()
+    expect(screen.getByText('$1,234.56')).toBeInTheDocument()
+    expect(
+      screen.getByRole('navigation', { name: 'Primary' }),
+    ).toBeInTheDocument()
+    expect(screen.queryByLabelText('Email')).not.toBeInTheDocument()
+    expect(
+      requestLog(mock).some((entry) => entry.includes('/api/auth/logout/')),
+    ).toBe(false)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+    expect(calls(mock, UPDATE_COMPLETE_URL, 'POST')).toHaveLength(1)
   })
 })
 
