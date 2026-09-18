@@ -411,6 +411,10 @@ a {
   font-size: 0.8125rem;
 }
 
+.transaction-source {
+  color: var(--color-accent);
+}
+
 .transaction-item .transaction-note {
   margin: var(--space-1) 0 0;
   font-size: 0.875rem;
@@ -431,6 +435,12 @@ a {
   flex-wrap: wrap;
   gap: var(--space-3);
   margin-block-start: var(--space-2);
+}
+
+.transaction-retention-note {
+  margin: var(--space-3) 0;
+  color: var(--color-muted);
+  font-size: 0.875rem;
 }
 
 .transaction-delete .form {
@@ -544,6 +554,19 @@ a {
 
 .account-actions {
   margin-block-start: var(--space-2);
+}
+
+.account-balance-pending {
+  margin: var(--space-2) 0 0;
+  color: var(--color-muted);
+  font-size: 0.875rem;
+}
+
+.account-balance-pending-mark {
+  color: var(--color-accent);
+  /* Head the explanation on its own line so the marker reads as a label
+     followed by its reason, not as one long run-on sentence. */
+  display: block;
 }
 
 .account-edit h3 {
@@ -765,6 +788,142 @@ a {
   flex-wrap: wrap;
   gap: var(--space-3);
   margin-block-start: var(--space-3);
+}
+
+.connection-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--color-border);
+}
+
+.connect-bank {
+  margin-block-end: var(--space-6);
+}
+
+.connection-item {
+  padding-block: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.connection-main {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--space-3);
+}
+
+.connection-name {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.connection-status {
+  color: var(--color-muted);
+  font-size: 0.8125rem;
+  flex-shrink: 0;
+}
+
+.connection-details {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: var(--space-2) var(--space-4);
+  margin: var(--space-2) 0 0;
+}
+
+.connection-detail {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-1);
+}
+
+.connection-detail dt {
+  color: var(--color-muted);
+  font-size: 0.8125rem;
+}
+
+.connection-detail dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.connection-note {
+  margin: var(--space-2) 0 0;
+  color: var(--color-muted);
+  font-size: 0.875rem;
+}
+
+.connection-sync {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-4);
+  margin-block-start: var(--space-2);
+}
+
+.connection-sync .connection-note {
+  margin: 0;
+}
+
+.connection-sync .error-summary {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+.connection-confirm {
+  margin-block-start: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-1);
+  background: var(--color-surface);
+  font-size: 0.875rem;
+}
+
+.connection-confirm > p {
+  margin: 0 0 var(--space-2);
+}
+
+.connection-confirm > .error-summary {
+  margin-block-end: var(--space-2);
+}
+
+.connection-confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-block-start: var(--space-3);
+}
+
+.connection-accounts {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+}
+
+.connection-account {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2) var(--space-4);
+  padding-block: var(--space-1);
+}
+
+.connection-account-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.connection-account-meta {
+  color: var(--color-muted);
+  font-size: 0.8125rem;
+}
+
+.connection-account-pending {
+  color: var(--color-accent);
 }
 
 @media (max-width: 24.375rem) {

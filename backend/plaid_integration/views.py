@@ -31,6 +31,7 @@ from dataclasses import dataclass
 
 from django.conf import settings
 from django.shortcuts import get_object_or_404
+from django.urls import reverse
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework import status
 from rest_framework.decorators import (
@@ -399,15 +400,28 @@ def _quarantine_response(raw_body, claims):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def link_token(request):
+    """Authenticated initial Link token with the verified webhook URL.
+
+    The exact absolute URL of the public ``plaid-webhook-transactions``
+    receiver is built server-side from this authenticated request
+    (``request.build_absolute_uri(reverse(...))``) so the real Link flow
+    registers it with Plaid via ``webhook`` on ``/link/token/create``. It is
+    never accepted from the browser, never added to a response, and never
+    logged; the response stays exactly ``{link_token, expiration,
+    exchange_handle}``.
+    """
     if not settings.PLAID_ENABLED:
         return Response(
             {"detail": PLAID_UNAVAILABLE_DETAIL},
             status=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
 
+    webhook_url = request.build_absolute_uri(reverse("plaid-webhook-transactions"))
     try:
         gateway = PlaidGateway.from_settings()
-        response = gateway.create_link_token(plaid_client_user_id(request.user))
+        response = gateway.create_link_token(
+            plaid_client_user_id(request.user), webhook_url
+        )
     except PlaidGatewayError:
         return Response(
             {"detail": PLAID_UNAVAILABLE_DETAIL},

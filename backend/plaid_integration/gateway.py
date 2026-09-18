@@ -224,7 +224,16 @@ class PlaidGateway:
             secret=settings.PLAID_SECRET,
         )
 
-    def create_link_token(self, client_user_id):
+    def create_link_token(self, client_user_id, webhook_url):
+        """Create an initial Link token that tells Plaid where to send webhooks.
+
+        ``webhook_url`` is the exact absolute URL of the public verified
+        webhook receiver; it is built server-side from the authenticated
+        request by the caller (never accepted from the browser) and passed to
+        Plaid's ``LinkTokenCreateRequest.webhook`` so Items created through
+        the Link flow know where to deliver Transactions and Item webhooks.
+        Update mode intentionally omits the field, per Plaid's docs.
+        """
         request = LinkTokenCreateRequest(
             client_id=self._client_id,
             secret=self._secret,
@@ -234,6 +243,7 @@ class PlaidGateway:
             user=LinkTokenCreateRequestUser(client_user_id=client_user_id),
             products=[Products("transactions")],
             transactions=LinkTokenTransactions(days_requested=90),
+            webhook=webhook_url,
         )
         try:
             return self._plaid_api.link_token_create(

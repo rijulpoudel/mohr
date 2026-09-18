@@ -28,6 +28,10 @@ function transactionFixture(overrides: Record<string, unknown> = {}) {
     amount: '12.50',
     date: '2026-09-11',
     note: 'Groceries',
+    source: 'manual',
+    provider_name: '',
+    is_pending: false,
+    is_pending_initial_import: false,
     created_at: '2026-09-11T14:52:48.008850Z',
     updated_at: '2026-09-11T14:52:48.008850Z',
     ...overrides,
@@ -78,7 +82,7 @@ afterEach(() => {
 })
 
 describe('fetchTransactions', () => {
-  it('parses the transaction list in server order with all nine fields', async () => {
+  it('parses the transaction list in server order with all thirteen fields', async () => {
     const mock = installFetchMock((url) => {
       if (url === '/api/transactions/') {
         return jsonResponse([
@@ -121,6 +125,10 @@ describe('fetchTransactions', () => {
       amount: '12.50',
       date: '2026-09-10',
       note: 'Groceries',
+      source: 'manual',
+      provider_name: '',
+      is_pending: false,
+      is_pending_initial_import: false,
       created_at: '2026-09-10T10:00:00Z',
       updated_at: '2026-09-10T10:00:00Z',
     })
@@ -132,8 +140,92 @@ describe('fetchTransactions', () => {
       amount: '2500.00',
       date: '2026-09-11',
       note: '',
+      source: 'manual',
+      provider_name: '',
+      is_pending: false,
+      is_pending_initial_import: false,
       created_at: '2026-09-11T16:08:00.000000Z',
       updated_at: '2026-09-11T16:08:00.000000Z',
+    })
+  })
+
+  it('parses the exact backend transaction payload shape', async () => {
+    installFetchMock((url) => {
+      if (url === '/api/transactions/') {
+        return jsonResponse([
+          {
+            id: 1,
+            account: 10,
+            category: 20,
+            transaction_type: 'expense',
+            amount: '12.50',
+            date: '2026-09-10',
+            note: 'Groceries',
+            source: 'manual',
+            provider_name: '',
+            is_pending: false,
+            is_pending_initial_import: false,
+            created_at: '2026-09-10T10:00:00Z',
+            updated_at: '2026-09-10T10:00:00Z',
+          },
+        ])
+      }
+      return jsonResponse({}, 404)
+    })
+
+    const transactions = await fetchTransactions()
+
+    expect(transactions).toEqual([
+      {
+        id: 1,
+        account: 10,
+        category: 20,
+        transaction_type: 'expense',
+        amount: '12.50',
+        date: '2026-09-10',
+        note: 'Groceries',
+        source: 'manual',
+        provider_name: '',
+        is_pending: false,
+        is_pending_initial_import: false,
+        created_at: '2026-09-10T10:00:00Z',
+        updated_at: '2026-09-10T10:00:00Z',
+      },
+    ])
+  })
+
+  it('parses a plaid row with provider state and an empty provider_name', async () => {
+    installFetchMock((url) => {
+      if (url === '/api/transactions/') {
+        return jsonResponse([
+          transactionFixture({
+            id: 3,
+            source: 'plaid',
+            provider_name: '',
+            is_pending: true,
+            is_pending_initial_import: true,
+          }),
+        ])
+      }
+      return jsonResponse({}, 404)
+    })
+
+    const transactions = await fetchTransactions()
+
+    expect(transactions[0]).toEqual({
+      id: 3,
+      account: 1,
+      category: 2,
+      transaction_type: 'expense',
+      amount: '12.50',
+      date: '2026-09-11',
+      note: 'Groceries',
+      source: 'plaid',
+      provider_name: '',
+      is_pending: true,
+      is_pending_initial_import: true,
+      created_at: '2026-09-11T14:52:48.008850Z',
+      updated_at: '2026-09-11T14:52:48.008850Z',
     })
   })
 
@@ -184,6 +276,20 @@ describe('fetchTransactions', () => {
     ['a date-only updated_at', [transactionFixture({ updated_at: '2026-09-11' })]],
     ['a malformed updated_at', [transactionFixture({ updated_at: 'garbage' })]],
     ['a missing updated_at', [withoutKey(transactionFixture(), 'updated_at')]],
+    ['an unknown source', [transactionFixture({ source: 'card' })]],
+    ['a numeric source', [transactionFixture({ source: 42 })]],
+    ['a null source', [transactionFixture({ source: null })]],
+    ['a missing source', [withoutKey(transactionFixture(), 'source')]],
+    ['a numeric provider_name', [transactionFixture({ provider_name: 42 })]],
+    ['an overlong provider_name', [transactionFixture({ provider_name: 'x'.repeat(201) })]],
+    ['a numeric is_pending', [transactionFixture({ is_pending: 1 })]],
+    ['a string is_pending', [transactionFixture({ is_pending: 'true' })]],
+    ['a null is_pending', [transactionFixture({ is_pending: null })]],
+    ['a numeric is_pending_initial_import', [transactionFixture({ is_pending_initial_import: 1 })]],
+    ['a string is_pending_initial_import', [transactionFixture({ is_pending_initial_import: 'false' })]],
+    ['a manual row with a provider_name', [transactionFixture({ provider_name: 'Chase' })]],
+    ['a manual row with is_pending', [transactionFixture({ is_pending: true })]],
+    ['a manual row with is_pending_initial_import', [transactionFixture({ is_pending_initial_import: true })]],
   ]
 
   it.each(malformedVariants)(

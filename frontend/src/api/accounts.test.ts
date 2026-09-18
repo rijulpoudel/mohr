@@ -24,11 +24,18 @@ function accountFixture(overrides: Record<string, unknown> = {}) {
     account_type: 'checking',
     opening_balance: '100.00',
     current_balance: '100.00',
+    sync_pending: false,
     is_archived: false,
     created_at: '2026-09-11T14:52:48.008850Z',
     updated_at: '2026-09-11T14:52:48.008850Z',
     ...overrides,
   }
+}
+
+function withoutKey(record: Record<string, unknown>, key: string) {
+  const copy = { ...record }
+  delete copy[key]
+  return copy
 }
 
 function createHandler(
@@ -68,6 +75,43 @@ async function rejection(promise: Promise<unknown>): Promise<unknown> {
 }
 
 describe('fetchAccounts', () => {
+  it('parses the exact backend account payload shape', async () => {
+    installFetchMock((url) => {
+      if (url === '/api/accounts/') {
+        return jsonResponse([
+          {
+            id: 1,
+            name: 'Everyday Checking',
+            account_type: 'checking',
+            opening_balance: '100.00',
+            current_balance: '100.00',
+            sync_pending: false,
+            is_archived: false,
+            created_at: '2026-09-11T14:52:48.008850Z',
+            updated_at: '2026-09-11T14:52:48.008850Z',
+          },
+        ])
+      }
+      return jsonResponse({}, 404)
+    })
+
+    const accounts = await fetchAccounts()
+
+    expect(accounts).toEqual([
+      {
+        id: 1,
+        name: 'Everyday Checking',
+        account_type: 'checking',
+        opening_balance: '100.00',
+        current_balance: '100.00',
+        sync_pending: false,
+        is_archived: false,
+        created_at: '2026-09-11T14:52:48.008850Z',
+        updated_at: '2026-09-11T14:52:48.008850Z',
+      },
+    ])
+  })
+
   it('rejects a 204 response safely with the real status', async () => {
     const mock = installFetchMock((url) => {
       if (url === '/api/accounts/') return emptyResponse(204)
@@ -148,6 +192,7 @@ describe('createAccount', () => {
     expect(account.account_type).toBe('savings')
     expect(account.opening_balance).toBe('250.00')
     expect(account.current_balance).toBe('250.00')
+    expect(account.sync_pending).toBe(false)
     expect(account.is_archived).toBe(false)
     expect(account.created_at).toBe('2026-09-11T14:52:48.008850Z')
     expect(account.updated_at).toBe('2026-09-11T14:52:48.008850Z')
@@ -194,6 +239,10 @@ describe('createAccount', () => {
   it.each([
     ['an empty object', {}],
     ['a missing current_balance', { id: 1, name: 'X', account_type: 'checking' }],
+    ['a missing sync_pending', withoutKey(accountFixture(), 'sync_pending')],
+    ['a string sync_pending', { ...accountFixture(), sync_pending: 'false' }],
+    ['a numeric sync_pending', { ...accountFixture(), sync_pending: 1 }],
+    ['a null sync_pending', { ...accountFixture(), sync_pending: null }],
   ])('rejects a malformed 201 response safely', async (_label, payload) => {
     const mock = installFetchMock(createHandler(() => jsonResponse(payload, 201)))
     const error = await rejection(createAccount('X', 'checking', '0.00'))

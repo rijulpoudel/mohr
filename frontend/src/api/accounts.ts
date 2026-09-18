@@ -14,6 +14,7 @@ export interface Account {
   account_type: AccountType
   opening_balance: string
   current_balance: string
+  sync_pending: boolean
   is_archived: boolean
   created_at: string
   updated_at: string
@@ -25,12 +26,14 @@ export interface AccountPatch {
   opening_balance?: string
 }
 
+// Mirrors backend/accounts/serializers.py AccountSerializer.Meta.fields.
 const ACCOUNT_KEYS = [
   'id',
   'name',
   'account_type',
   'opening_balance',
   'current_balance',
+  'sync_pending',
   'is_archived',
   'created_at',
   'updated_at',
@@ -84,6 +87,7 @@ export function parseAccount(value: unknown): Account | null {
     account_type,
     opening_balance,
     current_balance,
+    sync_pending,
     is_archived,
     created_at,
     updated_at,
@@ -98,6 +102,7 @@ export function parseAccount(value: unknown): Account | null {
   }
   if (!isDecimalString(opening_balance)) return null
   if (!isDecimalString(current_balance)) return null
+  if (typeof sync_pending !== 'boolean') return null
   if (typeof is_archived !== 'boolean') return null
   if (!isTimestamp(created_at) || !isTimestamp(updated_at)) return null
   return {
@@ -106,6 +111,7 @@ export function parseAccount(value: unknown): Account | null {
     account_type: account_type as AccountType,
     opening_balance,
     current_balance,
+    sync_pending,
     is_archived,
     created_at,
     updated_at,

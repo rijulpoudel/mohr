@@ -32,6 +32,10 @@ function transactionFixture(overrides: Record<string, unknown> = {}) {
     amount: '25.50',
     date: '2026-09-15',
     note: '',
+    source: 'manual',
+    provider_name: '',
+    is_pending: false,
+    is_pending_initial_import: false,
     created_at: '2026-09-15T12:00:00.123456Z',
     updated_at: '2026-09-15T12:00:00.123456Z',
     ...overrides,
@@ -45,6 +49,7 @@ function accountFixture(overrides: Record<string, unknown> = {}) {
     account_type: 'checking',
     opening_balance: '100.00',
     current_balance: '100.00',
+    sync_pending: false,
     is_archived: false,
     created_at: '2026-09-11T14:52:48.008850Z',
     updated_at: '2026-09-11T14:52:48.008850Z',
@@ -322,6 +327,32 @@ describe('malformed dashboard payloads', () => {
       'a transaction missing a key',
       summaryFixture({
         recent_transactions: [withoutKey(transactionFixture(), 'note')],
+      }),
+    ],
+    [
+      'a recent transaction missing source',
+      summaryFixture({
+        recent_transactions: [withoutKey(transactionFixture(), 'source')],
+      }),
+    ],
+    [
+      'a manual recent transaction with a provider_name',
+      summaryFixture({
+        recent_transactions: [transactionFixture({ provider_name: 'Chase' })],
+      }),
+    ],
+    [
+      'a manual recent transaction that is pending',
+      summaryFixture({
+        recent_transactions: [transactionFixture({ is_pending: true })],
+      }),
+    ],
+    [
+      'a manual recent transaction with an initial import flag',
+      summaryFixture({
+        recent_transactions: [
+          transactionFixture({ is_pending_initial_import: true }),
+        ],
       }),
     ],
     [
