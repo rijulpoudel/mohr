@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { formatMoney, formatSignedMoney, isDecimalString } from './money'
+import {
+  clampedPercent,
+  decimalToCents,
+  formatMoney,
+  formatSignedMoney,
+  isDecimalString,
+} from './money'
 
 describe('formatMoney', () => {
   it('formats zero', () => {
@@ -75,4 +81,67 @@ describe('isDecimalString', () => {
       expect(isDecimalString(value)).toBe(false)
     },
   )
+})
+
+describe('decimalToCents', () => {
+  it('converts validated decimal strings to exact integer cents', () => {
+    expect(decimalToCents('0.00')).toBe(0n)
+    expect(decimalToCents('1500.00')).toBe(150000n)
+    expect(decimalToCents('765.44')).toBe(76544n)
+    expect(decimalToCents('-100.10')).toBe(-10010n)
+    expect(decimalToCents('123456789012345678.90')).toBe(
+      12345678901234567890n,
+    )
+  })
+
+  it.each(['12.3', '12', '1,234.56', 'abc', '', '12.345', '+12.34'])(
+    'throws for the malformed value %s',
+    (value) => {
+      expect(() => decimalToCents(value)).toThrow()
+    },
+  )
+})
+
+describe('clampedPercent', () => {
+  it('returns the expected rounded whole percent for a proportional pair', () => {
+    expect(clampedPercent('765.44', '2000.00')).toBe(38)
+    expect(clampedPercent('333.35', '1000.00')).toBe(33)
+    expect(clampedPercent('666.75', '1000.00')).toBe(67)
+  })
+
+  it('clamps a negative numerator to zero', () => {
+    expect(clampedPercent('-100.10', '1500.00')).toBe(0)
+  })
+
+  it('clamps a value above the positive maximum to 100', () => {
+    expect(clampedPercent('2000.00', '1500.00')).toBe(100)
+  })
+
+  it('returns 100 when the value equals the maximum', () => {
+    expect(clampedPercent('1500.00', '1500.00')).toBe(100)
+  })
+
+  it('returns 0 for a zero or negative maximum', () => {
+    expect(clampedPercent('10.00', '0.00')).toBe(0)
+    expect(clampedPercent('10.00', '-5.00')).toBe(0)
+  })
+
+  it('computes large values exactly without floating point', () => {
+    expect(clampedPercent('123456789012345678.90', '999999999999999999.99')).toBe(
+      12,
+    )
+  })
+
+  it.each(['12.3', '12', 'abc', '', '+12.34', '1,234.56'])(
+    'throws for the malformed value %s',
+    (value) => {
+      expect(() => clampedPercent(value, '100.00')).toThrow()
+      expect(() => clampedPercent('100.00', value)).toThrow()
+    },
+  )
+
+  it('rejects non-string inputs consistently with the money helpers', () => {
+    expect(() => clampedPercent(12.34 as unknown as string, '100.00')).toThrow()
+    expect(() => clampedPercent('100.00', null as unknown as string)).toThrow()
+  })
 })
