@@ -4,6 +4,7 @@ import { afterEach, beforeEach, vi } from 'vitest'
 import { resetRestoreRequest } from '../api/auth'
 import { resetAccountsRequest } from '../api/accounts'
 import { resetDashboardRequest } from '../api/dashboard'
+import { resetCashFlowRequest } from '../api/cashFlow'
 import { resetCategoriesRequest } from '../api/categories'
 import { resetTransactionsRequest } from '../api/transactions'
 import { resetBudgetsRequest } from '../api/budgets'
@@ -82,6 +83,7 @@ export function renderApp(path = '/') {
 beforeEach(() => {
   resetRestoreRequest()
   resetDashboardRequest()
+  resetCashFlowRequest()
   resetAccountsRequest()
   resetCategoriesRequest()
   resetTransactionsRequest()
