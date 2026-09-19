@@ -202,9 +202,12 @@ function requestDashboardSummary(): Promise<DashboardSummary> {
 
 export function fetchDashboardSummary(): Promise<DashboardSummary> {
   if (inFlightDashboard === null) {
-    inFlightDashboard = requestDashboardSummary().finally(() => {
-      inFlightDashboard = null
+    const request = requestDashboardSummary().finally(() => {
+      if (inFlightDashboard === request) {
+        inFlightDashboard = null
+      }
     })
+    inFlightDashboard = request
   }
   return inFlightDashboard
 }

@@ -230,7 +230,9 @@ export async function fetchTransactions(
   let request = inFlightTransactions.get(query)
   if (request === undefined) {
     request = requestTransactions(query).finally(() => {
-      inFlightTransactions.delete(query)
+      if (inFlightTransactions.get(query) === request) {
+        inFlightTransactions.delete(query)
+      }
     })
     inFlightTransactions.set(query, request)
   }
