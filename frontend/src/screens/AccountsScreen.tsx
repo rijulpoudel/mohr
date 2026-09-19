@@ -9,7 +9,7 @@ import {
 } from '../api/accounts'
 import { ApiError, userMessage, type FieldErrors } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
-import { isDecimalString, formatMoney } from '../format/money'
+import { formatMoney, isDecimalString, sumMoney } from '../format/money'
 
 const GENERIC_ERROR_MESSAGE = 'Something went wrong. Please try again.'
 const FIELD_ERROR_SUMMARY = 'Please check the highlighted fields.'
@@ -19,6 +19,13 @@ const ACCOUNT_TYPE_LABELS: Record<AccountType, string> = {
   savings: 'Savings',
   cash: 'Cash',
   credit_card: 'Credit card',
+}
+
+const ACCOUNT_TYPE_MARKS: Record<AccountType, string> = {
+  checking: 'CK',
+  savings: 'SV',
+  cash: '$',
+  credit_card: 'CC',
 }
 
 const ACCOUNT_TYPES: ReadonlySet<string> = new Set(Object.keys(ACCOUNT_TYPE_LABELS))
@@ -34,6 +41,10 @@ const OPENING_ERROR =
 // fabricated balance as a real one, so the figures are replaced by a word that
 // cannot be mistaken for money.
 const PENDING_BALANCE_TEXT = 'Pending'
+
+const STATUS_ACTIVE = 'Active'
+const STATUS_BALANCE_PENDING = 'Balance pending'
+const STATUS_ARCHIVED = 'Archived'
 
 type AccountsState =
   | { status: 'loading' }
@@ -83,6 +94,22 @@ function firstKnownFieldError(fieldErrors: FieldErrors): string | null {
 function firstError(fieldErrors: FieldErrors | null, field: string): string | null {
   const messages = fieldErrors?.[field]
   return messages !== undefined && messages.length > 0 ? messages[0] : null
+}
+
+// Every loaded account belongs to exactly one partition. Archived wins over
+// pending, and both are mutually exclusive with ready.
+function accountStatus(account: Account): string {
+  if (account.is_archived) return STATUS_ARCHIVED
+  if (account.sync_pending) return STATUS_BALANCE_PENDING
+  return STATUS_ACTIVE
+}
+
+function isNegative(value: string): boolean {
+  return value.startsWith('-')
+}
+
+function sectionCountLabel(count: number): string {
+  return count === 1 ? '1 account' : `${count} accounts`
 }
 
 function EditAccountForm({
@@ -166,7 +193,7 @@ function EditAccountForm({
     submitError ?? (hasFieldErrors ? FIELD_ERROR_SUMMARY : null)
 
   return (
-    <div className="account-edit">
+    <div className="accounts-edit">
       <h3 id="edit-account-heading">Edit account</h3>
       {summary !== null && (
         <div className="error-summary" role="alert">
@@ -257,7 +284,7 @@ function EditAccountForm({
             </ul>
           )}
         </div>
-        <div className="account-edit-actions">
+        <div className="accounts-edit-actions">
           <button type="submit" className="btn" disabled={pending}>
             {pending ? 'Saving account…' : 'Save'}
           </button>
@@ -321,7 +348,7 @@ function ArchiveAccountConfirm({
 
   return (
     <div
-      className="account-archive"
+      className="accounts-archive"
       role="group"
       aria-labelledby="archive-account-heading"
     >
@@ -338,7 +365,7 @@ function ArchiveAccountConfirm({
           {errorMessage}
         </div>
       )}
-      <div className="account-archive-actions">
+      <div className="accounts-archive-actions">
         <button
           type="button"
           className="btn"
@@ -384,7 +411,7 @@ function AccountItem({
 }) {
   if (editing) {
     return (
-      <li className="account-item">
+      <li className="accounts-item" id={`account-${account.id}`}>
         <EditAccountForm
           account={account}
           onUpdated={onUpdated}
@@ -395,7 +422,7 @@ function AccountItem({
   }
   if (archiving) {
     return (
-      <li className="account-item">
+      <li className="accounts-item" id={`account-${account.id}`}>
         <ArchiveAccountConfirm
           account={account}
           onArchived={onArchived}
@@ -404,70 +431,99 @@ function AccountItem({
       </li>
     )
   }
+  const status = accountStatus(account)
   return (
-    <li className="account-item">
-      <div className="account-main">
-        <h3 className="account-name">{account.name}</h3>
-        <span className="account-status">
-          {account.is_archived ? 'Archived' : 'Active'}
-        </span>
-      </div>
-      <p className="account-type">{ACCOUNT_TYPE_LABELS[account.account_type]}</p>
-      <dl className="account-balances">
-        <div className="account-balance">
-          <dt>Current balance</dt>
-          <dd>
-            {account.sync_pending
-              ? PENDING_BALANCE_TEXT
-              : formatMoney(account.current_balance)}
-          </dd>
+    <li className="accounts-item" id={`account-${account.id}`}>
+      <div className="accounts-card">
+        <div className="accounts-card-head">
+          <span className="accounts-type-mark" aria-hidden="true">
+            {ACCOUNT_TYPE_MARKS[account.account_type]}
+          </span>
+          <div className="accounts-identity">
+            <h4 className="accounts-name">{account.name}</h4>
+            <p className="accounts-meta">
+              <span className="accounts-type">
+                {ACCOUNT_TYPE_LABELS[account.account_type]}
+              </span>
+              <span aria-hidden="true">·</span>
+              <span
+                className={
+                  status === STATUS_BALANCE_PENDING
+                    ? 'accounts-status accounts-status-pending'
+                    : 'accounts-status'
+                }
+              >
+                {status}
+              </span>
+            </p>
+          </div>
         </div>
-        <div className="account-balance">
-          <dt>Opening balance</dt>
-          <dd>
-            {account.sync_pending
-              ? PENDING_BALANCE_TEXT
-              : formatMoney(account.opening_balance)}
-          </dd>
-        </div>
-      </dl>
-      {account.sync_pending && (
-        <p
-          id={`account-balance-pending-${account.id}`}
-          className="account-balance-pending"
-        >
-          <span className="account-balance-pending-mark">Balance pending</span>{' '}
-          <span>
+        <dl className="accounts-balances">
+          <div className="accounts-balance">
+            <dt>Current balance</dt>
+            <dd
+              className={
+                !account.sync_pending && isNegative(account.current_balance)
+                  ? 'accounts-balance-value accounts-balance-value-negative'
+                  : 'accounts-balance-value'
+              }
+            >
+              {account.sync_pending
+                ? PENDING_BALANCE_TEXT
+                : formatMoney(account.current_balance)}
+            </dd>
+          </div>
+          <div className="accounts-balance">
+            <dt>Opening balance</dt>
+            <dd
+              className={
+                !account.sync_pending && isNegative(account.opening_balance)
+                  ? 'accounts-balance-value accounts-balance-value-negative'
+                  : 'accounts-balance-value'
+              }
+            >
+              {account.sync_pending
+                ? PENDING_BALANCE_TEXT
+                : formatMoney(account.opening_balance)}
+            </dd>
+          </div>
+        </dl>
+        {account.sync_pending && (
+          <p
+            id={`account-balance-pending-${account.id}`}
+            className="accounts-pending-note"
+          >
             Balances are temporarily excluded while transaction history
             finishes and the opening balance is anchored.
-          </span>
-        </p>
-      )}
-      <div className="account-actions">
-        <button
-          type="button"
-          className="btn btn-secondary"
-          aria-label={`Edit ${account.name}`}
-          aria-describedby={
-            account.sync_pending
-              ? `account-balance-pending-${account.id}`
-              : undefined
-          }
-          disabled={account.sync_pending}
-          onClick={onEdit}
-        >
-          Edit
-        </button>
-        {!account.is_archived && (
+          </p>
+        )}
+        <div className="accounts-actions">
           <button
             type="button"
             className="btn btn-secondary"
-            aria-label={`Archive ${account.name}`}
-            onClick={onArchiveRequest}
+            data-account-edit
+            aria-label={`Edit ${account.name}`}
+            aria-describedby={
+              account.sync_pending
+                ? `account-balance-pending-${account.id}`
+                : undefined
+            }
+            disabled={account.sync_pending}
+            onClick={onEdit}
           >
-            Archive
+            Edit
           </button>
-        )}
+          {!account.is_archived && (
+            <button
+              type="button"
+              className="btn btn-secondary"
+              aria-label={`Archive ${account.name}`}
+              onClick={onArchiveRequest}
+            >
+              Archive
+            </button>
+          )}
+        </div>
       </div>
     </li>
   )
@@ -548,7 +604,11 @@ function CreateAccountForm({ onCreated }: { onCreated: (account: Account) => voi
     submitError ?? (hasFieldErrors ? FIELD_ERROR_SUMMARY : null)
 
   return (
-    <section className="account-create" aria-labelledby="account-create-heading">
+    <section
+      className="accounts-create-card"
+      id="account-create"
+      aria-labelledby="account-create-heading"
+    >
       <h3 id="account-create-heading">Add account</h3>
       {created && (
         <p role="status" className="notice">
@@ -647,6 +707,97 @@ function CreateAccountForm({ onCreated }: { onCreated: (account: Account) => voi
   )
 }
 
+function AccountsSummary({
+  accounts,
+}: {
+  accounts: Account[]
+}) {
+  const ready = accounts.filter((account) => !account.is_archived && !account.sync_pending)
+  const pending = accounts.filter((account) => !account.is_archived && account.sync_pending)
+  const archived = accounts.filter((account) => account.is_archived)
+  const activeBalance = sumMoney(ready.map((account) => account.current_balance))
+  return (
+    <section
+      className="accounts-summary"
+      aria-labelledby="accounts-summary-heading"
+    >
+      <h2 id="accounts-summary-heading" className="accounts-summary-heading">
+        Summary
+      </h2>
+      <dl className="accounts-summary-grid">
+        <div className="accounts-summary-total">
+          <dt>Active balance</dt>
+          <dd
+            className={
+              isNegative(activeBalance)
+                ? 'accounts-summary-total-value accounts-summary-total-value-negative'
+                : 'accounts-summary-total-value'
+            }
+          >
+            {formatMoney(activeBalance)}
+          </dd>
+          <dd className="accounts-summary-note">
+            Excludes archived and pending accounts.
+          </dd>
+        </div>
+        <div className="accounts-summary-count">
+          <dt>Ready count</dt>
+          <dd className="accounts-summary-count-value">{ready.length}</dd>
+        </div>
+        <div className="accounts-summary-count">
+          <dt>Pending count</dt>
+          <dd className="accounts-summary-count-value">{pending.length}</dd>
+        </div>
+        <div className="accounts-summary-count">
+          <dt>Archived count</dt>
+          <dd className="accounts-summary-count-value">{archived.length}</dd>
+        </div>
+      </dl>
+    </section>
+  )
+}
+
+function AccountList({
+  accounts,
+  editingId,
+  archivingId,
+  onEdit,
+  onArchiveRequest,
+  onUpdated,
+  onCancelled,
+  onArchived,
+  onArchiveCancelled,
+}: {
+  accounts: Account[]
+  editingId: number | null
+  archivingId: number | null
+  onEdit: (accountId: number) => void
+  onArchiveRequest: (accountId: number) => void
+  onUpdated: (account: Account) => void
+  onCancelled: () => void
+  onArchived: (accountId: number) => void
+  onArchiveCancelled: () => void
+}) {
+  return (
+    <ul className="accounts-list">
+      {accounts.map((account) => (
+        <AccountItem
+          key={account.id}
+          account={account}
+          editing={editingId === account.id}
+          archiving={archivingId === account.id}
+          onEdit={() => onEdit(account.id)}
+          onArchiveRequest={() => onArchiveRequest(account.id)}
+          onUpdated={onUpdated}
+          onCancelled={onCancelled}
+          onArchived={onArchived}
+          onArchiveCancelled={onArchiveCancelled}
+        />
+      ))}
+    </ul>
+  )
+}
+
 export function AccountsScreen() {
   const { clearSession } = useAuth()
   const [attempt, setAttempt] = useState(0)
@@ -655,6 +806,13 @@ export function AccountsScreen() {
   const [archivingId, setArchivingId] = useState<number | null>(null)
   const [updatedNotice, setUpdatedNotice] = useState(false)
   const [archivedNotice, setArchivedNotice] = useState(false)
+  const [focusAfterArchiveId, setFocusAfterArchiveId] = useState<number | null>(null)
+
+  useEffect(() => {
+    if (focusAfterArchiveId === null) return
+    const archivedRow = document.getElementById(`account-${focusAfterArchiveId}`)
+    archivedRow?.querySelector<HTMLButtonElement>('[data-account-edit]')?.focus()
+  }, [focusAfterArchiveId])
 
   useEffect(() => {
     let cancelled = false
@@ -727,6 +885,7 @@ export function AccountsScreen() {
     })
     setArchivingId(null)
     setArchivedNotice(true)
+    setFocusAfterArchiveId(accountId)
   }, [])
 
   const handleUpdated = useCallback((updated: Account) => {
@@ -774,10 +933,23 @@ export function AccountsScreen() {
     )
   }
 
+  const { accounts } = state
+  const collectionAccounts = accounts.filter((account) => !account.is_archived)
+  const archived = accounts.filter((account) => account.is_archived)
+
   return (
     <div className="screen">
-      <h2>Accounts</h2>
-      <CreateAccountForm onCreated={handleCreated} />
+      <header className="accounts-header">
+        <p className="accounts-eyebrow">ACCOUNTS</p>
+        <h2>Accounts</h2>
+        <p className="accounts-subtitle">
+          Your current balances, without the guesswork.
+        </p>
+        <a className="btn accounts-add-link" href="#account-create">
+          Add account
+        </a>
+      </header>
+      <AccountsSummary accounts={accounts} />
       {updatedNotice && (
         <p role="status" className="notice">
           Account updated.
@@ -788,28 +960,71 @@ export function AccountsScreen() {
           Account archived.
         </p>
       )}
-      {state.accounts.length === 0 ? (
-        <p className="empty-state">
-          No accounts yet. Accounts you create will appear here.
-        </p>
-      ) : (
-        <ul className="account-list">
-          {state.accounts.map((account) => (
-            <AccountItem
-              key={account.id}
-              account={account}
-              editing={editingId === account.id}
-              archiving={archivingId === account.id}
-              onEdit={() => handleEdit(account.id)}
-              onArchiveRequest={() => handleArchiveRequest(account.id)}
-              onUpdated={handleUpdated}
-              onCancelled={handleCancelled}
-              onArchived={handleArchived}
-              onArchiveCancelled={handleArchiveCancelled}
-            />
-          ))}
-        </ul>
-      )}
+      <div className="accounts-layout">
+        <div className="accounts-collection">
+          {accounts.length === 0 ? (
+            <p className="accounts-empty">
+              No accounts yet. Accounts you create will appear here.
+            </p>
+          ) : (
+            <>
+              <section
+                className="accounts-section"
+                aria-labelledby="active-accounts-heading"
+              >
+                <div className="accounts-section-head">
+                  <h3 id="active-accounts-heading">Active accounts</h3>
+                  <p className="accounts-section-count">
+                    {sectionCountLabel(collectionAccounts.length)}
+                  </p>
+                </div>
+                {collectionAccounts.length === 0 ? (
+                  <p className="accounts-empty-inline">
+                    No active accounts yet.
+                  </p>
+                ) : (
+                  <AccountList
+                    accounts={collectionAccounts}
+                    editingId={editingId}
+                    archivingId={archivingId}
+                    onEdit={handleEdit}
+                    onArchiveRequest={handleArchiveRequest}
+                    onUpdated={handleUpdated}
+                    onCancelled={handleCancelled}
+                    onArchived={handleArchived}
+                    onArchiveCancelled={handleArchiveCancelled}
+                  />
+                )}
+              </section>
+              {archived.length > 0 && (
+                <section
+                  className="accounts-section"
+                  aria-labelledby="archived-accounts-heading"
+                >
+                  <div className="accounts-section-head">
+                    <h3 id="archived-accounts-heading">Archived accounts</h3>
+                    <p className="accounts-section-count">
+                      {sectionCountLabel(archived.length)}
+                    </p>
+                  </div>
+                  <AccountList
+                    accounts={archived}
+                    editingId={editingId}
+                    archivingId={archivingId}
+                    onEdit={handleEdit}
+                    onArchiveRequest={handleArchiveRequest}
+                    onUpdated={handleUpdated}
+                    onCancelled={handleCancelled}
+                    onArchived={handleArchived}
+                    onArchiveCancelled={handleArchiveCancelled}
+                  />
+                </section>
+              )}
+            </>
+          )}
+        </div>
+        <CreateAccountForm onCreated={handleCreated} />
+      </div>
     </div>
   )
 }
