@@ -109,7 +109,7 @@ describe('accounts navigation', () => {
 })
 
 describe('accounts list', () => {
-  it('renders accounts in server order with friendly type and archived state', async () => {
+  it('renders accounts in server order within sections with friendly type and archived state', async () => {
     installFetchMock(
       authenticatedHandler(() =>
         jsonResponse([
@@ -142,28 +142,34 @@ describe('accounts list', () => {
     )
     renderApp('/accounts')
 
-    expect(await screen.findByRole('heading', { name: 'Accounts' })).toBeInTheDocument()
-    const items = await screen.findAllByRole('listitem')
-    expect(items).toHaveLength(3)
-    expect(items[0]).toHaveTextContent('Everyday Checking')
-    expect(items[1]).toHaveTextContent('Old Card')
-    expect(items[2]).toHaveTextContent('Cash Jar')
-    expect(within(items[0]).getByText('Checking')).toBeInTheDocument()
-    expect(within(items[1]).getByText('Credit card')).toBeInTheDocument()
-    expect(within(items[2]).getByText('Cash')).toBeInTheDocument()
-    expect(within(items[0]).getByText('$150.25')).toBeInTheDocument()
-    expect(within(items[1]).getByText('-$75.50')).toBeInTheDocument()
-    expect(within(items[0]).getByText('$100.00')).toBeInTheDocument()
-    expect(within(items[1]).getByText('-$50.00')).toBeInTheDocument()
-    expect(within(items[0]).getByText('Current balance')).toBeInTheDocument()
-    expect(within(items[1]).getByText('Current balance')).toBeInTheDocument()
-    expect(within(items[2]).getByText('Current balance')).toBeInTheDocument()
-    expect(within(items[0]).getByText('Opening balance')).toBeInTheDocument()
-    expect(within(items[1]).getByText('Opening balance')).toBeInTheDocument()
-    expect(within(items[2]).getByText('Opening balance')).toBeInTheDocument()
+    const active = await screen.findByRole('region', { name: 'Active accounts' })
+    const archived = screen.getByRole('region', { name: 'Archived accounts' })
+    const activeItems = within(active).getAllByRole('listitem')
+    expect(activeItems).toHaveLength(2)
+    expect(activeItems[0]).toHaveTextContent('Everyday Checking')
+    expect(activeItems[1]).toHaveTextContent('Cash Jar')
+    expect(within(activeItems[0]).getByText('Checking')).toBeInTheDocument()
+    expect(within(activeItems[1]).getByText('Cash')).toBeInTheDocument()
+    expect(within(activeItems[0]).getByText('$150.25')).toBeInTheDocument()
+    expect(within(activeItems[1]).getAllByText('$0.00')).toHaveLength(2)
+    expect(within(activeItems[0]).getByText('$100.00')).toBeInTheDocument()
+    expect(within(activeItems[0]).getByText('Current balance')).toBeInTheDocument()
+    expect(within(activeItems[1]).getByText('Current balance')).toBeInTheDocument()
+    expect(within(activeItems[0]).getByText('Opening balance')).toBeInTheDocument()
+    expect(within(activeItems[1]).getByText('Opening balance')).toBeInTheDocument()
+    const archivedItems = within(archived).getAllByRole('listitem')
+    expect(archivedItems).toHaveLength(1)
+    expect(archivedItems[0]).toHaveTextContent('Old Card')
+    expect(within(archivedItems[0]).getByText('Credit card')).toBeInTheDocument()
+    expect(within(archivedItems[0]).getByText('-$75.50')).toBeInTheDocument()
+    expect(within(archivedItems[0]).getByText('-$50.00')).toBeInTheDocument()
+    expect(within(archivedItems[0]).getByText('Current balance')).toBeInTheDocument()
+    expect(within(archivedItems[0]).getByText('Opening balance')).toBeInTheDocument()
     expect(screen.getAllByText('Active')).toHaveLength(2)
     expect(screen.getByText('Archived')).toBeInTheDocument()
-    expect(screen.queryByText('1')).not.toBeInTheDocument()
+    expect(screen.queryByText('1', { selector: 'li' })).not.toBeInTheDocument()
+    expect(screen.queryByText('2', { selector: 'li' })).not.toBeInTheDocument()
+    expect(screen.queryByText('3', { selector: 'li' })).not.toBeInTheDocument()
   })
 
   it('formats exact large and negative money strings', async () => {
@@ -182,12 +188,16 @@ describe('accounts list', () => {
     )
     renderApp('/accounts')
 
+    const item = await screen.findByRole('listitem')
     expect(
-      await screen.findByText('$123,456,789,012,345,678.90'),
+      within(item).getByText('$123,456,789,012,345,678.90'),
     ).toBeInTheDocument()
-    const item = screen.getByRole('listitem')
     expect(within(item).getByText('-$987,654,321.01')).toBeInTheDocument()
     expect(within(item).getByText('Savings')).toBeInTheDocument()
+    const summary = screen.getByRole('region', { name: 'Summary' })
+    expect(
+      within(summary).getByText('$123,456,789,012,345,678.90'),
+    ).toBeInTheDocument()
   })
 
   it('shows an accessible loading status while accounts are pending', async () => {
@@ -308,6 +318,270 @@ describe('accounts list', () => {
     expect(await screen.findByText('Everyday Checking')).toBeInTheDocument()
     expect(localStorage.length).toBe(0)
     expect(sessionStorage.length).toBe(0)
+  })
+})
+
+describe('accounts summary and sections', () => {
+  it('sums only Ready accounts into the Active balance, excluding pending and archived balances', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse([
+          accountFixture({
+            id: 1,
+            name: 'Ready Checking',
+            current_balance: '150.25',
+          }),
+          accountFixture({
+            id: 2,
+            name: 'Pending Saver',
+            sync_pending: true,
+            opening_balance: '0.00',
+            current_balance: '0.00',
+          }),
+          accountFixture({
+            id: 3,
+            name: 'Old Card',
+            is_archived: true,
+            current_balance: '9999.99',
+          }),
+          accountFixture({
+            id: 4,
+            name: 'Ready Cash',
+            current_balance: '-25.50',
+          }),
+        ]),
+      ),
+    )
+    renderApp('/accounts')
+
+    const summary = await screen.findByRole('region', { name: 'Summary' })
+    expect(within(summary).getByText('Active balance')).toBeInTheDocument()
+    expect(within(summary).getByText('$124.75')).toBeInTheDocument()
+    expect(
+      within(summary).getByText('Excludes archived and pending accounts.'),
+    ).toBeInTheDocument()
+    expect(within(summary).queryByText('$9,999.99')).not.toBeInTheDocument()
+    expect(within(summary).queryByText('Pending')).not.toBeInTheDocument()
+  })
+
+  it('marks a negative Active balance with the semantic negative-value treatment', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse([
+          accountFixture({
+            name: 'Credit Card',
+            account_type: 'credit_card',
+            current_balance: '-250.00',
+          }),
+        ]),
+      ),
+    )
+    renderApp('/accounts')
+
+    const summary = await screen.findByRole('region', { name: 'Summary' })
+    expect(within(summary).getByText('-$250.00')).toHaveClass(
+      'accounts-summary-total-value-negative',
+    )
+  })
+
+  it('partitions every account into exactly one of Ready, Pending, or Archived counts', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse([
+          accountFixture({ id: 1, name: 'Ready Checking' }),
+          accountFixture({ id: 2, name: 'Ready Cash' }),
+          accountFixture({
+            id: 3,
+            name: 'Pending Saver',
+            sync_pending: true,
+            opening_balance: '0.00',
+            current_balance: '0.00',
+          }),
+          accountFixture({ id: 4, name: 'Old Card', is_archived: true }),
+        ]),
+      ),
+    )
+    renderApp('/accounts')
+
+    const summary = await screen.findByRole('region', { name: 'Summary' })
+    const readyCount = within(summary).getByText('Ready count').closest('div')
+    const pendingCount = within(summary).getByText('Pending count').closest('div')
+    const archivedCount = within(summary).getByText('Archived count').closest('div')
+    expect(readyCount).not.toBeNull()
+    expect(pendingCount).not.toBeNull()
+    expect(archivedCount).not.toBeNull()
+    expect(within(readyCount as HTMLElement).getByText('2')).toBeInTheDocument()
+    expect(within(pendingCount as HTMLElement).getByText('1')).toBeInTheDocument()
+    expect(within(archivedCount as HTMLElement).getByText('1')).toBeInTheDocument()
+
+    const cards = screen.getAllByRole('listitem')
+    expect(cards).toHaveLength(4)
+    expect(screen.getAllByText('Active')).toHaveLength(2)
+    expect(screen.getAllByText('Balance pending')).toHaveLength(1)
+    expect(screen.getAllByText('Archived')).toHaveLength(1)
+    for (const name of ['Ready Checking', 'Ready Cash', 'Pending Saver', 'Old Card']) {
+      expect(screen.getAllByText(name)).toHaveLength(1)
+    }
+  })
+
+  it('computes the Active balance exactly for large and negative values', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse([
+          accountFixture({
+            id: 1,
+            name: 'Big Saver',
+            current_balance: '123456789012345678.90',
+          }),
+          accountFixture({
+            id: 2,
+            name: 'Deep Debt',
+            current_balance: '-987654321098765432.10',
+          }),
+        ]),
+      ),
+    )
+    renderApp('/accounts')
+
+    const summary = await screen.findByRole('region', { name: 'Summary' })
+    expect(
+      within(summary).getByText('-$864,197,532,086,419,753.20'),
+    ).toBeInTheDocument()
+    const items = screen.getAllByRole('listitem')
+    expect(
+      within(items[0]).getByText('$123,456,789,012,345,678.90'),
+    ).toBeInTheDocument()
+    expect(
+      within(items[1]).getByText('-$987,654,321,098,765,432.10'),
+    ).toBeInTheDocument()
+  })
+
+  it('renders Active and Archived sections with accessible headings and section counts', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse([
+          accountFixture({ id: 1, name: 'Everyday Checking' }),
+          accountFixture({ id: 2, name: 'Cash Jar' }),
+          accountFixture({ id: 3, name: 'Old Card', is_archived: true }),
+        ]),
+      ),
+    )
+    renderApp('/accounts')
+
+    const active = await screen.findByRole('region', { name: 'Active accounts' })
+    const archived = screen.getByRole('region', { name: 'Archived accounts' })
+    expect(
+      screen.getByRole('heading', { name: 'Active accounts' }),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole('heading', { name: 'Archived accounts' }),
+    ).toBeInTheDocument()
+    expect(within(active).getByText('2 accounts')).toBeInTheDocument()
+    expect(within(archived).getByText('1 account')).toBeInTheDocument()
+    expect(within(active).getAllByRole('listitem')).toHaveLength(2)
+    expect(within(archived).getAllByRole('listitem')).toHaveLength(1)
+  })
+
+  it('preserves server order within each section', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse([
+          accountFixture({ id: 1, name: 'Archived First', is_archived: true }),
+          accountFixture({ id: 2, name: 'Active First' }),
+          accountFixture({ id: 3, name: 'Active Second' }),
+          accountFixture({ id: 4, name: 'Archived Second', is_archived: true }),
+        ]),
+      ),
+    )
+    renderApp('/accounts')
+
+    const active = await screen.findByRole('region', { name: 'Active accounts' })
+    const archived = screen.getByRole('region', { name: 'Archived accounts' })
+    const activeItems = within(active).getAllByRole('listitem')
+    expect(activeItems).toHaveLength(2)
+    expect(activeItems[0]).toHaveTextContent('Active First')
+    expect(activeItems[1]).toHaveTextContent('Active Second')
+    const archivedItems = within(archived).getAllByRole('listitem')
+    expect(archivedItems).toHaveLength(2)
+    expect(archivedItems[0]).toHaveTextContent('Archived First')
+    expect(archivedItems[1]).toHaveTextContent('Archived Second')
+  })
+
+  it('links the header Add account action to the create form card', async () => {
+    installFetchMock(authenticatedHandler(() => jsonResponse([accountFixture()])))
+    renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    const addLink = screen.getByRole('link', { name: 'Add account' })
+    expect(addLink).toHaveAttribute('href', '#account-create')
+    expect(addLink.closest('header')).not.toBeNull()
+    expect(screen.getByText('ACCOUNTS')).toBeInTheDocument()
+    expect(
+      screen.getByRole('heading', { name: 'Accounts' }),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText('Your current balances, without the guesswork.'),
+    ).toBeInTheDocument()
+
+    const createCard = document.getElementById('account-create')
+    expect(createCard).not.toBeNull()
+    expect(
+      within(createCard as HTMLElement).getByRole('heading', {
+        name: 'Add account',
+      }),
+    ).toBeInTheDocument()
+  })
+
+  it('keeps a pending account inside Active accounts while excluding it from the Active balance', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse([
+          accountFixture({
+            id: 1,
+            name: 'Everyday Checking',
+            current_balance: '100.00',
+          }),
+          accountFixture({
+            id: 2,
+            name: 'Checking One',
+            sync_pending: true,
+            opening_balance: '0.00',
+            current_balance: '500.00',
+          }),
+        ]),
+      ),
+    )
+    renderApp('/accounts')
+
+    const active = await screen.findByRole('region', { name: 'Active accounts' })
+    const activeItems = within(active).getAllByRole('listitem')
+    expect(activeItems).toHaveLength(2)
+    expect(within(activeItems[1]).getByText('Balance pending')).toBeInTheDocument()
+    expect(within(activeItems[1]).queryByText('$500.00')).not.toBeInTheDocument()
+    expect(within(activeItems[1]).getAllByText('Pending')).toHaveLength(2)
+    expect(
+      screen.queryByRole('region', { name: 'Archived accounts' }),
+    ).not.toBeInTheDocument()
+
+    const summary = screen.getByRole('region', { name: 'Summary' })
+    expect(within(summary).getByText('$100.00')).toBeInTheDocument()
+    expect(within(summary).queryByText('$600.00')).not.toBeInTheDocument()
+    expect(
+      within(summary).getByText('Ready count').closest('div'),
+    ).toHaveTextContent('1')
+    expect(
+      within(summary).getByText('Pending count').closest('div'),
+    ).toHaveTextContent('1')
+  })
+
+  it('never shows account IDs on the page', async () => {
+    installFetchMock(authenticatedHandler(() => jsonResponse(editAccounts())))
+    renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    for (const id of ['7', '8', '9']) {
+      expect(screen.queryByText(id)).not.toBeInTheDocument()
+    }
   })
 })
 
@@ -549,22 +823,22 @@ async function fillCreateForm(
 }
 
 describe('account creation form', () => {
-  it('renders a compact accessible form above the list with all four account types', async () => {
+  it('renders the create form card with all four account types and accessible fields', async () => {
     installFetchMock(authenticatedHandler(() => jsonResponse([accountFixture()])))
     renderApp('/accounts')
     await screen.findByText('Everyday Checking')
 
-    const heading = screen.getByRole('heading', { name: 'Add account' })
-    const list = screen.getByRole('list')
+    const createCard = screen.getByRole('region', { name: 'Add account' })
+    expect(createCard).toHaveAttribute('id', 'account-create')
     expect(
-      heading.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy()
+      within(createCard).getByRole('heading', { name: 'Add account' }),
+    ).toBeInTheDocument()
 
-    const nameInput = screen.getByLabelText('Name')
+    const nameInput = within(createCard).getByLabelText('Name')
     expect(nameInput).toHaveAttribute('type', 'text')
     expect(nameInput).toHaveValue('')
 
-    const typeSelect = screen.getByLabelText('Account type')
+    const typeSelect = within(createCard).getByLabelText('Account type')
     expect(typeSelect).toHaveValue('checking')
     const options = within(typeSelect).getAllByRole('option')
     expect(options.map((option) => option.getAttribute('value'))).toEqual([
@@ -580,13 +854,13 @@ describe('account creation form', () => {
       'Credit card',
     ])
 
-    const openingInput = screen.getByLabelText('Opening balance')
+    const openingInput = within(createCard).getByLabelText('Opening balance')
     expect(openingInput).toHaveValue('0.00')
     expect(openingInput).toHaveAttribute('inputmode', 'decimal')
     expect(openingInput).not.toHaveAttribute('type', 'number')
 
     expect(
-      screen.getByRole('button', { name: 'Create account' }),
+      within(createCard).getByRole('button', { name: 'Create account' }),
     ).toBeInTheDocument()
   })
 
@@ -1029,6 +1303,59 @@ describe('account creation form', () => {
     expect(screen.getByRole('listitem')).toHaveTextContent('Travel Fund')
   })
 
+  it('updates the summary and Active section when an account is created', async () => {
+    const mock = installFetchMock(
+      authenticatedCreateHandler((_url, init) => {
+        if ((init?.method ?? 'GET') === 'GET') {
+          return jsonResponse([
+            accountFixture({
+              id: 1,
+              name: 'Everyday Checking',
+              current_balance: '100.00',
+            }),
+          ])
+        }
+        return jsonResponse(
+          accountFixture({
+            id: 9,
+            name: 'Travel Fund',
+            account_type: 'savings',
+            opening_balance: '250.00',
+            current_balance: '275.50',
+          }),
+          201,
+        )
+      }),
+    )
+    renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    const summaryBefore = screen.getByRole('region', { name: 'Summary' })
+    expect(within(summaryBefore).getByText('$100.00')).toBeInTheDocument()
+    expect(
+      within(summaryBefore).getByText('Ready count').closest('div'),
+    ).toHaveTextContent('1')
+
+    const user = userEvent.setup()
+    await fillCreateForm(user)
+    await user.click(screen.getByRole('button', { name: 'Create account' }))
+    await screen.findByRole('status')
+
+    const summaryAfter = screen.getByRole('region', { name: 'Summary' })
+    expect(within(summaryAfter).getByText('$375.50')).toBeInTheDocument()
+    expect(
+      within(summaryAfter).getByText('Ready count').closest('div'),
+    ).toHaveTextContent('2')
+
+    const active = screen.getByRole('region', { name: 'Active accounts' })
+    const activeItems = within(active).getAllByRole('listitem')
+    expect(activeItems).toHaveLength(2)
+    expect(activeItems[0]).toHaveTextContent('Everyday Checking')
+    expect(within(activeItems[1]).getByText('Travel Fund')).toBeInTheDocument()
+    expect(calls(mock, '/api/accounts/', 'GET')).toHaveLength(1)
+    expect(calls(mock, '/api/accounts/', 'POST')).toHaveLength(1)
+  })
+
   it('never writes auth values to web storage after creating an account', async () => {
     installFetchMock(
       authenticatedCreateHandler((_url, init) => {
@@ -1427,10 +1754,10 @@ describe('account editing', () => {
     const items = screen.getAllByRole('listitem')
     expect(items).toHaveLength(3)
     expect(within(items[0]).getByText('Everyday Checking')).toBeInTheDocument()
-    expect(within(items[1]).getByText('Old Card Renamed')).toBeInTheDocument()
-    expect(within(items[2]).getByText('Cash Jar')).toBeInTheDocument()
-    expect(within(items[1]).getByText('Archived')).toBeInTheDocument()
-    expect(within(items[1]).getByText('Credit card')).toBeInTheDocument()
+    expect(within(items[1]).getByText('Cash Jar')).toBeInTheDocument()
+    expect(within(items[2]).getByText('Old Card Renamed')).toBeInTheDocument()
+    expect(within(items[2]).getByText('Archived')).toBeInTheDocument()
+    expect(within(items[2]).getByText('Credit card')).toBeInTheDocument()
     expect(calls(mock, '/api/accounts/', 'GET')).toHaveLength(1)
     expect(calls(mock, '/api/accounts/8/', 'PATCH')).toHaveLength(1)
   })
@@ -2027,7 +2354,7 @@ describe('account archiving', () => {
     expect(sessionStorage.length).toBe(0)
   })
 
-  it('archives exactly that row in place without removing or reordering it', async () => {
+  it('removes the archived row from Active accounts and places it in the Archived section', async () => {
     const mock = installFetchMock(
       deleteHandler((url) => {
         if (url === '/api/accounts/7/') return emptyResponse(204)
@@ -2046,22 +2373,76 @@ describe('account archiving', () => {
     )
 
     await screen.findByText('Account archived.')
-    const items = screen.getAllByRole('listitem')
-    expect(items).toHaveLength(3)
-    expect(within(items[0]).getByText('Everyday Checking')).toBeInTheDocument()
-    expect(within(items[0]).getByText('Archived')).toBeInTheDocument()
-    expect(within(items[0]).getByText('Checking')).toBeInTheDocument()
-    expect(within(items[0]).getAllByText('$100.00')).toHaveLength(2)
-    expect(within(items[1]).getByText('Old Card')).toBeInTheDocument()
-    expect(within(items[2]).getByText('Cash Jar')).toBeInTheDocument()
+    const active = screen.getByRole('region', { name: 'Active accounts' })
+    const archived = screen.getByRole('region', { name: 'Archived accounts' })
+    const activeItems = within(active).getAllByRole('listitem')
+    expect(activeItems).toHaveLength(1)
+    expect(activeItems[0]).toHaveTextContent('Cash Jar')
+    expect(within(activeItems[0]).getByText('Active')).toBeInTheDocument()
+    const archivedItems = within(archived).getAllByRole('listitem')
+    expect(archivedItems).toHaveLength(2)
+    expect(archivedItems[0]).toHaveTextContent('Everyday Checking')
+    expect(within(archivedItems[0]).getByText('Archived')).toBeInTheDocument()
+    expect(within(archivedItems[0]).getByText('Checking')).toBeInTheDocument()
+    expect(within(archivedItems[0]).getAllByText('$100.00')).toHaveLength(2)
+    expect(archivedItems[1]).toHaveTextContent('Old Card')
     expect(
-      within(items[0]).queryByRole('button', {
+      within(archivedItems[0]).queryByRole('button', {
         name: 'Archive Everyday Checking',
       }),
     ).not.toBeInTheDocument()
     expect(
-      within(items[0]).getByRole('button', { name: 'Edit Everyday Checking' }),
+      within(archivedItems[0]).getByRole('button', { name: 'Edit Everyday Checking' }),
     ).toBeInTheDocument()
+    expect(calls(mock, '/api/accounts/', 'GET')).toHaveLength(1)
+    expect(calls(mock, '/api/accounts/7/', 'DELETE')).toHaveLength(1)
+  })
+
+  it('moves an archived account into the Archived section, updates the summary, and preserves focus', async () => {
+    const mock = installFetchMock(
+      deleteHandler((url) => {
+        if (url === '/api/accounts/7/') return emptyResponse(204)
+        return jsonResponse({}, 404)
+      }),
+    )
+    renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    const user = userEvent.setup()
+    const confirm = await openArchiveConfirm(user, 'Everyday Checking')
+    const confirmButton = within(confirm).getByRole('button', {
+      name: 'Confirm archive Everyday Checking',
+    })
+    confirmButton.focus()
+    await user.keyboard('{Enter}')
+
+    await screen.findByText('Account archived.')
+    const summary = screen.getByRole('region', { name: 'Summary' })
+    expect(within(summary).getByText('$0.00')).toBeInTheDocument()
+    expect(
+      within(summary).getByText('Ready count').closest('div'),
+    ).toHaveTextContent('1')
+    expect(
+      within(summary).getByText('Archived count').closest('div'),
+    ).toHaveTextContent('2')
+
+    const active = screen.getByRole('region', { name: 'Active accounts' })
+    const activeItems = within(active).getAllByRole('listitem')
+    expect(activeItems).toHaveLength(1)
+    expect(activeItems[0]).toHaveTextContent('Cash Jar')
+    expect(within(activeItems[0]).getByText('Active')).toBeInTheDocument()
+
+    const archived = screen.getByRole('region', { name: 'Archived accounts' })
+    const archivedItems = within(archived).getAllByRole('listitem')
+    expect(archivedItems).toHaveLength(2)
+    expect(archivedItems[0]).toHaveTextContent('Everyday Checking')
+    expect(within(archivedItems[0]).getByText('Archived')).toBeInTheDocument()
+    expect(archivedItems[1]).toHaveTextContent('Old Card')
+    expect(
+      within(archivedItems[0]).getByRole('button', {
+        name: 'Edit Everyday Checking',
+      }),
+    ).toHaveFocus()
     expect(calls(mock, '/api/accounts/', 'GET')).toHaveLength(1)
     expect(calls(mock, '/api/accounts/7/', 'DELETE')).toHaveLength(1)
   })

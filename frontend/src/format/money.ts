@@ -38,6 +38,18 @@ export function decimalToCents(value: string): bigint {
   return negative ? -cents : cents
 }
 
+export function sumMoney(values: readonly string[]): string {
+  let total = 0n
+  for (const value of values) {
+    total += decimalToCents(value)
+  }
+  const negative = total < 0n
+  const absolute = negative ? -total : total
+  const whole = absolute / 100n
+  const fraction = (absolute % 100n).toString().padStart(2, '0')
+  return `${negative ? '-' : ''}${whole}.${fraction}`
+}
+
 export function clampedPercent(value: string, maximum: string): number {
   const numerator = decimalToCents(value)
   const denominator = decimalToCents(maximum)
