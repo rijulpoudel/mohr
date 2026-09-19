@@ -5,6 +5,7 @@ import { MohrMark } from './components/MohrMark'
 
 const NAV_ITEMS = [
   { to: '/', label: 'Dashboard', end: true },
+  { to: '/cash-flow', label: 'Cash Flow' },
   { to: '/accounts', label: 'Accounts' },
   { to: '/connections', label: 'Connections' },
   { to: '/categories', label: 'Categories' },

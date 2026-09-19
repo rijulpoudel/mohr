@@ -89,13 +89,14 @@ function installDesktopMediaQuery(initialMatches = false) {
 }
 
 describe('application shell navigation', () => {
-  it('renders the six authenticated routes with current-page state', async () => {
+  it('renders the seven authenticated routes with current-page state', async () => {
     installFetchMock(authenticatedHandler)
     renderApp('/accounts')
 
     const nav = await screen.findByRole('navigation', { name: 'Primary' })
     for (const name of [
       'Dashboard',
+      'Cash Flow',
       'Accounts',
       'Connections',
       'Categories',

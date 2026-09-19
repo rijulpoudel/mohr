@@ -10,6 +10,7 @@ import { CategoriesScreen } from './screens/CategoriesScreen'
 import { TransactionsScreen } from './screens/TransactionsScreen'
 import { BudgetsScreen } from './screens/BudgetsScreen'
 import { DashboardScreen } from './screens/DashboardScreen'
+import { CashFlowScreen } from './screens/CashFlowScreen'
 import { RegisterScreen } from './screens/RegisterScreen'
 
 function App() {
@@ -39,6 +40,14 @@ function App() {
               element={
                 <ProtectedRoute>
                   <DashboardScreen />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/cash-flow"
+              element={
+                <ProtectedRoute>
+                  <CashFlowScreen />
                 </ProtectedRoute>
               }
             />
