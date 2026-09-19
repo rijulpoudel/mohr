@@ -5,6 +5,7 @@ import {
   formatMoney,
   formatSignedMoney,
   isDecimalString,
+  sumMoney,
 } from './money'
 
 describe('formatMoney', () => {
@@ -100,6 +101,62 @@ describe('decimalToCents', () => {
       expect(() => decimalToCents(value)).toThrow()
     },
   )
+})
+
+describe('sumMoney', () => {
+  it('returns 0.00 for an empty list', () => {
+    expect(sumMoney([])).toBe('0.00')
+  })
+
+  it('sums a single value unchanged', () => {
+    expect(sumMoney(['1234.56'])).toBe('1234.56')
+    expect(sumMoney(['-0.01'])).toBe('-0.01')
+  })
+
+  it('sums positive values exactly', () => {
+    expect(sumMoney(['10.00', '20.50', '0.10'])).toBe('30.60')
+  })
+
+  it('preserves a negative total', () => {
+    expect(sumMoney(['-10.00', '-20.50'])).toBe('-30.50')
+  })
+
+  it('handles mixed signs exactly', () => {
+    expect(sumMoney(['100.00', '-25.50', '0.50'])).toBe('75.00')
+  })
+
+  it('returns 0.00 for exact cancellation, never -0.00', () => {
+    expect(sumMoney(['10.00', '-10.00'])).toBe('0.00')
+    expect(sumMoney(['-10.00', '10.00'])).toBe('0.00')
+    expect(sumMoney(['10.25', '-5.25', '-5.00'])).toBe('0.00')
+    expect(sumMoney(['-0.00'])).toBe('0.00')
+  })
+
+  it('keeps exact cents without binary floating point rounding', () => {
+    expect(sumMoney(['0.10', '0.20'])).toBe('0.30')
+    expect(sumMoney(['0.01', '0.02', '0.03'])).toBe('0.06')
+  })
+
+  it('supports values beyond the safe integer range', () => {
+    expect(sumMoney(['123456789012345678.90', '1.10'])).toBe(
+      '123456789012345680.00',
+    )
+    expect(sumMoney(['99999999999999999999999999.99', '0.01'])).toBe(
+      '100000000000000000000000000.00',
+    )
+  })
+
+  it('supports very large negative values exactly', () => {
+    expect(sumMoney(['-99999999999999999999.99', '-0.01'])).toBe(
+      '-100000000000000000000.00',
+    )
+  })
+
+  it('throws for a malformed value', () => {
+    expect(() => sumMoney(['10.00', '12.3'])).toThrow()
+    expect(() => sumMoney(['1,234.56'])).toThrow()
+    expect(() => sumMoney(['abc'])).toThrow()
+  })
 })
 
 describe('clampedPercent', () => {
