@@ -14,7 +14,13 @@ import {
 } from '../api/transactions'
 import { ApiError, userMessage, type FieldErrors } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
-import { formatSignedMoney } from '../format/money'
+import {
+  groupByMonth,
+  summarizeTransactions,
+  type LedgerRow,
+} from '../format/ledger'
+import { decimalToCents, formatMoney, formatSignedMoney } from '../format/money'
+import { formatMonthLabel } from '../format/month'
 
 const GENERIC_ERROR_MESSAGE = 'Something went wrong. Please try again.'
 const FIELD_ERROR_SUMMARY = 'Please check the highlighted fields.'
@@ -38,6 +44,55 @@ const NO_ACTIVE_CATEGORIES_MESSAGE =
   'Create an active category for this type before adding transactions.'
 
 const NO_CHANGES_MESSAGE = 'Make at least one change before saving.'
+
+// The two money figures count only rows that have settled: pending and
+// still-importing bank rows, and every row on an account whose Plaid anchor
+// is still pending (Account.sync_pending), are visible in the list but never
+// counted, so the scope is always stated instead of implied.
+const SUMMARY_CAPTION =
+  'Money in and out count settled transactions in this view only. Pending or still-importing rows, and rows on accounts still importing history, are not counted.'
+const UNCATEGORIZED_LABEL = 'Uncategorized'
+
+function monthSubtotal(
+  rows: readonly LedgerRow[],
+  syncPendingAccountIds: ReadonlySet<number>,
+): string {
+  const summary = summarizeTransactions(rows, syncPendingAccountIds)
+  return `In ${formatMoney(summary.moneyIn)} · Out ${formatMoney(summary.moneyOut)}`
+}
+
+function ResultSummary({
+  transactions,
+  syncPendingAccountIds,
+}: {
+  transactions: readonly LedgerRow[]
+  syncPendingAccountIds: ReadonlySet<number>
+}) {
+  const summary = summarizeTransactions(transactions, syncPendingAccountIds)
+  const moneyInPositive = decimalToCents(summary.moneyIn) > 0n
+  const countLabel =
+    summary.shown === 1
+      ? '1 transaction shown'
+      : `${summary.shown} transactions shown`
+  return (
+    <div className="transactions-summary">
+      <p className="transactions-summary-count">{countLabel}</p>
+      <p
+        className={
+          moneyInPositive
+            ? 'transactions-summary-money transactions-summary-money-in'
+            : 'transactions-summary-money'
+        }
+      >
+        {`Money in ${formatMoney(summary.moneyIn)}`}
+      </p>
+      <p className="transactions-summary-money transactions-summary-money-out">
+        {`Money out ${formatMoney(summary.moneyOut)}`}
+      </p>
+      <p className="transactions-summary-caption">{SUMMARY_CAPTION}</p>
+    </div>
+  )
+}
 
 const KNOWN_CREATE_FIELDS = [
   'account',
@@ -295,12 +350,24 @@ function TransactionItem({
 }) {
   const accountName = accountById.get(transaction.account)?.name
   const categoryName = categoryById.get(transaction.category)?.name
+  const mark = (categoryName ?? '?').slice(0, 1) || '?'
   return (
     <li className="transaction-item">
       <div className="transaction-main">
-        <span className="transaction-type">
-          {transaction.transaction_type === 'income' ? 'Income' : 'Expense'}
+        <span
+          className={`transaction-mark transactions-mark transactions-mark-${transaction.transaction_type}`}
+          aria-hidden="true"
+        >
+          {mark}
         </span>
+        <div className="transactions-identity">
+          <span className="transactions-title">
+            {categoryName ?? UNCATEGORIZED_LABEL}
+          </span>
+          <span className="transaction-type">
+            {transaction.transaction_type === 'income' ? 'Income' : 'Expense'}
+          </span>
+        </div>
         <span className="transaction-amount">
           {formatSignedMoney(transaction.amount, transaction.transaction_type)}
         </span>
@@ -308,9 +375,10 @@ function TransactionItem({
       <div className="transaction-meta">
         <time dateTime={transaction.date}>{transaction.date}</time>
         {accountName !== undefined && <span>{accountName}</span>}
-        {categoryName !== undefined && <span>{categoryName}</span>}
         {transaction.source === 'plaid' && (
-          <span className="transaction-source">From your bank</span>
+          <span className="transaction-source transactions-badge transactions-badge-synced">
+            From your bank
+          </span>
         )}
         {/* provider_name holds the bank's own description of the transaction
             (Plaid's transaction name), which is usually a merchant or payee, not
@@ -320,15 +388,19 @@ function TransactionItem({
           <span>Bank description: {transaction.provider_name}</span>
         )}
         {transaction.is_pending && (
-          <span className="transaction-source">Pending</span>
+          <span className="transaction-source transactions-badge transactions-badge-pending">
+            Pending
+          </span>
         )}
         {transaction.is_pending_initial_import && (
-          <span className="transaction-source">History still importing</span>
+          <span className="transaction-source transactions-badge transactions-badge-importing">
+            History still importing
+          </span>
+        )}
+        {transaction.note !== '' && (
+          <span className="transaction-note">{transaction.note}</span>
         )}
       </div>
-      {transaction.note !== '' && (
-        <p className="transaction-note">{transaction.note}</p>
-      )}
       <div className="transaction-actions">
         <button
           type="button"
@@ -1033,7 +1105,7 @@ function CreateTransactionForm({
 
   return (
     <section
-      className="transaction-create"
+      className="transaction-create transactions-create"
       aria-labelledby="transaction-create-heading"
     >
       <h3 id="transaction-create-heading">Add transaction</h3>
@@ -1409,6 +1481,19 @@ export function TransactionsScreen() {
     setFilters(next)
   }
 
+  function handleClearFilters(): void {
+    setDraft(EMPTY_DRAFT)
+    setDateError(null)
+    setUpdateNotice(null)
+    if (stateRef.current.status === 'ready') {
+      setRefreshing(true)
+    } else {
+      setState({ status: 'loading' })
+    }
+    filtersRef.current = {}
+    setFilters({})
+  }
+
   const handleRetry = useCallback(() => {
     setUpdateNotice(null)
     if (stateRef.current.status === 'ready') {
@@ -1500,6 +1585,11 @@ export function TransactionsScreen() {
   }, [])
 
   const accountById = new Map(accounts.map((account) => [account.id, account]))
+  const syncPendingAccountIds = new Set(
+    accounts
+      .filter((account) => account.sync_pending)
+      .map((account) => account.id),
+  )
   const categoryById = new Map(
     categories.map((category) => [category.id, category]),
   )
@@ -1527,7 +1617,7 @@ export function TransactionsScreen() {
         submitLocked={filtersLocked}
       />
       <section
-        className="transaction-filters"
+        className="transaction-filters transactions-toolbar"
         aria-describedby={
           editingId !== null || deletingId !== null
             ? 'transactions-filters-locked-hint'
@@ -1630,15 +1720,35 @@ export function TransactionsScreen() {
             </p>
           )}
         </div>
+        {hasActiveFilters(draft) && (
+          <button
+            type="button"
+            className="btn transactions-clear-filters"
+            onClick={handleClearFilters}
+            disabled={filtersLocked}
+          >
+            Clear all filters
+          </button>
+        )}
       </section>
+      {state.status === 'ready' && state.transactions.length > 0 && (
+        <ResultSummary
+          transactions={state.transactions}
+          syncPendingAccountIds={syncPendingAccountIds}
+        />
+      )}
       {state.status === 'loading' && (
-        <p role="status">Loading your transactions…</p>
+        <p role="status" className="transactions-status">
+          Loading your transactions…
+        </p>
       )}
       {refreshing && state.status === 'ready' && (
-        <p role="status">Updating results…</p>
+        <p role="status" className="transactions-status">
+          Updating results…
+        </p>
       )}
       {state.status === 'error' && (
-        <div className="error-summary" role="alert">
+        <div className="error-summary transactions-error" role="alert">
           <p>{state.message}</p>
           <button type="button" className="btn" onClick={handleRetry}>
             Retry
@@ -1651,7 +1761,7 @@ export function TransactionsScreen() {
         </p>
       )}
       {hasSyncedTransactions && (
-        <p className="transaction-retention-note">
+        <p className="transaction-retention-note transactions-retention-note">
           Bank-synced transactions are kept for the audit trail and cannot be
           deleted.
         </p>
@@ -1659,51 +1769,67 @@ export function TransactionsScreen() {
       {state.status === 'ready' &&
         (state.transactions.length === 0 ? (
           hasActiveFilters(draft) ? (
-            <p className="empty-state">
+            <p className="empty-state transactions-empty">
               No matches for these filters. Try clearing or changing a filter.
             </p>
           ) : (
-            <p className="empty-state">
+            <p className="empty-state transactions-empty">
               No transactions yet. Transactions you add will appear here.
             </p>
           )
         ) : (
-          <ul className="transaction-list">
-            {state.transactions.map((transaction) =>
-              editingId === transaction.id ? (
-                <EditTransactionForm
-                  key={transaction.id}
-                  transaction={transaction}
-                  accounts={accounts}
-                  categories={categories}
-                  onCancel={() => handleEditCancel(transaction.id)}
-                  onUpdated={handleEditUpdated}
-                  onPendingChange={handleEditPendingChange}
-                />
-              ) : deletingId === transaction.id ? (
-                <DeleteTransactionConfirm
-                  key={transaction.id}
-                  transaction={transaction}
-                  accountName={accountById.get(transaction.account)?.name}
-                  categoryName={categoryById.get(transaction.category)?.name}
-                  onCancel={() => handleDeleteCancel(transaction.id)}
-                  onDeleted={handleDeleteDeleted}
-                  onPendingChange={handleDeletePendingChange}
-                />
-              ) : (
-                <TransactionItem
-                  key={transaction.id}
-                  transaction={transaction}
-                  accountById={accountById}
-                  categoryById={categoryById}
-                  editDisabled={rowLocked}
-                  deleteDisabled={rowLocked}
-                  onEdit={() => handleEditOpen(transaction.id)}
-                  onDelete={() => handleDeleteOpen(transaction.id)}
-                />
-              ),
-            )}
-          </ul>
+          <div className="transaction-list transactions-list">
+            {groupByMonth(state.transactions).map((group, index) => (
+              <section
+                key={`${group.month}-${index}`}
+                className="transactions-month"
+                aria-labelledby={`transactions-month-${index}`}
+              >
+                <h3 id={`transactions-month-${index}`}>
+                  {formatMonthLabel(group.month)}
+                </h3>
+                <p className="transactions-month-subtotal">
+                  {monthSubtotal(group.rows, syncPendingAccountIds)}
+                </p>
+                <ul>
+                  {group.rows.map((transaction) =>
+                    editingId === transaction.id ? (
+                      <EditTransactionForm
+                        key={transaction.id}
+                        transaction={transaction}
+                        accounts={accounts}
+                        categories={categories}
+                        onCancel={() => handleEditCancel(transaction.id)}
+                        onUpdated={handleEditUpdated}
+                        onPendingChange={handleEditPendingChange}
+                      />
+                    ) : deletingId === transaction.id ? (
+                      <DeleteTransactionConfirm
+                        key={transaction.id}
+                        transaction={transaction}
+                        accountName={accountById.get(transaction.account)?.name}
+                        categoryName={categoryById.get(transaction.category)?.name}
+                        onCancel={() => handleDeleteCancel(transaction.id)}
+                        onDeleted={handleDeleteDeleted}
+                        onPendingChange={handleDeletePendingChange}
+                      />
+                    ) : (
+                      <TransactionItem
+                        key={transaction.id}
+                        transaction={transaction}
+                        accountById={accountById}
+                        categoryById={categoryById}
+                        editDisabled={rowLocked}
+                        deleteDisabled={rowLocked}
+                        onEdit={() => handleEditOpen(transaction.id)}
+                        onDelete={() => handleDeleteOpen(transaction.id)}
+                      />
+                    ),
+                  )}
+                </ul>
+              </section>
+            ))}
+          </div>
         ))}
     </div>
   )

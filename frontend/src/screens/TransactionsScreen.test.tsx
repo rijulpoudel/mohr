@@ -5593,3 +5593,596 @@ describe('transaction deletion confirmation safety', () => {
     expect(warning).toHaveTextContent(/cannot be undone/i)
   })
 })
+
+describe('transactions result summary', () => {
+  it('shows the exact count, money in, and money out for the loaded rows', async () => {
+    installFetchMock(
+      authenticatedTransactionsHandler(
+        () => jsonResponse(serverOrderedTransactions()),
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+
+    await screen.findByText('Monthly paycheck')
+    expect(screen.getByText('3 transactions shown')).toBeInTheDocument()
+    expect(screen.getByText('Money in $2,500.00')).toBeInTheDocument()
+    expect(screen.getByText('Money out $57.50')).toBeInTheDocument()
+  })
+
+  it('excludes pending and still-importing rows from money figures but keeps them in the count', async () => {
+    installFetchMock(
+      authenticatedTransactionsHandler(
+        () =>
+          jsonResponse([
+            transactionFixture({
+              id: 1,
+              account: 1,
+              category: 1,
+              transaction_type: 'income',
+              amount: '100.00',
+              date: '2026-09-10',
+              note: 'Settled income',
+            }),
+            plaidTransactionFixture({
+              id: 2,
+              category: 2,
+              amount: '50.00',
+              date: '2026-09-09',
+              note: 'Pending row',
+              is_pending: true,
+            }),
+            plaidTransactionFixture({
+              id: 3,
+              category: 2,
+              amount: '25.00',
+              date: '2026-09-08',
+              note: 'Importing row',
+              is_pending_initial_import: true,
+            }),
+          ]),
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+
+    await screen.findByText('Settled income')
+    expect(screen.getByText('3 transactions shown')).toBeInTheDocument()
+    expect(screen.getByText('Money in $100.00')).toBeInTheDocument()
+    expect(screen.getByText('Money out $0.00')).toBeInTheDocument()
+    expect(screen.queryByText('Money out $75.00')).not.toBeInTheDocument()
+  })
+
+  it('shows the scope caption even when every row is settled', async () => {
+    installFetchMock(
+      authenticatedTransactionsHandler(
+        () => jsonResponse(serverOrderedTransactions()),
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+
+    await screen.findByText('Monthly paycheck')
+    expect(
+      screen.getByText(
+        'Money in and out count settled transactions in this view only. Pending or still-importing rows, and rows on accounts still importing history, are not counted.',
+      ),
+    ).toBeInTheDocument()
+  })
+
+  it('sums large money values exactly without floating-point drift', async () => {
+    installFetchMock(
+      authenticatedTransactionsHandler(
+        () =>
+          jsonResponse([
+            transactionFixture({
+              id: 1,
+              account: 2,
+              category: 1,
+              transaction_type: 'income',
+              amount: '9999999999.99',
+              date: '2026-09-10',
+              note: 'Huge income',
+            }),
+            transactionFixture({
+              id: 2,
+              account: 1,
+              category: 1,
+              transaction_type: 'income',
+              amount: '0.01',
+              date: '2026-09-09',
+              note: 'Cent income',
+            }),
+            transactionFixture({
+              id: 3,
+              account: 1,
+              category: 2,
+              amount: '0.10',
+              date: '2026-09-08',
+              note: 'Dime',
+            }),
+            transactionFixture({
+              id: 4,
+              account: 1,
+              category: 2,
+              amount: '0.20',
+              date: '2026-09-07',
+              note: 'Two dimes',
+            }),
+          ]),
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+
+    await screen.findByText('Huge income')
+    expect(
+      screen.getByText('Money in $10,000,000,000.00'),
+    ).toBeInTheDocument()
+    expect(screen.getByText('Money out $0.30')).toBeInTheDocument()
+  })
+
+  it('excludes rows on accounts still importing history from money figures even when their own flags are clear', async () => {
+    installFetchMock(
+      authenticatedTransactionsHandler(
+        () =>
+          jsonResponse([
+            transactionFixture({
+              id: 1,
+              account: 1,
+              category: 1,
+              transaction_type: 'income',
+              amount: '100.00',
+              date: '2026-09-10',
+              note: 'Settled income',
+            }),
+            transactionFixture({
+              id: 2,
+              account: 2,
+              category: 2,
+              amount: '50.00',
+              date: '2026-09-09',
+              note: 'Manual on importing account',
+            }),
+            transactionFixture({
+              id: 3,
+              account: 2,
+              category: 1,
+              transaction_type: 'income',
+              amount: '25.00',
+              date: '2026-09-08',
+              note: 'Income on importing account',
+            }),
+          ]),
+        {
+          accounts: [
+            accountFixture({ id: 1, name: 'Everyday Checking' }),
+            accountFixture({ id: 2, name: 'Savings', sync_pending: true }),
+          ],
+          categories: defaultCategories(),
+        },
+      ),
+    )
+    renderApp('/transactions')
+
+    await screen.findByText('Settled income')
+    expect(screen.getByText('3 transactions shown')).toBeInTheDocument()
+    expect(screen.getByText('Money in $100.00')).toBeInTheDocument()
+    expect(screen.getByText('Money out $0.00')).toBeInTheDocument()
+    expect(screen.queryByText('Money out $50.00')).not.toBeInTheDocument()
+    expect(screen.getByText('In $100.00 · Out $0.00')).toBeInTheDocument()
+  })
+
+  it('uses the exact scoped identity and title classes the CSS targets', async () => {
+    installFetchMock(
+      authenticatedTransactionsHandler(
+        () => jsonResponse([transactionFixture({ id: 1, note: 'Groceries' })]),
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+
+    await screen.findByText('Groceries')
+    const identity = document.querySelector('.transactions-identity')
+    expect(identity).not.toBeNull()
+    const title = document.querySelector('.transactions-title')
+    expect(title).not.toBeNull()
+    expect(title?.textContent).toBe('Salary')
+    expect(identity?.contains(title)).toBe(true)
+  })
+
+  it('does not paint zero money in with the positive class', async () => {
+    installFetchMock(
+      authenticatedTransactionsHandler(
+        () =>
+          jsonResponse([
+            transactionFixture({
+              id: 1,
+              account: 1,
+              category: 2,
+              amount: '12.50',
+              date: '2026-09-10',
+              note: '',
+            }),
+            transactionFixture({
+              id: 2,
+              account: 1,
+              category: 2,
+              amount: '45.00',
+              date: '2026-09-09',
+              note: '',
+            }),
+          ]),
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+
+    await screen.findByText('-$12.50')
+    expect(document.querySelector('.transactions-summary-money-in')).toBeNull()
+  })
+
+  it('paints positive money in with the positive class', async () => {
+    installFetchMock(
+      authenticatedTransactionsHandler(
+        () =>
+          jsonResponse([
+            transactionFixture({
+              id: 1,
+              account: 2,
+              category: 1,
+              transaction_type: 'income',
+              amount: '100.00',
+              date: '2026-09-10',
+              note: 'Income row',
+            }),
+          ]),
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+
+    await screen.findByText('+$100.00')
+    const moneyIn = document.querySelector('.transactions-summary-money-in')
+    expect(moneyIn).not.toBeNull()
+    expect(moneyIn?.textContent).toBe('Money in $100.00')
+  })
+})
+
+describe('transactions month grouping', () => {
+  it('renders one month heading per group in the order the server returned the rows', async () => {
+    installFetchMock(
+      authenticatedTransactionsHandler(
+        () =>
+          jsonResponse([
+            transactionFixture({
+              id: 1,
+              account: 1,
+              category: 2,
+              amount: '10.00',
+              date: '2026-09-11',
+              note: 'September one',
+            }),
+            transactionFixture({
+              id: 2,
+              account: 1,
+              category: 2,
+              amount: '20.00',
+              date: '2026-09-10',
+              note: 'September two',
+            }),
+            transactionFixture({
+              id: 3,
+              account: 1,
+              category: 2,
+              amount: '30.00',
+              date: '2026-08-15',
+              note: 'August one',
+            }),
+            transactionFixture({
+              id: 4,
+              account: 2,
+              category: 1,
+              transaction_type: 'income',
+              amount: '40.00',
+              date: '2026-07-01',
+              note: 'July one',
+            }),
+          ]),
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+
+    await screen.findByText('September one')
+    const list = document.querySelector('.transaction-list') as HTMLElement
+    expect(
+      within(list)
+        .getAllByRole('heading')
+        .map((heading) => heading.textContent),
+    ).toEqual(['September 2026', 'August 2026', 'July 2026'])
+    const items = screen.getAllByRole('listitem')
+    expect(items).toHaveLength(4)
+    expect(items[0]).toHaveTextContent('September one')
+    expect(items[1]).toHaveTextContent('September two')
+    expect(items[2]).toHaveTextContent('August one')
+    expect(items[3]).toHaveTextContent('July one')
+  })
+
+  it('shows each month subtotal as the exact settled sum for that group', async () => {
+    installFetchMock(
+      authenticatedTransactionsHandler(
+        () =>
+          jsonResponse([
+            transactionFixture({
+              id: 1,
+              account: 2,
+              category: 1,
+              transaction_type: 'income',
+              amount: '2500.00',
+              date: '2026-09-11',
+              note: 'Paycheck',
+            }),
+            transactionFixture({
+              id: 2,
+              account: 1,
+              category: 2,
+              amount: '12.50',
+              date: '2026-09-10',
+              note: 'Groceries',
+            }),
+            transactionFixture({
+              id: 3,
+              account: 1,
+              category: 2,
+              amount: '45.00',
+              date: '2026-09-09',
+              note: 'Dinner',
+            }),
+            transactionFixture({
+              id: 4,
+              account: 1,
+              category: 3,
+              amount: '88.50',
+              date: '2026-08-15',
+              note: 'Vintage',
+            }),
+          ]),
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+
+    await screen.findByText('Paycheck')
+    expect(screen.getByText('In $2,500.00 · Out $57.50')).toBeInTheDocument()
+    expect(screen.getAllByText('In $2,500.00 · Out $57.50')).toHaveLength(1)
+    expect(screen.getByText('In $0.00 · Out $88.50')).toBeInTheDocument()
+  })
+
+  it('never lets a single-transaction month subtotal collide with the row own signed amount', async () => {
+    installFetchMock(
+      authenticatedTransactionsHandler(
+        () =>
+          jsonResponse([
+            transactionFixture({
+              id: 1,
+              account: 1,
+              category: 2,
+              amount: '45.00',
+              date: '2026-09-10',
+              note: '',
+            }),
+          ]),
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+
+    expect(await screen.findByText('-$45.00')).toBeInTheDocument()
+    expect(screen.getAllByText('-$45.00')).toHaveLength(1)
+    expect(screen.getByText('In $0.00 · Out $45.00')).toBeInTheDocument()
+  })
+
+  it('renders non-adjacent runs of the same month as separate groups without reordering', async () => {
+    installFetchMock(
+      authenticatedTransactionsHandler(
+        () =>
+          jsonResponse([
+            transactionFixture({
+              id: 1,
+              account: 2,
+              category: 1,
+              transaction_type: 'income',
+              amount: '100.00',
+              date: '2026-09-11',
+              note: 'Sept first',
+            }),
+            transactionFixture({
+              id: 2,
+              account: 1,
+              category: 2,
+              amount: '50.00',
+              date: '2026-08-15',
+              note: 'August row',
+            }),
+            transactionFixture({
+              id: 3,
+              account: 1,
+              category: 2,
+              amount: '25.00',
+              date: '2026-09-10',
+              note: 'Sept second',
+            }),
+          ]),
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+
+    await screen.findByText('Sept first')
+    expect(
+      screen.getAllByRole('heading', { name: 'September 2026' }),
+    ).toHaveLength(2)
+    expect(screen.getByText('In $100.00 · Out $0.00')).toBeInTheDocument()
+    expect(screen.getByText('In $0.00 · Out $25.00')).toBeInTheDocument()
+    const items = screen.getAllByRole('listitem')
+    expect(items).toHaveLength(3)
+    expect(items[0]).toHaveTextContent('Sept first')
+    expect(items[1]).toHaveTextContent('August row')
+    expect(items[2]).toHaveTextContent('Sept second')
+  })
+
+  it('keeps exactly one listitem per transaction with grouping in place and none for headers or subtotals', async () => {
+    installFetchMock(
+      authenticatedTransactionsHandler(
+        () =>
+          jsonResponse([
+            transactionFixture({
+              id: 1,
+              account: 1,
+              category: 2,
+              amount: '12.50',
+              date: '2026-09-10',
+              note: 'Groceries',
+            }),
+            transactionFixture({
+              id: 3,
+              account: 2,
+              category: 1,
+              transaction_type: 'income',
+              amount: '2500.00',
+              date: '2026-09-11',
+              note: 'Paycheck',
+            }),
+            transactionFixture({
+              id: 2,
+              account: 1,
+              category: 3,
+              amount: '88.50',
+              date: '2026-08-15',
+              note: 'Vintage',
+            }),
+          ]),
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+
+    await screen.findByText('Paycheck')
+    expect(screen.getAllByRole('listitem')).toHaveLength(3)
+    const months = document.querySelectorAll('.transactions-month')
+    expect(months).toHaveLength(2)
+    expect(
+      within(months[0] as HTMLElement).getAllByRole('listitem'),
+    ).toHaveLength(2)
+    expect(
+      within(months[1] as HTMLElement).getAllByRole('listitem'),
+    ).toHaveLength(1)
+  })
+})
+
+describe('transactions filter clearing', () => {
+  it('Clear all filters resets every control and issues a single unfiltered request', async () => {
+    const mock = installFetchMock(
+      authenticatedTransactionsHandler(
+        (url) => {
+          if (
+            url ===
+            '/api/transactions/?account=2&category=3&transaction_type=income&start_date=2026-09-01&end_date=2026-09-30'
+          ) {
+            return jsonResponse([])
+          }
+          return jsonResponse(serverOrderedTransactions())
+        },
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Monthly paycheck')
+
+    const user = userEvent.setup()
+    await user.selectOptions(screen.getByLabelText('Account'), '2')
+    await user.selectOptions(screen.getByLabelText('Category'), '3')
+    await user.selectOptions(screen.getByLabelText('Transaction type'), 'income')
+    fireEvent.change(screen.getByLabelText('Start date'), {
+      target: { value: '2026-09-01' },
+    })
+    fireEvent.change(screen.getByLabelText('End date'), {
+      target: { value: '2026-09-30' },
+    })
+    await waitFor(() =>
+      expect(
+        calls(
+          mock,
+          '/api/transactions/?account=2&category=3&transaction_type=income&start_date=2026-09-01&end_date=2026-09-30',
+        ),
+      ).toHaveLength(1),
+    )
+
+    const unfilteredBefore = calls(mock, '/api/transactions/').length
+    await user.click(screen.getByRole('button', { name: 'Clear all filters' }))
+
+    await waitFor(() =>
+      expect(calls(mock, '/api/transactions/')).toHaveLength(unfilteredBefore + 1),
+    )
+    expect(screen.getByLabelText('Account')).toHaveValue('')
+    expect(screen.getByLabelText('Category')).toHaveValue('')
+    expect(screen.getByLabelText('Transaction type')).toHaveValue('')
+    expect(screen.getByLabelText('Start date')).toHaveValue('')
+    expect(screen.getByLabelText('End date')).toHaveValue('')
+    expect(
+      calls(
+        mock,
+        '/api/transactions/?account=2&category=3&transaction_type=income&start_date=2026-09-01&end_date=2026-09-30',
+      ),
+    ).toHaveLength(1)
+    expect(
+      screen.queryByRole('button', { name: 'Clear all filters' }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('shows the clear control only while a filter is active', async () => {
+    installFetchMock(
+      authenticatedTransactionsHandler(
+        () => jsonResponse(serverOrderedTransactions()),
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Monthly paycheck')
+
+    expect(
+      screen.queryByRole('button', { name: 'Clear all filters' }),
+    ).not.toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.selectOptions(screen.getByLabelText('Account'), '2')
+    expect(
+      await screen.findByRole('button', { name: 'Clear all filters' }),
+    ).toBeInTheDocument()
+  })
+})
+
+describe('transactions empty state distinction', () => {
+  it('keeps the no-matches state distinct from the no-transactions state', async () => {
+    installFetchMock(
+      authenticatedTransactionsHandler(() => jsonResponse([])),
+    )
+    renderApp('/transactions')
+    expect(await screen.findByText(/No transactions yet/)).toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Clear all filters' }),
+    ).not.toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.selectOptions(screen.getByLabelText('Transaction type'), 'expense')
+
+    expect(
+      await screen.findByText(/No matches for these filters/),
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/No transactions yet/)).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Clear all filters' }),
+    ).toBeInTheDocument()
+  })
+})

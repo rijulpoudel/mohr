@@ -9,6 +9,7 @@ import { formatMonthLabel } from './month'
 
 function row(overrides: Partial<LedgerRow>): LedgerRow {
   return {
+    account: 1,
     amount: '0.00',
     date: '2026-09-15',
     transaction_type: 'expense',
@@ -20,16 +21,32 @@ function row(overrides: Partial<LedgerRow>): LedgerRow {
 
 describe('isSettledRow', () => {
   it('is settled only when both pending flags are false', () => {
-    expect(isSettledRow(row({ is_pending: false, is_pending_initial_import: false }))).toBe(true)
-    expect(isSettledRow(row({ is_pending: true, is_pending_initial_import: false }))).toBe(false)
-    expect(isSettledRow(row({ is_pending: false, is_pending_initial_import: true }))).toBe(false)
-    expect(isSettledRow(row({ is_pending: true, is_pending_initial_import: true }))).toBe(false)
+    expect(
+      isSettledRow(
+        row({ is_pending: false, is_pending_initial_import: false }),
+        new Set(),
+      ),
+    ).toBe(true)
+    expect(
+      isSettledRow(row({ is_pending: true, is_pending_initial_import: false }), new Set()),
+    ).toBe(false)
+    expect(
+      isSettledRow(row({ is_pending: false, is_pending_initial_import: true }), new Set()),
+    ).toBe(false)
+    expect(
+      isSettledRow(row({ is_pending: true, is_pending_initial_import: true }), new Set()),
+    ).toBe(false)
+  })
+
+  it('is unsettled when its account is still importing history even with clear row flags', () => {
+    expect(isSettledRow(row({ account: 2 }), new Set([2]))).toBe(false)
+    expect(isSettledRow(row({ account: 1 }), new Set([2]))).toBe(true)
   })
 })
 
 describe('summarizeTransactions', () => {
   it('returns an empty summary for an empty array', () => {
-    expect(summarizeTransactions([])).toEqual({
+    expect(summarizeTransactions([], new Set())).toEqual({
       shown: 0,
       settled: 0,
       moneyIn: '0.00',
@@ -44,7 +61,7 @@ describe('summarizeTransactions', () => {
       row({}),
       row({}),
     ]
-    const summary = summarizeTransactions(rows)
+    const summary = summarizeTransactions(rows, new Set())
     expect(summary.shown).toBe(4)
     expect(summary.settled).toBe(2)
   })
@@ -54,7 +71,7 @@ describe('summarizeTransactions', () => {
       row({ amount: '10.00', transaction_type: 'income', is_pending: true }),
       row({ amount: '20.00', transaction_type: 'income' }),
     ]
-    const summary = summarizeTransactions(rows)
+    const summary = summarizeTransactions(rows, new Set())
     expect(summary.shown).toBe(2)
     expect(summary.settled).toBe(1)
     expect(summary.moneyIn).toBe('20.00')
@@ -66,11 +83,24 @@ describe('summarizeTransactions', () => {
       row({ amount: '30.00', transaction_type: 'expense', is_pending_initial_import: true }),
       row({ amount: '40.00', transaction_type: 'expense' }),
     ]
-    const summary = summarizeTransactions(rows)
+    const summary = summarizeTransactions(rows, new Set())
     expect(summary.shown).toBe(2)
     expect(summary.settled).toBe(1)
     expect(summary.moneyIn).toBe('0.00')
     expect(summary.moneyOut).toBe('40.00')
+  })
+
+  it('excludes rows on sync-pending accounts from money figures while keeping them in shown', () => {
+    const rows = [
+      row({ account: 1, amount: '100.00', transaction_type: 'income' }),
+      row({ account: 2, amount: '50.00', transaction_type: 'expense' }),
+      row({ account: 2, amount: '25.00', transaction_type: 'income' }),
+    ]
+    const summary = summarizeTransactions(rows, new Set([2]))
+    expect(summary.shown).toBe(3)
+    expect(summary.settled).toBe(1)
+    expect(summary.moneyIn).toBe('100.00')
+    expect(summary.moneyOut).toBe('0.00')
   })
 
   it('splits income and expense by transaction type with exact strings', () => {
@@ -80,7 +110,7 @@ describe('summarizeTransactions', () => {
       row({ amount: '0.01', transaction_type: 'income' }),
       row({ amount: '8.00', transaction_type: 'expense' }),
     ]
-    const summary = summarizeTransactions(rows)
+    const summary = summarizeTransactions(rows, new Set())
     expect(summary.moneyIn).toBe('1234.57')
     expect(summary.moneyOut).toBe('85.70')
   })
@@ -91,14 +121,14 @@ describe('summarizeTransactions', () => {
       row({ amount: '0.01', transaction_type: 'expense' }),
       row({ amount: '0.01', transaction_type: 'expense' }),
     ]
-    expect(summarizeTransactions(rows).moneyOut).toBe('0.03')
+    expect(summarizeTransactions(rows, new Set()).moneyOut).toBe('0.03')
 
     const large = [
       row({ amount: '19999876543.20', transaction_type: 'income' }),
       row({ amount: '0.10', transaction_type: 'income' }),
       row({ amount: '0.20', transaction_type: 'income' }),
     ]
-    expect(summarizeTransactions(large).moneyIn).toBe('19999876543.50')
+    expect(summarizeTransactions(large, new Set()).moneyIn).toBe('19999876543.50')
   })
 
   it('returns 0.00 money figures when every row is unsettled', () => {
@@ -106,7 +136,7 @@ describe('summarizeTransactions', () => {
       row({ amount: '50.00', transaction_type: 'income', is_pending: true }),
       row({ amount: '60.00', transaction_type: 'expense', is_pending_initial_import: true }),
     ]
-    expect(summarizeTransactions(rows)).toEqual({
+    expect(summarizeTransactions(rows, new Set())).toEqual({
       shown: 2,
       settled: 0,
       moneyIn: '0.00',
@@ -119,8 +149,8 @@ describe('summarizeTransactions', () => {
       row({ amount: '5.00', transaction_type: 'income' }),
       row({ amount: '3.00', transaction_type: 'expense', is_pending: true }),
     ])
-    expect(() => summarizeTransactions(rows)).not.toThrow()
-    expect(summarizeTransactions(rows).moneyIn).toBe('5.00')
+    expect(() => summarizeTransactions(rows, new Set())).not.toThrow()
+    expect(summarizeTransactions(rows, new Set()).moneyIn).toBe('5.00')
   })
 })
 

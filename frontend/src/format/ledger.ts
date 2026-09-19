@@ -1,6 +1,7 @@
 import { sumMoney } from './money'
 
 export interface LedgerRow {
+  account: number
   amount: string
   date: string
   transaction_type: 'income' | 'expense'
@@ -8,11 +9,18 @@ export interface LedgerRow {
   is_pending_initial_import: boolean
 }
 
-// Pending rows have not settled, so counting their money would mislead.
-// This mirrors the backend ledger rule for the two flags the list route
-// exposes; provider-removed and superseded rows are already hidden upstream.
-export function isSettledRow(row: LedgerRow): boolean {
-  return !row.is_pending && !row.is_pending_initial_import
+// Pending rows have not settled, and neither have rows on an account whose
+// Plaid anchor is still pending, so counting their money would mislead.
+// This mirrors the backend ledger rule: provider-removed and superseded rows
+// are already hidden upstream, and the backend ledger query excludes every
+// row on an account with anchor_applied_at IS NULL (exposed to the frontend
+// as Account.sync_pending), even when the row's own flags are clear.
+export function isSettledRow(
+  row: LedgerRow,
+  syncPendingAccountIds: ReadonlySet<number>,
+): boolean {
+  if (row.is_pending || row.is_pending_initial_import) return false
+  return !syncPendingAccountIds.has(row.account)
 }
 
 export interface TransactionSummary {
@@ -22,8 +30,11 @@ export interface TransactionSummary {
   moneyOut: string
 }
 
-export function summarizeTransactions(rows: readonly LedgerRow[]): TransactionSummary {
-  const settledRows = rows.filter(isSettledRow)
+export function summarizeTransactions(
+  rows: readonly LedgerRow[],
+  syncPendingAccountIds: ReadonlySet<number>,
+): TransactionSummary {
+  const settledRows = rows.filter((row) => isSettledRow(row, syncPendingAccountIds))
   return {
     shown: rows.length,
     settled: settledRows.length,
