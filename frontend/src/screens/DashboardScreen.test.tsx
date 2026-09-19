@@ -121,7 +121,7 @@ describe('dashboard summary', () => {
     expect(
       await screen.findByText('$123,456,789,012,345,678.90'),
     ).toBeInTheDocument()
-    expect(screen.getByText('-$987,654,321.01')).toBeInTheDocument()
+    expect(screen.getAllByText('-$987,654,321.01')).toHaveLength(2)
   })
 
   it('shows an accessible loading status while the summary is pending', async () => {
@@ -272,11 +272,269 @@ describe('recent transaction semantics', () => {
     expect(screen.queryByText('Account #1')).not.toBeInTheDocument()
     expect(screen.queryByText('Category #2')).not.toBeInTheDocument()
 
-    const date = screen.getByText('2026-09-14')
+    const date = screen.getByText('Sep 14, 2026')
     expect(date.tagName).toBe('TIME')
     expect(date).toHaveAttribute('datetime', '2026-09-14')
+    expect(screen.getByText('Sep 15, 2026')).toHaveAttribute(
+      'datetime',
+      '2026-09-15',
+    )
 
     expect(screen.getAllByRole('listitem')).toHaveLength(2)
+  })
+})
+
+describe('dashboard ready state', () => {
+  it('keeps the Overview heading and adds a truthful subtitle with a secondary sign-out', async () => {
+    installFetchMock(authenticatedHandler(() => jsonResponse(summaryFixture())))
+    renderApp('/')
+
+    expect(
+      await screen.findByRole('heading', { level: 2, name: 'Overview' }),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText('Your money this month, without the noise.'),
+    ).toBeInTheDocument()
+    const signOut = screen.getByRole('button', { name: 'Sign out' })
+    expect(signOut).toHaveClass('btn-secondary')
+  })
+
+  it('renders four metric cards with exact money strings', async () => {
+    installFetchMock(authenticatedHandler(() => jsonResponse(summaryFixture())))
+    renderApp('/')
+
+    expect(await screen.findByText('$1,234.56')).toBeInTheDocument()
+    expect(summaryValue('Total balance')).toContain('$1,234.56')
+    expect(summaryValue('Income this month')).toContain('$2,000.00')
+    expect(summaryValue('Spending this month')).toContain('$765.44')
+    expect(summaryValue('Budget remaining')).toContain('-$100.10')
+  })
+
+  it('renders an Income vs spending comparison with exact amounts and proportional decorative bars', async () => {
+    installFetchMock(authenticatedHandler(() => jsonResponse(summaryFixture())))
+    renderApp('/')
+
+    const compare = await screen.findByRole('region', {
+      name: 'Income vs spending',
+    })
+    within(compare).getByText('Money in')
+    within(compare).getByText('Money out')
+    within(compare).getByText('$2,000.00')
+    within(compare).getByText('$765.44')
+
+    const fills = compare.querySelectorAll('.dashboard-compare-fill')
+    expect(fills).toHaveLength(2)
+    expect((fills[0] as HTMLElement).style.width).toBe('100%')
+    expect((fills[1] as HTMLElement).style.width).toBe('38%')
+    expect(fills[0].closest('[aria-hidden="true"]')).not.toBeNull()
+    expect(fills[1].closest('[aria-hidden="true"]')).not.toBeNull()
+  })
+
+  it('scales the comparison bars to the larger amount when one side is zero', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse(
+          summaryFixture({
+            current_month_income: '0.00',
+            current_month_expenses: '500.00',
+          }),
+        ),
+      ),
+    )
+    renderApp('/')
+
+    const compare = await screen.findByRole('region', {
+      name: 'Income vs spending',
+    })
+    const fills = compare.querySelectorAll('.dashboard-compare-fill')
+    expect((fills[0] as HTMLElement).style.width).toBe('0%')
+    expect((fills[1] as HTMLElement).style.width).toBe('100%')
+  })
+
+  it('renders a very large exact income and expense pair without losing precision', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse(
+          summaryFixture({
+            current_month_income: '123456789012345678.90',
+            current_month_expenses: '99999999999999.99',
+          }),
+        ),
+      ),
+    )
+    renderApp('/')
+
+    const compare = await screen.findByRole('region', {
+      name: 'Income vs spending',
+    })
+    within(compare).getByText('$123,456,789,012,345,678.90')
+    within(compare).getByText('$99,999,999,999,999.99')
+    const fills = compare.querySelectorAll('.dashboard-compare-fill')
+    expect((fills[0] as HTMLElement).style.width).toBe('100%')
+    expect((fills[1] as HTMLElement).style.width).toBe('0%')
+  })
+
+  it('renders the monthly budget card with an accessible progressbar for a positive budget', async () => {
+    installFetchMock(authenticatedHandler(() => jsonResponse(summaryFixture())))
+    renderApp('/')
+
+    const budget = await screen.findByRole('region', { name: 'Monthly budget' })
+    within(budget).getByText('$1,500.00')
+    within(budget).getByText('-$100.10')
+
+    const bar = within(budget).getByRole('progressbar')
+    expect(bar).toHaveAccessibleName('Remaining budget')
+    expect(bar).toHaveAttribute('aria-valuemin', '0')
+    expect(bar).toHaveAttribute('aria-valuemax', '100')
+    expect(bar).toHaveAttribute('aria-valuenow', '0')
+    expect(bar).toHaveAttribute(
+      'aria-valuetext',
+      'Remaining -$100.10 of $1,500.00 budgeted',
+    )
+    const fill = bar.querySelector('.dashboard-budget-progress-fill') as HTMLElement
+    expect(fill.style.width).toBe('0%')
+  })
+
+  it('renders a proportional progressbar for remaining budget below budgeted', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse(
+          summaryFixture({
+            total_budgeted: '1500.00',
+            remaining_budget: '1395.55',
+          }),
+        ),
+      ),
+    )
+    renderApp('/')
+
+    const bar = await screen.findByRole('progressbar')
+    expect(bar).toHaveAttribute('aria-valuenow', '93')
+    expect(bar).toHaveAttribute(
+      'aria-valuetext',
+      'Remaining $1,395.55 of $1,500.00 budgeted',
+    )
+    expect((bar.querySelector('.dashboard-budget-progress-fill') as HTMLElement).style.width).toBe(
+      '93%',
+    )
+  })
+
+  it('clamps the progressbar to 100 when remaining exceeds the budget', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse(
+          summaryFixture({
+            total_budgeted: '1500.00',
+            remaining_budget: '2000.00',
+          }),
+        ),
+      ),
+    )
+    renderApp('/')
+
+    const fullBar = await screen.findByRole('progressbar')
+    expect(fullBar).toHaveAttribute('aria-valuenow', '100')
+    expect(fullBar).toHaveAttribute(
+      'aria-valuetext',
+      'Remaining $2,000.00 of $1,500.00 budgeted',
+    )
+    expect(
+      (fullBar.querySelector('.dashboard-budget-progress-fill') as HTMLElement).style.width,
+    ).toBe('100%')
+  })
+
+  it('shows the no-budget message without a progressbar when nothing is budgeted', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse(
+          summaryFixture({
+            total_budgeted: '0.00',
+            remaining_budget: '0.00',
+          }),
+        ),
+      ),
+    )
+    renderApp('/')
+
+    const budget = await screen.findByRole('region', { name: 'Monthly budget' })
+    expect(within(budget).getAllByText('$0.00')).toHaveLength(2)
+    expect(
+      within(budget).getByText('No budget set for this month.'),
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
+  })
+
+  it('links to the transactions screen for managing transactions', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse(summaryFixture({ recent_transactions: [] })),
+      ),
+    )
+    renderApp('/')
+
+    const link = await screen.findByRole('link', {
+      name: 'Manage transactions',
+    })
+    expect(link).toHaveAttribute('href', '/transactions')
+    expect(screen.getByText(/No transactions yet/)).toBeInTheDocument()
+  })
+
+  it('wraps the loading state in a status card without changing its accessible text', async () => {
+    const pending = deferred<Response>()
+    installFetchMock(authenticatedHandler(() => pending.promise))
+    renderApp('/')
+
+    const loadingText = await screen.findByText('Loading your dashboard…')
+    expect(loadingText.closest('[role="status"]')).not.toBeNull()
+
+    await act(async () => {
+      pending.resolve(jsonResponse(summaryFixture()))
+    })
+    expect(await screen.findByText('$1,234.56')).toBeInTheDocument()
+    expect(screen.queryByText('Loading your dashboard…')).not.toBeInTheDocument()
+  })
+})
+
+describe('metric card semantic classes', () => {
+  it('applies scoped emphasis classes to each metric card', async () => {
+    installFetchMock(authenticatedHandler(() => jsonResponse(summaryFixture())))
+    renderApp('/')
+
+    await screen.findByText('$1,234.56')
+
+    const total = screen.getByText('Total balance').closest('div')
+    expect(total).toHaveClass('dashboard-metric-card-total')
+    expect(total).toHaveClass('dashboard-metric-card')
+
+    const income = screen.getByText('Income this month').closest('div')
+    expect(income).toHaveClass('dashboard-metric-card')
+    expect(income?.querySelector('dd')).toHaveClass('dashboard-metric-value-income')
+
+    const spending = screen.getByText('Spending this month').closest('div')
+    expect(spending).toHaveClass('dashboard-metric-card')
+    expect(spending?.querySelector('dd')).toHaveClass('dashboard-metric-value-expense')
+
+    const remaining = screen.getByText('Budget remaining').closest('div')
+    expect(remaining).toHaveClass('dashboard-metric-card')
+    expect(remaining?.querySelector('dd')).toHaveClass('dashboard-metric-value-remaining')
+  })
+
+  it('leaves budget remaining unstyled when its decimal string is nonnegative', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse(summaryFixture({ remaining_budget: '412.30' })),
+      ),
+    )
+    renderApp('/')
+
+    const remaining = (await screen.findByText('Budget remaining')).closest(
+      'div',
+    )
+    expect(remaining?.querySelector('dd')).not.toHaveClass(
+      'dashboard-metric-value-remaining',
+    )
+    expect(remaining?.querySelector('dd')).toHaveTextContent('$412.30')
+    expect(screen.getByText('Budget remaining')).toBeInTheDocument()
   })
 })
 

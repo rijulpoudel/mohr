@@ -185,12 +185,15 @@ Rijul is learning backend engineering while building Mohr.
 
 ## Design direction
 
-- Minimal dark interface
-- Flat backgrounds
-- One accent color: `#5eead4`
-- Tight spacing
-- No gradients, neon effects, rainbow palettes, or generic AI-looking dashboards
-- Prefer the restraint of Linear, Apple, and Stripe
+`DESIGN.md` is the authoritative visual-system specification.
+
+- Warm, light personal-finance interface with deep navy typography
+- Accessible dark orange for primary actions; bright orange for brand accents
+- Soft lavender-gray canvas with flat white working surfaces
+- Plus Jakarta Sans typography and tabular financial figures
+- Dense but scannable layouts with meaningful, truthfully calculated charts
+- No gradients, neon effects, rainbow charts, glassmorphism, or generic AI-looking dashboards
+- Prefer the restraint of Linear, Apple, and Stripe while preserving Mohr's distinct warm identity
 
 ## Non-goals for v0.1
 

@@ -26,3 +26,24 @@ export function formatSignedMoney(
   if (formatted.startsWith('-') || formatted === '$0.00') return formatted
   return `${transactionType === 'income' ? '+' : '-'}${formatted}`
 }
+
+export function decimalToCents(value: string): bigint {
+  if (!isDecimalString(value)) {
+    throw new Error('decimalToCents requires a decimal string with two places.')
+  }
+  const negative = value.startsWith('-')
+  const unsigned = negative ? value.slice(1) : value
+  const [whole, fraction] = unsigned.split('.')
+  const cents = BigInt(whole) * 100n + BigInt(fraction)
+  return negative ? -cents : cents
+}
+
+export function clampedPercent(value: string, maximum: string): number {
+  const numerator = decimalToCents(value)
+  const denominator = decimalToCents(maximum)
+  if (denominator <= 0n) return 0
+  if (numerator <= 0n) return 0
+  if (numerator >= denominator) return 100
+  const rounded = (numerator * 100n + denominator / 2n) / denominator
+  return Number(rounded)
+}
