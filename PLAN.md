@@ -235,7 +235,14 @@ PATCH  /api/budgets/<id>/
 DELETE /api/budgets/<id>/
 
 GET    /api/dashboard/summary/
+
+GET    /api/cash-flow/summary/?month=YYYY-MM
 ```
+
+The monthly cash-flow summary is a read-only report over owned transactions. It returns exact decimal
+`income`, `expenses`, and `net` for the requested month, the number of settled transactions, and income
+and expense category breakdowns. It uses the shared ledger predicate, so pending, provider-removed,
+superseded, and not-yet-anchored bank rows never affect a reported figure.
 
 Mohr uses Django server-side session authentication for its first-party browser frontend, not JWT. The session cookie is HttpOnly and server-revocable, and no token is stored in JavaScript, which limits XSS exposure. Registration, login, logout, and later authenticated unsafe requests are CSRF protected: the frontend fetches the CSRF cookie and sends the matching `X-CSRFToken` header. Cross-origin deployments require three separate settings: credentials included on requests, credentialed CORS for the exact frontend origin, and that origin in `CSRF_TRUSTED_ORIGINS` for unsafe requests. CORS alone does not satisfy CSRF checks, and none of these settings is configured yet.
 
