@@ -34,6 +34,21 @@ function withoutKey(record: Record<string, unknown>, key: string) {
   return copy
 }
 
+// The summary legend is also a list, so account-row queries are scoped to the
+// account list rather than every listitem on the page.
+function accountListItems(): HTMLElement[] {
+  return screen
+    .getAllByRole('listitem')
+    .filter((item) => item.closest('.accounts-list') !== null)
+}
+
+async function findAccountListItem(): Promise<HTMLElement> {
+  const items = await screen.findAllByRole('listitem')
+  const item = items.find((node) => node.closest('.accounts-list') !== null)
+  if (item === undefined) throw new Error('No account list item rendered')
+  return item
+}
+
 function authenticatedHandler(
   accounts: (url: string, init?: RequestInit) => Response | Promise<Response>,
 ) {
@@ -188,16 +203,18 @@ describe('accounts list', () => {
     )
     renderApp('/accounts')
 
-    const item = await screen.findByRole('listitem')
+    const item = await findAccountListItem()
     expect(
       within(item).getByText('$123,456,789,012,345,678.90'),
     ).toBeInTheDocument()
     expect(within(item).getByText('-$987,654,321.01')).toBeInTheDocument()
     expect(within(item).getByText('Savings')).toBeInTheDocument()
-    const summary = screen.getByRole('region', { name: 'Summary' })
+    const summary = screen.getByRole('region', {
+      name: 'Positive balances · checking, savings & cash',
+    })
     expect(
-      within(summary).getByText('$123,456,789,012,345,678.90'),
-    ).toBeInTheDocument()
+      within(summary).getAllByText('$123,456,789,012,345,678.90'),
+    ).toHaveLength(2)
   })
 
   it('shows an accessible loading status while accounts are pending', async () => {
@@ -211,7 +228,7 @@ describe('accounts list', () => {
     await act(async () => {
       pending.resolve(jsonResponse([accountFixture()]))
     })
-    expect(await screen.findByText('Everyday Checking')).toBeInTheDocument()
+    expect(await screen.findAllByText('Everyday Checking')).not.toHaveLength(0)
     expect(screen.queryByRole('status')).not.toBeInTheDocument()
   })
 
@@ -240,7 +257,7 @@ describe('accounts list', () => {
     const user = userEvent.setup()
     await user.click(screen.getByRole('button', { name: 'Retry' }))
 
-    expect(await screen.findByText('Everyday Checking')).toBeInTheDocument()
+    expect(await screen.findAllByText('Everyday Checking')).not.toHaveLength(0)
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(calls(mock, '/api/accounts/')).toHaveLength(2)
   })
@@ -251,7 +268,7 @@ describe('accounts list', () => {
     )
     renderApp('/accounts')
 
-    expect(await screen.findByText('Everyday Checking')).toBeInTheDocument()
+    expect(await screen.findAllByText('Everyday Checking')).not.toHaveLength(0)
     expect(calls(mock, '/api/accounts/')).toHaveLength(1)
   })
 
@@ -315,14 +332,14 @@ describe('accounts list', () => {
     installFetchMock(authenticatedHandler(() => jsonResponse([accountFixture()])))
     renderApp('/accounts')
 
-    expect(await screen.findByText('Everyday Checking')).toBeInTheDocument()
+    expect(await screen.findAllByText('Everyday Checking')).not.toHaveLength(0)
     expect(localStorage.length).toBe(0)
     expect(sessionStorage.length).toBe(0)
   })
 })
 
 describe('accounts summary and sections', () => {
-  it('sums only Ready accounts into the Active balance, excluding pending and archived balances', async () => {
+  it('sums only positive active non-credit balances into the composition total', async () => {
     installFetchMock(
       authenticatedHandler(() =>
         jsonResponse([
@@ -354,19 +371,17 @@ describe('accounts summary and sections', () => {
     )
     renderApp('/accounts')
 
-    const summary = await screen.findByRole('region', { name: 'Summary' })
-    expect(within(summary).getByText('Active balance')).toBeInTheDocument()
-    expect(within(summary).getByText('$124.75')).toBeInTheDocument()
-    expect(
-      within(summary).getByText(
-        'Excludes archived and pending accounts. Includes credit cards and negative balances, so it differs from the balance-share chart below.',
-      ),
-    ).toBeInTheDocument()
+    const summary = await screen.findByRole('region', {
+      name: 'Positive balances · checking, savings & cash',
+    })
+    expect(within(summary).queryByText('Active balance')).not.toBeInTheDocument()
+    expect(within(summary).getAllByText('$150.25')).toHaveLength(2)
     expect(within(summary).queryByText('$9,999.99')).not.toBeInTheDocument()
-    expect(within(summary).queryByText('Pending')).not.toBeInTheDocument()
+    expect(within(summary).queryByText('-$25.50')).not.toBeInTheDocument()
+    expect(within(summary).queryByText('Pending Saver')).not.toBeInTheDocument()
   })
 
-  it('marks a negative Active balance with the semantic negative-value treatment', async () => {
+  it('does not present a lone negative balance as a positive share', async () => {
     installFetchMock(
       authenticatedHandler(() =>
         jsonResponse([
@@ -380,18 +395,24 @@ describe('accounts summary and sections', () => {
     )
     renderApp('/accounts')
 
-    const summary = await screen.findByRole('region', { name: 'Summary' })
-    expect(within(summary).getByText('-$250.00')).toHaveClass(
-      'accounts-summary-total-value-negative',
-    )
+    const summary = await screen.findByRole('region', {
+      name: 'Positive balances · checking, savings & cash',
+    })
+    expect(
+      within(summary).getByText(
+        'No positive checking, savings, or cash balances yet.',
+      ),
+    ).toBeInTheDocument()
+    expect(within(summary).queryByText('-$250.00')).not.toBeInTheDocument()
+    expect(summary.querySelectorAll('.accounts-doughnut-segment')).toHaveLength(0)
   })
 
-  it('partitions every account into exactly one of Ready, Pending, or Archived counts', async () => {
+  it('partitions every account into one list status while the chart excludes pending and archived rows', async () => {
     installFetchMock(
       authenticatedHandler(() =>
         jsonResponse([
           accountFixture({ id: 1, name: 'Ready Checking' }),
-          accountFixture({ id: 2, name: 'Ready Cash' }),
+          accountFixture({ id: 2, name: 'Ready Cash', current_balance: '-1.00' }),
           accountFixture({
             id: 3,
             name: 'Pending Saver',
@@ -405,28 +426,22 @@ describe('accounts summary and sections', () => {
     )
     renderApp('/accounts')
 
-    const summary = await screen.findByRole('region', { name: 'Summary' })
-    const readyCount = within(summary).getByText('Ready count').closest('div')
-    const pendingCount = within(summary).getByText('Pending count').closest('div')
-    const archivedCount = within(summary).getByText('Archived count').closest('div')
-    expect(readyCount).not.toBeNull()
-    expect(pendingCount).not.toBeNull()
-    expect(archivedCount).not.toBeNull()
-    expect(within(readyCount as HTMLElement).getByText('2')).toBeInTheDocument()
-    expect(within(pendingCount as HTMLElement).getByText('1')).toBeInTheDocument()
-    expect(within(archivedCount as HTMLElement).getByText('1')).toBeInTheDocument()
-
-    const cards = screen.getAllByRole('listitem')
+    await screen.findByRole('region', {
+      name: 'Positive balances · checking, savings & cash',
+    })
+    const cards = accountListItems()
     expect(cards).toHaveLength(4)
     expect(screen.getAllByText('Active')).toHaveLength(2)
     expect(screen.getAllByText('Balance pending')).toHaveLength(1)
     expect(screen.getAllByText('Archived')).toHaveLength(1)
-    for (const name of ['Ready Checking', 'Ready Cash', 'Pending Saver', 'Old Card']) {
-      expect(screen.getAllByText(name)).toHaveLength(1)
-    }
+    // Only the positive ready balance is mirrored in the legend.
+    expect(screen.getAllByText('Ready Checking')).toHaveLength(2)
+    expect(screen.getAllByText('Ready Cash')).toHaveLength(1)
+    expect(screen.getAllByText('Pending Saver')).toHaveLength(1)
+    expect(screen.getAllByText('Old Card')).toHaveLength(1)
   })
 
-  it('computes the Active balance exactly for large and negative values', async () => {
+  it('keeps the composition total exact for large positive values while excluding negatives', async () => {
     installFetchMock(
       authenticatedHandler(() =>
         jsonResponse([
@@ -445,11 +460,16 @@ describe('accounts summary and sections', () => {
     )
     renderApp('/accounts')
 
-    const summary = await screen.findByRole('region', { name: 'Summary' })
+    const summary = await screen.findByRole('region', {
+      name: 'Positive balances · checking, savings & cash',
+    })
     expect(
-      within(summary).getByText('-$864,197,532,086,419,753.20'),
-    ).toBeInTheDocument()
-    const items = screen.getAllByRole('listitem')
+      within(summary).getAllByText('$123,456,789,012,345,678.90'),
+    ).toHaveLength(2)
+    expect(
+      within(summary).queryByText('-987,654,321,098,765,432.10'),
+    ).not.toBeInTheDocument()
+    const items = accountListItems()
     expect(
       within(items[0]).getByText('$123,456,789,012,345,678.90'),
     ).toBeInTheDocument()
@@ -512,7 +532,7 @@ describe('accounts summary and sections', () => {
   it('links the header Add account action to the create form card', async () => {
     installFetchMock(authenticatedHandler(() => jsonResponse([accountFixture()])))
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const addLink = screen.getByRole('link', { name: 'Add account' })
     expect(addLink).toHaveAttribute('href', '#account-create')
@@ -534,7 +554,7 @@ describe('accounts summary and sections', () => {
     ).toBeInTheDocument()
   })
 
-  it('keeps a pending account inside Active accounts while excluding it from the Active balance', async () => {
+  it('keeps a pending account inside Active accounts while excluding it from the positive-balance chart', async () => {
     installFetchMock(
       authenticatedHandler(() =>
         jsonResponse([
@@ -566,21 +586,18 @@ describe('accounts summary and sections', () => {
       screen.queryByRole('region', { name: 'Archived accounts' }),
     ).not.toBeInTheDocument()
 
-    const summary = screen.getByRole('region', { name: 'Summary' })
-    expect(within(summary).getByText('$100.00')).toBeInTheDocument()
+    const summary = screen.getByRole('region', {
+      name: 'Positive balances · checking, savings & cash',
+    })
+    expect(within(summary).getAllByText('$100.00')).toHaveLength(2)
+    expect(within(summary).queryByText('Checking One')).not.toBeInTheDocument()
     expect(within(summary).queryByText('$600.00')).not.toBeInTheDocument()
-    expect(
-      within(summary).getByText('Ready count').closest('div'),
-    ).toHaveTextContent('1')
-    expect(
-      within(summary).getByText('Pending count').closest('div'),
-    ).toHaveTextContent('1')
   })
 
   it('never shows account IDs on the page', async () => {
     installFetchMock(authenticatedHandler(() => jsonResponse(editAccounts())))
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     for (const id of ['7', '8', '9']) {
       expect(screen.queryByText(id)).not.toBeInTheDocument()
@@ -590,7 +607,7 @@ describe('accounts summary and sections', () => {
 
 describe('accounts balance share chart', () => {
   function chartRows(chart: HTMLElement) {
-    return Array.from(chart.querySelectorAll<HTMLElement>('.accounts-chart-row'))
+    return Array.from(chart.querySelectorAll<HTMLElement>('.accounts-legend-item'))
   }
 
   it('charts positive non-credit balances largest first with name, exact amount, and share', async () => {
@@ -654,16 +671,18 @@ describe('accounts balance share chart', () => {
     renderApp('/accounts')
 
     const chart = await screen.findByRole('region', {
-      name: 'Positive balances by account',
+      name: 'Positive balances · checking, savings & cash',
     })
     const rows = chartRows(chart)
     expect(rows).toHaveLength(2)
     expect(rows[0].textContent).toContain('Big Checking')
     expect(rows[0].textContent).toContain('$75.00')
-    expect(rows[0].textContent).toContain('75% of $100.00')
+    expect(rows[0].textContent).toContain('75%')
+    expect(rows[0].textContent).not.toContain('of $100.00')
     expect(rows[1].textContent).toContain('Small Savings')
     expect(rows[1].textContent).toContain('$25.00')
-    expect(rows[1].textContent).toContain('25% of $100.00')
+    expect(rows[1].textContent).toContain('25%')
+    expect(rows[1].textContent).not.toContain('of $100.00')
 
     for (const excluded of [
       'Pending Saver',
@@ -675,19 +694,11 @@ describe('accounts balance share chart', () => {
       expect(chart.textContent).not.toContain(excluded)
     }
 
-    expect(
-      within(chart).getByText(
-        'Share denominator is the positive active non-credit balances shown. Credit cards are excluded even when positive, and archived, pending, zero, and negative balances are omitted. These rows do not sum to Active balance.',
-      ),
-    ).toBeInTheDocument()
-    expect(
-      within(chart).getByText(
-        'Shares are rounded, so they may not total 100%.',
-      ),
-    ).toBeInTheDocument()
+    expect(chart.textContent).not.toContain('Share denominator')
+    expect(chart.textContent).not.toContain('Shares are rounded')
   })
 
-  it('marks every bar as decorative while the widths follow the exact shares', async () => {
+  it('draws a decorative native SVG doughnut with one segment per visible slice', async () => {
     installFetchMock(
       authenticatedHandler(() =>
         jsonResponse([
@@ -709,19 +720,18 @@ describe('accounts balance share chart', () => {
     renderApp('/accounts')
 
     const chart = await screen.findByRole('region', {
-      name: 'Positive balances by account',
+      name: 'Positive balances · checking, savings & cash',
     })
-    const rows = chartRows(chart)
-    const firstFill = rows[0].querySelector<HTMLElement>('.accounts-chart-fill')
-    const secondFill = rows[1].querySelector<HTMLElement>('.accounts-chart-fill')
-    expect(firstFill?.style.width).toBe('75%')
-    expect(secondFill?.style.width).toBe('25%')
-    expect(
-      firstFill?.closest('[aria-hidden="true"]'),
-    ).not.toBeNull()
-    expect(
-      secondFill?.closest('[aria-hidden="true"]'),
-    ).not.toBeNull()
+    const svg = chart.querySelector('svg')
+    expect(svg).not.toBeNull()
+    const segments = chart.querySelectorAll<SVGPathElement>(
+      '.accounts-doughnut-segment',
+    )
+    expect(segments).toHaveLength(2)
+    for (const segment of segments) {
+      expect(segment.getAttribute('d')).toMatch(/^M /)
+      expect(segment.closest('[aria-hidden="true"]')).not.toBeNull()
+    }
   })
 
   it('orders equal balances by name and rounds shares from the exact cent total', async () => {
@@ -755,7 +765,7 @@ describe('accounts balance share chart', () => {
     renderApp('/accounts')
 
     const chart = await screen.findByRole('region', {
-      name: 'Positive balances by account',
+      name: 'Positive balances · checking, savings & cash',
     })
     const rows = chartRows(chart)
     expect(rows).toHaveLength(3)
@@ -764,13 +774,10 @@ describe('accounts balance share chart', () => {
     expect(rows[2].textContent).toContain('Charlie')
     for (const row of rows) {
       expect(row.textContent).toContain('$1.00')
-      expect(row.textContent).toContain('33% of $3.00')
+      expect(row.textContent).toContain('33%')
+      expect(row.textContent).not.toContain('of $3.00')
     }
-    // Rounded shares can repeat and therefore not total 100%; the caveat must
-    // be present rather than implying the rows sum to the whole.
-    expect(
-      within(chart).getByText('Shares are rounded, so they may not total 100%.'),
-    ).toBeInTheDocument()
+    expect(chart.textContent).not.toContain('Shares are rounded')
   })
 
   it('keeps large balances exact in the chart text', async () => {
@@ -797,7 +804,7 @@ describe('accounts balance share chart', () => {
     renderApp('/accounts')
 
     const chart = await screen.findByRole('region', {
-      name: 'Positive balances by account',
+      name: 'Positive balances · checking, savings & cash',
     })
     const rows = chartRows(chart)
     expect(rows[0].textContent).toContain('Huge Saver')
@@ -831,28 +838,24 @@ describe('accounts balance share chart', () => {
     renderApp('/accounts')
 
     const chart = await screen.findByRole('region', {
-      name: 'Positive balances by account',
+      name: 'Positive balances · checking, savings & cash',
     })
     const rows = chartRows(chart)
     expect(rows).toHaveLength(2)
 
     // 99.50 rounds to 100, but a sibling still exists, so the honest label is
-    // >99% and the bar must never claim the whole width.
+    // >99% and the slice must never claim the whole circle.
     expect(rows[0].textContent).toContain('Nearly All')
     expect(rows[0].textContent).toContain('$99.50')
-    expect(rows[0].textContent).toContain('>99% of $99.52')
-    expect(rows[0].textContent).not.toContain('100% of')
-    const firstFill = rows[0].querySelector<HTMLElement>('.accounts-chart-fill')
-    expect(firstFill?.style.width).toBe('99%')
+    expect(rows[0].textContent).toContain('>99%')
+    expect(rows[0].textContent).not.toContain('100%')
 
     // 0.02 rounds to 0, but the account is strictly positive, so it must read
-    // <1% and keep a minimum visible bar rather than collapsing to 0.
+    // <1% rather than collapsing to 0%.
     expect(rows[1].textContent).toContain('Tiny Remainder')
     expect(rows[1].textContent).toContain('$0.02')
-    expect(rows[1].textContent).toContain('<1% of $99.52')
-    expect(rows[1].textContent).not.toContain('0% of')
-    const secondFill = rows[1].querySelector<HTMLElement>('.accounts-chart-fill')
-    expect(secondFill?.style.width).toBe('1%')
+    expect(rows[1].textContent).toContain('<1%')
+    expect(rows[1].textContent).not.toContain('0%')
   })
 
   it('labels a one-cent share honestly against a huge balance', async () => {
@@ -879,16 +882,14 @@ describe('accounts balance share chart', () => {
     renderApp('/accounts')
 
     const chart = await screen.findByRole('region', {
-      name: 'Positive balances by account',
+      name: 'Positive balances · checking, savings & cash',
     })
     const rows = chartRows(chart)
     expect(rows[0].textContent).toContain('$123,456,789,012,345,678.90')
-    expect(rows[0].textContent).toContain('>99% of $123,456,789,012,345,678.91')
+    expect(rows[0].textContent).toContain('>99%')
     expect(rows[1].textContent).toContain('Tiny Cash')
     expect(rows[1].textContent).toContain('$0.01')
-    expect(rows[1].textContent).toContain('<1% of $123,456,789,012,345,678.91')
-    const tinyFill = rows[1].querySelector<HTMLElement>('.accounts-chart-fill')
-    expect(tinyFill?.style.width).toBe('1%')
+    expect(rows[1].textContent).toContain('<1%')
   })
 
   it('is truthful for a single eligible account', async () => {
@@ -908,13 +909,16 @@ describe('accounts balance share chart', () => {
     renderApp('/accounts')
 
     const chart = await screen.findByRole('region', {
-      name: 'Positive balances by account',
+      name: 'Positive balances · checking, savings & cash',
     })
     const rows = chartRows(chart)
     expect(rows).toHaveLength(1)
     expect(rows[0].textContent).toContain('Only Account')
     expect(rows[0].textContent).toContain('$42.00')
-    expect(rows[0].textContent).toContain('100% of $42.00')
+    expect(rows[0].textContent).toContain('100%')
+    expect(
+      chart.querySelectorAll('.accounts-doughnut-segment'),
+    ).toHaveLength(1)
   })
 
   it('shows a truthful empty state when no eligible balance exists', async () => {
@@ -948,12 +952,13 @@ describe('accounts balance share chart', () => {
     renderApp('/accounts')
 
     const chart = await screen.findByRole('region', {
-      name: 'Positive balances by account',
+      name: 'Positive balances · checking, savings & cash',
     })
     expect(chartRows(chart)).toHaveLength(0)
+    expect(chart.querySelectorAll('.accounts-doughnut-segment')).toHaveLength(0)
     expect(
       within(chart).getByText(
-        'No active non-credit accounts have a positive balance.',
+        'No positive checking, savings, or cash balances yet.',
       ),
     ).toBeInTheDocument()
   })
@@ -983,13 +988,13 @@ describe('accounts balance share chart', () => {
     renderApp('/accounts')
 
     const chart = await screen.findByRole('region', {
-      name: 'Positive balances by account',
+      name: 'Positive balances · checking, savings & cash',
     })
     const rows = chartRows(chart)
     expect(rows).toHaveLength(1)
     expect(rows[0].textContent).toContain('Ready Checking')
     expect(chart.textContent).not.toContain('Impossible Pending')
-    expect(chart.textContent).toContain('100% of $100.00')
+    expect(rows[0].textContent).toContain('100%')
   })
 
   it('updates the chart after an account is created', async () => {
@@ -1017,10 +1022,10 @@ describe('accounts balance share chart', () => {
       }),
     )
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const before = screen.getByRole('region', {
-      name: 'Positive balances by account',
+      name: 'Positive balances · checking, savings & cash',
     })
     expect(chartRows(before)).toHaveLength(1)
 
@@ -1030,16 +1035,16 @@ describe('accounts balance share chart', () => {
     await screen.findByRole('status')
 
     const after = screen.getByRole('region', {
-      name: 'Positive balances by account',
+      name: 'Positive balances · checking, savings & cash',
     })
     const rows = chartRows(after)
     expect(rows).toHaveLength(2)
     expect(rows[0].textContent).toContain('Travel Fund')
     expect(rows[0].textContent).toContain('$300.00')
-    expect(rows[0].textContent).toContain('75% of $400.00')
+    expect(rows[0].textContent).toContain('75%')
     expect(rows[1].textContent).toContain('Everyday Checking')
     expect(rows[1].textContent).toContain('$100.00')
-    expect(rows[1].textContent).toContain('25% of $400.00')
+    expect(rows[1].textContent).toContain('25%')
   })
 
   it('updates the chart after an account edit', async () => {
@@ -1059,7 +1064,7 @@ describe('accounts balance share chart', () => {
       }),
     )
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const user = userEvent.setup()
     const editor = await openEditForm(user, 'Everyday Checking')
@@ -1068,12 +1073,12 @@ describe('accounts balance share chart', () => {
     await screen.findByText('Account updated.')
 
     const chart = screen.getByRole('region', {
-      name: 'Positive balances by account',
+      name: 'Positive balances · checking, savings & cash',
     })
     const rows = chartRows(chart)
     expect(rows).toHaveLength(1)
     expect(rows[0].textContent).toContain('$40.00')
-    expect(rows[0].textContent).toContain('100% of $40.00')
+    expect(rows[0].textContent).toContain('100%')
   })
 
   it('removes an archived account from the chart', async () => {
@@ -1083,10 +1088,10 @@ describe('accounts balance share chart', () => {
       ),
     )
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const before = screen.getByRole('region', {
-      name: 'Positive balances by account',
+      name: 'Positive balances · checking, savings & cash',
     })
     expect(chartRows(before)).toHaveLength(1)
 
@@ -1100,14 +1105,296 @@ describe('accounts balance share chart', () => {
     await screen.findByText('Account archived.')
 
     const after = screen.getByRole('region', {
-      name: 'Positive balances by account',
+      name: 'Positive balances · checking, savings & cash',
     })
     expect(chartRows(after)).toHaveLength(0)
     expect(
       within(after).getByText(
-        'No active non-credit accounts have a positive balance.',
+        'No positive checking, savings, or cash balances yet.',
       ),
     ).toBeInTheDocument()
+  })
+})
+
+describe('accounts positive balance composition', () => {
+  const TITLE = 'Positive balances · checking, savings & cash'
+
+  function legendItems(region: HTMLElement) {
+    return Array.from(
+      region.querySelectorAll<HTMLElement>('.accounts-legend-item'),
+    )
+  }
+
+  it('renders an aria-hidden native SVG doughnut and a compact labelled legend', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse([
+          accountFixture({
+            id: 1,
+            name: 'Everyday Checking',
+            account_type: 'checking',
+            opening_balance: '75.00',
+            current_balance: '75.00',
+          }),
+          accountFixture({
+            id: 2,
+            name: 'Rainy Day Savings',
+            account_type: 'savings',
+            opening_balance: '25.00',
+            current_balance: '25.00',
+          }),
+          accountFixture({
+            id: 3,
+            name: 'Card Debt',
+            account_type: 'credit_card',
+            opening_balance: '40.00',
+            current_balance: '40.00',
+          }),
+          accountFixture({
+            id: 4,
+            name: 'Negative Cash',
+            account_type: 'cash',
+            opening_balance: '-10.00',
+            current_balance: '-10.00',
+          }),
+        ]),
+      ),
+    )
+    renderApp('/accounts')
+
+    const region = await screen.findByRole('region', { name: TITLE })
+    const svg = region.querySelector('svg')
+    expect(svg).not.toBeNull()
+    expect(svg?.closest('[aria-hidden="true"]')).not.toBeNull()
+    expect(region.querySelectorAll('.accounts-doughnut-segment')).toHaveLength(2)
+
+    const items = legendItems(region)
+    expect(items).toHaveLength(2)
+    expect(items[0]).toHaveTextContent('Everyday Checking')
+    expect(items[0]).toHaveTextContent('$75.00')
+    expect(items[0]).toHaveTextContent('75%')
+    expect(items[1]).toHaveTextContent('Rainy Day Savings')
+    expect(items[1]).toHaveTextContent('$25.00')
+    expect(items[1]).toHaveTextContent('25%')
+
+    expect(within(region).getByText('Positive balances')).toBeInTheDocument()
+    expect(within(region).getByText('$100.00')).toBeInTheDocument()
+    expect(region.textContent).not.toContain('Card Debt')
+    expect(region.textContent).not.toContain('Negative Cash')
+  })
+
+  it('bounds many accounts into distinct slices with a truthful Other aggregate', async () => {
+    const amounts = ['7.00', '6.00', '5.00', '4.00', '3.00', '2.00', '1.00']
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse(
+          amounts.map((amount, index) =>
+            accountFixture({
+              id: index + 1,
+              name: `Wallet ${index + 1}`,
+              account_type: 'cash',
+              opening_balance: amount,
+              current_balance: amount,
+            }),
+          ),
+        ),
+      ),
+    )
+    renderApp('/accounts')
+
+    const region = await screen.findByRole('region', { name: TITLE })
+    expect(region.querySelectorAll('.accounts-doughnut-segment')).toHaveLength(5)
+    const items = legendItems(region)
+    expect(items).toHaveLength(5)
+    expect(items[0]).toHaveTextContent('Wallet 1')
+    expect(items[0]).toHaveTextContent('$7.00')
+    expect(items[1]).toHaveTextContent('Wallet 2')
+    expect(items[2]).toHaveTextContent('Wallet 3')
+    expect(items[3]).toHaveTextContent('Wallet 4')
+    expect(items[4]).toHaveTextContent('Other (3)')
+    expect(items[4]).toHaveTextContent('$6.00')
+    expect(within(region).getByText('$28.00')).toBeInTheDocument()
+  })
+
+  it('never presents a lone negative or positive credit-card balance as a positive share', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse([
+          accountFixture({
+            id: 1,
+            name: 'Card Debt',
+            account_type: 'credit_card',
+            opening_balance: '500.00',
+            current_balance: '500.00',
+          }),
+          accountFixture({
+            id: 2,
+            name: 'Overdrawn Cash',
+            account_type: 'cash',
+            opening_balance: '-20.00',
+            current_balance: '-20.00',
+          }),
+        ]),
+      ),
+    )
+    renderApp('/accounts')
+
+    const region = await screen.findByRole('region', { name: TITLE })
+    expect(region.querySelectorAll('.accounts-doughnut-segment')).toHaveLength(0)
+    expect(legendItems(region)).toHaveLength(0)
+    expect(
+      within(region).getByText('No positive checking, savings, or cash balances yet.'),
+    ).toBeInTheDocument()
+  })
+
+  it('keeps large positive totals exact without binary floating point drift', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse([
+          accountFixture({
+            id: 1,
+            name: 'Big Saver',
+            account_type: 'savings',
+            opening_balance: '123456789012345678.90',
+            current_balance: '123456789012345678.90',
+          }),
+          accountFixture({
+            id: 2,
+            name: 'Deep Debt',
+            account_type: 'cash',
+            opening_balance: '-987654321098765432.10',
+            current_balance: '-987654321098765432.10',
+          }),
+        ]),
+      ),
+    )
+    renderApp('/accounts')
+
+    const region = await screen.findByRole('region', { name: TITLE })
+    expect(
+      within(region).getAllByText('$123,456,789,012,345,678.90'),
+    ).toHaveLength(2)
+    expect(region.textContent).not.toContain('-987,654,321,098,765,432.10')
+  })
+
+  it('omits the Active balance metric, status counts, and verbose explanatory notes', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse([
+          accountFixture({
+            id: 1,
+            name: 'Everyday Checking',
+            current_balance: '75.00',
+          }),
+          accountFixture({
+            id: 2,
+            name: 'Rainy Day Savings',
+            account_type: 'savings',
+            opening_balance: '25.00',
+            current_balance: '25.00',
+          }),
+        ]),
+      ),
+    )
+    renderApp('/accounts')
+
+    await screen.findByRole('region', { name: TITLE })
+    expect(screen.queryByText('Active balance')).not.toBeInTheDocument()
+    expect(screen.queryByText('Ready count')).not.toBeInTheDocument()
+    expect(screen.queryByText('Pending count')).not.toBeInTheDocument()
+    expect(screen.queryByText('Archived count')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Share denominator/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Shares are rounded/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/minimum visible bar/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/of \$100\.00/)).not.toBeInTheDocument()
+  })
+
+  it('keeps a long exact total below the doughnut so it cannot wrap across the ring', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse([
+          accountFixture({
+            id: 1,
+            name: 'Huge Saver',
+            account_type: 'savings',
+            opening_balance: '123456789012345678.90',
+            current_balance: '123456789012345678.90',
+          }),
+          accountFixture({
+            id: 2,
+            name: 'Tiny Cash',
+            account_type: 'cash',
+            opening_balance: '0.01',
+            current_balance: '0.01',
+          }),
+        ]),
+      ),
+    )
+    renderApp('/accounts')
+
+    const region = await screen.findByRole('region', { name: TITLE })
+    const total = '$123,456,789,012,345,678.91'
+    const center = region.querySelector('.accounts-doughnut-center')
+    expect(center).not.toBeNull()
+    expect(center?.textContent).toContain('Positive balances')
+    expect(center?.textContent).not.toContain(total)
+
+    const below = region.querySelector('.accounts-doughnut-total-below')
+    expect(below).not.toBeNull()
+    expect(below).toHaveTextContent(total)
+    expect(within(region).getAllByText(total)).toHaveLength(1)
+  })
+
+  it('keeps an ordinary total centred inside the doughnut hole', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse([
+          accountFixture({
+            id: 1,
+            name: 'Everyday Checking',
+            opening_balance: '75.00',
+            current_balance: '75.00',
+          }),
+          accountFixture({
+            id: 2,
+            name: 'Rainy Day Savings',
+            account_type: 'savings',
+            opening_balance: '25.00',
+            current_balance: '25.00',
+          }),
+        ]),
+      ),
+    )
+    renderApp('/accounts')
+
+    const region = await screen.findByRole('region', { name: TITLE })
+    const center = region.querySelector('.accounts-doughnut-center')
+    expect(center).toHaveTextContent('Positive balances')
+    expect(center).toHaveTextContent('$100.00')
+    expect(region.querySelector('.accounts-doughnut-total-below')).toBeNull()
+  })
+
+  it('draws a single-slice doughnut as a full annulus with two subpaths', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse([
+          accountFixture({
+            id: 1,
+            name: 'Only Account',
+            account_type: 'savings',
+            opening_balance: '42.00',
+            current_balance: '42.00',
+          }),
+        ]),
+      ),
+    )
+    renderApp('/accounts')
+
+    const region = await screen.findByRole('region', { name: TITLE })
+    const segments = region.querySelectorAll('.accounts-doughnut-segment')
+    expect(segments).toHaveLength(1)
+    const d = segments[0].getAttribute('d') ?? ''
+    expect((d.match(/M /g) ?? [])).toHaveLength(2)
   })
 })
 
@@ -1131,7 +1418,7 @@ describe('account sync pending', () => {
     )
     renderApp('/accounts')
 
-    const item = (await screen.findAllByRole('listitem'))[0]
+    const item = await findAccountListItem()
     expect(within(item).getByText('Balance pending')).toBeInTheDocument()
     expect(
       within(item).getByText(
@@ -1147,7 +1434,7 @@ describe('account sync pending', () => {
     installFetchMock(authenticatedHandler(() => jsonResponse([accountFixture()])))
     renderApp('/accounts')
 
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
     expect(screen.queryByText('Balance pending')).not.toBeInTheDocument()
     expect(
       screen.queryByText(/opening balance is anchored/),
@@ -1170,7 +1457,7 @@ describe('account sync pending', () => {
     )
     renderApp('/accounts')
 
-    const item = (await screen.findAllByRole('listitem'))[0]
+    const item = await findAccountListItem()
     const editButton = within(item).getByRole('button', {
       name: 'Edit Checking One',
     })
@@ -1204,7 +1491,7 @@ describe('account sync pending', () => {
     installFetchMock(authenticatedHandler(() => jsonResponse([accountFixture()])))
     renderApp('/accounts')
 
-    const item = (await screen.findAllByRole('listitem'))[0]
+    const item = await findAccountListItem()
     expect(
       within(item).getByRole('button', { name: 'Edit Everyday Checking' }),
     ).toBeEnabled()
@@ -1352,7 +1639,7 @@ describe('account creation form', () => {
   it('renders the create form card with all four account types and accessible fields', async () => {
     installFetchMock(authenticatedHandler(() => jsonResponse([accountFixture()])))
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const createCard = screen.getByRole('region', { name: 'Add account' })
     expect(createCard).toHaveAttribute('id', 'account-create')
@@ -1439,7 +1726,7 @@ describe('account creation form', () => {
     expect(screen.getByLabelText('Account type')).toHaveValue('checking')
     expect(screen.getByLabelText('Opening balance')).toHaveValue('0.00')
     expect(screen.queryByText(/No accounts yet/)).not.toBeInTheDocument()
-    const createdItem = screen.getByRole('listitem')
+    const createdItem = accountListItems()[0]
     expect(within(createdItem).getByText('Travel Fund')).toBeInTheDocument()
     expect(within(createdItem).getByText('Savings')).toBeInTheDocument()
     expect(within(createdItem).getByText('$275.50')).toBeInTheDocument()
@@ -1466,14 +1753,14 @@ describe('account creation form', () => {
       }),
     )
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const user = userEvent.setup()
     await fillCreateForm(user, 'New Card', '10.00', 'credit_card')
     await user.click(screen.getByRole('button', { name: 'Create account' }))
 
     await screen.findByRole('status')
-    const items = screen.getAllByRole('listitem')
+    const items = accountListItems()
     expect(items).toHaveLength(2)
     expect(items[0]).toHaveTextContent('Everyday Checking')
     expect(items[1]).toHaveTextContent('New Card')
@@ -1526,7 +1813,7 @@ describe('account creation form', () => {
       account_type: 'credit_card',
       opening_balance: '-1234567890.99',
     })
-    const items = screen.getAllByRole('listitem')
+    const items = accountListItems()
     expect(within(items[0]).getByText('$1,234,567,890.12')).toBeInTheDocument()
     expect(within(items[1]).getByText('-$1,234,567,890.99')).toBeInTheDocument()
   })
@@ -1617,7 +1904,7 @@ describe('account creation form', () => {
       }),
     )
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const user = userEvent.setup()
     await fillCreateForm(user, 'Travel Fund', '250.00')
@@ -1641,7 +1928,7 @@ describe('account creation form', () => {
     )
     expect(screen.getByLabelText('Name')).toHaveValue('Travel Fund')
     expect(screen.getByLabelText('Opening balance')).toHaveValue('250.00')
-    expect(screen.getByText('Everyday Checking')).toBeInTheDocument()
+    expect(screen.getAllByText('Everyday Checking').length).toBeGreaterThan(0)
     expect(
       screen.getByRole('button', { name: 'Create account' }),
     ).not.toBeDisabled()
@@ -1661,7 +1948,7 @@ describe('account creation form', () => {
       }),
     )
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const user = userEvent.setup()
     await fillCreateForm(user)
@@ -1672,7 +1959,7 @@ describe('account creation form', () => {
     )
     expect(screen.getByLabelText('Name')).toHaveValue('Travel Fund')
     expect(screen.getByLabelText('Opening balance')).toHaveValue('250.00')
-    expect(screen.getByText('Everyday Checking')).toBeInTheDocument()
+    expect(screen.getAllByText('Everyday Checking').length).toBeGreaterThan(0)
     expect(
       screen.getByRole('button', { name: 'Create account' }),
     ).not.toBeDisabled()
@@ -1689,7 +1976,7 @@ describe('account creation form', () => {
       }),
     )
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const user = userEvent.setup()
     await fillCreateForm(user)
@@ -1700,7 +1987,7 @@ describe('account creation form', () => {
     )
     expect(screen.queryByText('unexpected')).not.toBeInTheDocument()
     expect(screen.getByLabelText('Name')).toHaveValue('Travel Fund')
-    expect(screen.getByText('Everyday Checking')).toBeInTheDocument()
+    expect(screen.getAllByText('Everyday Checking').length).toBeGreaterThan(0)
     expect(calls(mock, '/api/accounts/', 'POST')).toHaveLength(1)
   })
 
@@ -1718,7 +2005,7 @@ describe('account creation form', () => {
       return jsonResponse({}, 404)
     })
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const user = userEvent.setup()
     await fillCreateForm(user)
@@ -1728,7 +2015,7 @@ describe('account creation form', () => {
       'Missing CSRF token.',
     )
     expect(screen.getByLabelText('Name')).toHaveValue('Travel Fund')
-    expect(screen.getByText('Everyday Checking')).toBeInTheDocument()
+    expect(screen.getAllByText('Everyday Checking').length).toBeGreaterThan(0)
     expect(calls(mock, '/api/accounts/', 'POST')).toHaveLength(0)
   })
 
@@ -1769,7 +2056,7 @@ describe('account creation form', () => {
         }),
       )
       renderApp('/accounts')
-      await screen.findByText('Everyday Checking')
+      await screen.findAllByText('Everyday Checking')
 
       const user = userEvent.setup()
       await fillCreateForm(user)
@@ -1778,7 +2065,7 @@ describe('account creation form', () => {
       expect(await screen.findByRole('alert')).toHaveTextContent(message)
       expect(screen.getByLabelText('Name')).toHaveValue('Travel Fund')
       expect(screen.getByLabelText('Opening balance')).toHaveValue('250.00')
-      expect(screen.getByText('Everyday Checking')).toBeInTheDocument()
+      expect(screen.getAllByText('Everyday Checking').length).toBeGreaterThan(0)
       expect(screen.queryByText('Travel Fund')).not.toBeInTheDocument()
       expect(screen.queryByText('Account created.')).not.toBeInTheDocument()
       expect(
@@ -1826,7 +2113,7 @@ describe('account creation form', () => {
       'Account created.',
     )
     expect(calls(mock, '/api/accounts/', 'POST')).toHaveLength(1)
-    expect(screen.getByRole('listitem')).toHaveTextContent('Travel Fund')
+    expect(accountListItems()[0]).toHaveTextContent('Travel Fund')
   })
 
   it('updates the summary and Active section when an account is created', async () => {
@@ -1854,24 +2141,22 @@ describe('account creation form', () => {
       }),
     )
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
-    const summaryBefore = screen.getByRole('region', { name: 'Summary' })
-    expect(within(summaryBefore).getByText('$100.00')).toBeInTheDocument()
-    expect(
-      within(summaryBefore).getByText('Ready count').closest('div'),
-    ).toHaveTextContent('1')
+    const summaryBefore = screen.getByRole('region', {
+      name: 'Positive balances · checking, savings & cash',
+    })
+    expect(within(summaryBefore).getAllByText('$100.00')).toHaveLength(2)
 
     const user = userEvent.setup()
     await fillCreateForm(user)
     await user.click(screen.getByRole('button', { name: 'Create account' }))
     await screen.findByRole('status')
 
-    const summaryAfter = screen.getByRole('region', { name: 'Summary' })
+    const summaryAfter = screen.getByRole('region', {
+      name: 'Positive balances · checking, savings & cash',
+    })
     expect(within(summaryAfter).getByText('$375.50')).toBeInTheDocument()
-    expect(
-      within(summaryAfter).getByText('Ready count').closest('div'),
-    ).toHaveTextContent('2')
 
     const active = screen.getByRole('region', { name: 'Active accounts' })
     const activeItems = within(active).getAllByRole('listitem')
@@ -2070,9 +2355,9 @@ function editAccounts() {
 }
 
 function accountItem(name: string): HTMLElement {
-  const item = screen
-    .getAllByRole('listitem')
-    .find((node) => node.textContent?.includes(name))
+  const item = accountListItems().find((node) =>
+    node.textContent?.includes(name),
+  )
   if (item === undefined) throw new Error(`No list item for ${name}`)
   return item
 }
@@ -2108,7 +2393,7 @@ describe('account editing', () => {
       authenticatedHandler(() => jsonResponse(editAccounts())),
     )
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     for (const name of ['Everyday Checking', 'Old Card', 'Cash Jar']) {
       expect(
@@ -2135,7 +2420,7 @@ describe('account editing', () => {
     expect(
       within(editor).getByRole('button', { name: 'Cancel' }),
     ).toBeInTheDocument()
-    expect(screen.getAllByRole('listitem')).toHaveLength(3)
+    expect(accountListItems()).toHaveLength(3)
     expect(calls(mock, '/api/auth/csrf/')).toHaveLength(0)
     expect(calls(mock, '/api/accounts/7/', 'PATCH')).toHaveLength(0)
   })
@@ -2145,7 +2430,7 @@ describe('account editing', () => {
       authenticatedHandler(() => jsonResponse(editAccounts())),
     )
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const user = userEvent.setup()
     const editor = await openEditForm(user, 'Everyday Checking')
@@ -2171,7 +2456,7 @@ describe('account editing', () => {
       authenticatedHandler(() => jsonResponse(editAccounts())),
     )
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const user = userEvent.setup()
     const editor = await openEditForm(user, 'Everyday Checking')
@@ -2206,7 +2491,7 @@ describe('account editing', () => {
       }),
     )
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const user = userEvent.setup()
     const editor = await openEditForm(user, 'Everyday Checking')
@@ -2238,7 +2523,7 @@ describe('account editing', () => {
     expect(
       screen.queryByRole('form', { name: 'Edit account' }),
     ).not.toBeInTheDocument()
-    const items = screen.getAllByRole('listitem')
+    const items = accountListItems()
     expect(items).toHaveLength(3)
     expect(within(items[0]).getByText('Renamed')).toBeInTheDocument()
     expect(within(items[0]).getByText('-$1,234.56')).toBeInTheDocument()
@@ -2267,7 +2552,7 @@ describe('account editing', () => {
       }),
     )
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const user = userEvent.setup()
     const editor = await openEditForm(user, 'Old Card')
@@ -2277,7 +2562,7 @@ describe('account editing', () => {
     await user.click(within(editor).getByRole('button', { name: 'Save' }))
 
     await screen.findByText('Old Card Renamed')
-    const items = screen.getAllByRole('listitem')
+    const items = accountListItems()
     expect(items).toHaveLength(3)
     expect(within(items[0]).getByText('Everyday Checking')).toBeInTheDocument()
     expect(within(items[1]).getByText('Cash Jar')).toBeInTheDocument()
@@ -2322,7 +2607,7 @@ describe('account editing', () => {
       }),
     )
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const user = userEvent.setup()
     const editor = await openEditForm(user, 'Everyday Checking')
@@ -2368,7 +2653,7 @@ describe('account editing', () => {
       }),
     )
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const user = userEvent.setup()
     const editor = await openEditForm(user, 'Everyday Checking')
@@ -2404,7 +2689,7 @@ describe('account editing', () => {
       }),
     )
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const user = userEvent.setup()
     const editor = await openEditForm(user, 'Everyday Checking')
@@ -2427,7 +2712,7 @@ describe('account editing', () => {
       }),
     )
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const user = userEvent.setup()
     const editor = await openEditForm(user, 'Everyday Checking')
@@ -2487,7 +2772,7 @@ describe('account editing', () => {
         }),
       )
       renderApp('/accounts')
-      await screen.findByText('Everyday Checking')
+      await screen.findAllByText('Everyday Checking')
 
       const user = userEvent.setup()
       const editor = await openEditForm(user, 'Everyday Checking')
@@ -2515,7 +2800,7 @@ describe('account editing', () => {
       }),
     )
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const user = userEvent.setup()
     const editor = await openEditForm(user, 'Everyday Checking')
@@ -2567,7 +2852,7 @@ describe('account editing', () => {
       }),
     )
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const user = userEvent.setup()
     const editor = await openEditForm(user, 'Everyday Checking')
@@ -2600,7 +2885,7 @@ describe('account editing', () => {
       return jsonResponse({}, 404)
     })
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const user = userEvent.setup()
     const editor = await openEditForm(user, 'Everyday Checking')
@@ -2643,7 +2928,7 @@ describe('account editing', () => {
       return jsonResponse({}, 404)
     })
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const user = userEvent.setup()
     const editor = await openEditForm(user, 'Everyday Checking')
@@ -2715,7 +3000,7 @@ describe('account archiving', () => {
   it('shows Archive only on active rows and keeps Edit on archived rows', async () => {
     installFetchMock(authenticatedHandler(() => jsonResponse(editAccounts())))
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     expect(
       within(accountItem('Everyday Checking')).getByRole('button', {
@@ -2744,7 +3029,7 @@ describe('account archiving', () => {
       authenticatedHandler(() => jsonResponse(editAccounts())),
     )
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const user = userEvent.setup()
     const confirm = await openArchiveConfirm(user, 'Everyday Checking')
@@ -2769,7 +3054,7 @@ describe('account archiving', () => {
         name: 'Edit Everyday Checking',
       }),
     ).not.toBeInTheDocument()
-    expect(screen.getAllByRole('listitem')).toHaveLength(3)
+    expect(accountListItems()).toHaveLength(3)
     expect(calls(mock, '/api/auth/csrf/')).toHaveLength(0)
     expect(calls(mock, '/api/accounts/7/', 'DELETE')).toHaveLength(0)
   })
@@ -2779,7 +3064,7 @@ describe('account archiving', () => {
       authenticatedHandler(() => jsonResponse(editAccounts())),
     )
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const user = userEvent.setup()
     const confirm = await openArchiveConfirm(user, 'Everyday Checking')
@@ -2806,7 +3091,7 @@ describe('account archiving', () => {
   it('opening an editor closes an open archive confirmation', async () => {
     installFetchMock(authenticatedHandler(() => jsonResponse(editAccounts())))
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const user = userEvent.setup()
     await openArchiveConfirm(user, 'Everyday Checking')
@@ -2826,7 +3111,7 @@ describe('account archiving', () => {
   it('opening an archive confirmation closes an open editor', async () => {
     installFetchMock(authenticatedHandler(() => jsonResponse(editAccounts())))
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const user = userEvent.setup()
     const editor = await openEditForm(user, 'Everyday Checking')
@@ -2849,7 +3134,7 @@ describe('account archiving', () => {
       }),
     )
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const user = userEvent.setup()
     const confirm = await openArchiveConfirm(user, 'Everyday Checking')
@@ -2888,7 +3173,7 @@ describe('account archiving', () => {
       }),
     )
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const user = userEvent.setup()
     const confirm = await openArchiveConfirm(user, 'Everyday Checking')
@@ -2932,7 +3217,7 @@ describe('account archiving', () => {
       }),
     )
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const user = userEvent.setup()
     const confirm = await openArchiveConfirm(user, 'Everyday Checking')
@@ -2943,14 +3228,16 @@ describe('account archiving', () => {
     await user.keyboard('{Enter}')
 
     await screen.findByText('Account archived.')
-    const summary = screen.getByRole('region', { name: 'Summary' })
-    expect(within(summary).getByText('$0.00')).toBeInTheDocument()
+    const summary = screen.getByRole('region', {
+      name: 'Positive balances · checking, savings & cash',
+    })
+    // Archiving the only positive balance empties the composition chart.
     expect(
-      within(summary).getByText('Ready count').closest('div'),
-    ).toHaveTextContent('1')
-    expect(
-      within(summary).getByText('Archived count').closest('div'),
-    ).toHaveTextContent('2')
+      within(summary).getByText(
+        'No positive checking, savings, or cash balances yet.',
+      ),
+    ).toBeInTheDocument()
+    expect(summary.querySelectorAll('.accounts-legend-item')).toHaveLength(0)
 
     const active = screen.getByRole('region', { name: 'Active accounts' })
     const activeItems = within(active).getAllByRole('listitem')
@@ -2991,7 +3278,7 @@ describe('account archiving', () => {
       }),
     )
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const user = userEvent.setup()
     const confirm = await openArchiveConfirm(user, 'Everyday Checking')
@@ -3023,7 +3310,7 @@ describe('account archiving', () => {
       }),
     )
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const user = userEvent.setup()
     const confirm = await openArchiveConfirm(user, 'Everyday Checking')
@@ -3094,7 +3381,7 @@ describe('account archiving', () => {
         }),
       )
       renderApp('/accounts')
-      await screen.findByText('Everyday Checking')
+      await screen.findAllByText('Everyday Checking')
 
       const user = userEvent.setup()
       const confirm = await openArchiveConfirm(user, 'Everyday Checking')
@@ -3130,7 +3417,7 @@ describe('account archiving', () => {
       }),
     )
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const user = userEvent.setup()
     const confirm = await openArchiveConfirm(user, 'Everyday Checking')
@@ -3162,7 +3449,7 @@ describe('account archiving', () => {
       ),
     )
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const user = userEvent.setup()
     const confirm = await openArchiveConfirm(user, 'Everyday Checking')
@@ -3198,7 +3485,7 @@ describe('account archiving', () => {
       return jsonResponse({}, 404)
     })
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const user = userEvent.setup()
     const confirm = await openArchiveConfirm(user, 'Everyday Checking')
@@ -3244,7 +3531,7 @@ describe('account archiving', () => {
       return jsonResponse({}, 404)
     })
     renderApp('/accounts')
-    await screen.findByText('Everyday Checking')
+    await screen.findAllByText('Everyday Checking')
 
     const user = userEvent.setup()
     const confirm = await openArchiveConfirm(user, 'Everyday Checking')

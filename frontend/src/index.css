@@ -1056,131 +1056,159 @@ a {
   display: grid;
   gap: var(--space-4);
   margin-block-end: var(--space-6);
-  padding: var(--space-6);
+  padding: var(--space-4) var(--space-6);
   border: 1px solid var(--color-border);
   border-radius: 0.75rem;
-  background: var(--color-primary-container);
+  background: var(--color-surface);
 }
 
 .accounts-summary-heading {
   margin: 0;
   font-size: 1rem;
   font-weight: 700;
-}
-
-.accounts-summary-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 2fr) repeat(3, minmax(5rem, 1fr));
-  gap: var(--space-4);
-  margin: 0;
-}
-
-.accounts-summary-total {
-  width: 100%;
-  max-width: 20rem;
-  min-width: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
-  gap: var(--space-1);
-}
-
-.accounts-summary-count {
-  min-width: 0;
-  display: grid;
-  gap: var(--space-1);
-}
-
-.accounts-summary dt {
-  color: var(--color-muted);
-  font-size: 0.8125rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-}
-
-.accounts-summary dd {
-  min-width: 0;
-  margin: 0;
-  font-variant-numeric: tabular-nums;
-  overflow-wrap: anywhere;
-}
-
-.accounts-summary-total-value {
-  grid-column: 2;
-  grid-row: 1;
-  font-size: 1.75rem;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  text-align: end;
-}
-
-.accounts-summary-total-value-negative {
-  color: var(--color-error);
-}
-
-.accounts-summary-count-value {
-  font-size: 1.375rem;
-  font-weight: 700;
-}
-
-.accounts-summary-note {
-  grid-column: 1 / -1;
-  color: var(--color-muted);
-  font-size: 0.8125rem;
+  letter-spacing: -0.01em;
 }
 
 .accounts-chart {
   display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: var(--space-4) var(--space-6);
+  align-items: center;
+}
+
+.accounts-doughnut-figure {
+  min-width: 0;
+  display: grid;
   gap: var(--space-2);
-  padding-block-start: var(--space-3);
-  border-top: 1px solid var(--color-border);
+  justify-items: center;
 }
 
-.accounts-chart-heading {
-  margin: 0;
-  font-size: 0.9375rem;
+.accounts-doughnut {
+  position: relative;
+  width: min(11rem, 100%);
+  margin-inline: auto;
+  aspect-ratio: 1 / 1;
+}
+
+.accounts-doughnut-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.accounts-doughnut-segment {
+  fill: var(--account-seg);
+}
+
+.accounts-doughnut-center {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 0.125rem;
+  /* Bound the overlay to the doughnut hole (inner radius 36 of 120) so centred
+     text can never cross the ring; the padding is a percentage of the
+     doughnut width: (1 - 2 * 36 / 120) / 2 = 20%. */
+  padding: 0 20%;
+  text-align: center;
+  pointer-events: none;
+}
+
+.accounts-doughnut-total {
+  font-size: clamp(0.8125rem, 3.5vw, 1rem);
   font-weight: 700;
-}
-
-.accounts-chart-note,
-.accounts-chart-empty {
-  margin: 0;
-  color: var(--color-muted);
-  font-size: 0.8125rem;
-}
-
-.accounts-chart-rows {
-  display: grid;
-  gap: var(--space-3);
-}
-
-.accounts-chart-row {
-  min-width: 0;
-  display: grid;
-  gap: var(--space-1);
-}
-
-.accounts-chart-label {
-  min-width: 0;
-  margin: 0;
-  font-weight: 600;
   font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
   overflow-wrap: anywhere;
 }
 
-.accounts-chart-bar {
-  height: 0.5rem;
+.accounts-doughnut-total-below {
   margin: 0;
-  border-radius: 9999px;
-  background: var(--color-surface-muted);
-  overflow: hidden;
+  font-size: 0.9375rem;
+  text-align: center;
 }
 
-.accounts-chart-fill {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  background: var(--color-info);
+.accounts-doughnut-label {
+  color: var(--color-muted);
+  font-size: 0.625rem;
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: 0.02em;
+}
+
+.accounts-legend {
+  list-style: none;
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+}
+
+.accounts-legend-item {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-3);
+}
+
+.accounts-legend-swatch {
+  align-self: center;
+  width: 0.625rem;
+  height: 0.625rem;
+  border-radius: 9999px;
+  background: var(--account-seg);
+}
+
+.accounts-legend-name {
+  flex: 1 1 6rem;
+  min-width: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.accounts-legend-amount {
+  margin-inline-start: auto;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.accounts-legend-percent {
+  color: var(--color-muted);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.accounts-chart-empty {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: 0.875rem;
+}
+
+/* A small, restrained palette of existing tokens with no gradients: rust,
+   blue, emerald, navy, then a warm neutral reserved for the aggregated
+   "Other" slice. Each slice also carries its own legend label and exact
+   amount, so color is never the only key. */
+.accounts-seg-0 {
+  --account-seg: var(--color-accent);
+}
+
+.accounts-seg-1 {
+  --account-seg: var(--color-info);
+}
+
+.accounts-seg-2 {
+  --account-seg: var(--color-positive);
+}
+
+.accounts-seg-3 {
+  --account-seg: var(--color-text);
+}
+
+.accounts-seg-4 {
+  --account-seg: var(--color-muted);
 }
 
 .accounts-layout {
@@ -1439,23 +1467,11 @@ a {
   .accounts-summary {
     padding: var(--space-4);
   }
-
-  .accounts-summary-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .accounts-summary-total {
-    grid-column: 1 / -1;
-  }
 }
 
 @media (max-width: 34rem) {
-  .accounts-summary-grid {
+  .accounts-chart {
     grid-template-columns: 1fr;
-  }
-
-  .accounts-summary-total {
-    grid-column: auto;
   }
 }
 
@@ -2011,12 +2027,6 @@ a {
   border: 1px solid var(--color-border);
   border-radius: 0.75rem;
   background: var(--color-surface);
-}
-
-.cash-flow-note {
-  margin: var(--space-4) 0;
-  color: var(--color-muted);
-  font-size: 0.875rem;
 }
 
 .cash-flow-ledger-link {

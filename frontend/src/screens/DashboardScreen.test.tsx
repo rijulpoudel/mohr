@@ -201,7 +201,7 @@ describe('dashboard summary', () => {
     const nav = screen.getByRole('navigation', { name: 'Primary' })
     await user.click(within(nav).getByRole('link', { name: 'Accounts' }))
 
-    expect(await screen.findByText('Everyday Checking')).toBeInTheDocument()
+    expect(await screen.findAllByText('Everyday Checking')).not.toHaveLength(0)
     expect(window.location.pathname).toBe('/accounts')
 
     await act(async () => {
@@ -214,7 +214,7 @@ describe('dashboard summary', () => {
     })
 
     expect(window.location.pathname).toBe('/accounts')
-    expect(screen.getByText('Everyday Checking')).toBeInTheDocument()
+    expect(screen.getAllByText('Everyday Checking').length).toBeGreaterThan(0)
     expect(
       screen.getByRole('navigation', { name: 'Primary' }),
     ).toBeInTheDocument()
