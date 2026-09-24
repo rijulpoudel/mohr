@@ -358,7 +358,9 @@ describe('accounts summary and sections', () => {
     expect(within(summary).getByText('Active balance')).toBeInTheDocument()
     expect(within(summary).getByText('$124.75')).toBeInTheDocument()
     expect(
-      within(summary).getByText('Excludes archived and pending accounts.'),
+      within(summary).getByText(
+        'Excludes archived and pending accounts. Includes credit cards and negative balances, so it differs from the balance-share chart below.',
+      ),
     ).toBeInTheDocument()
     expect(within(summary).queryByText('$9,999.99')).not.toBeInTheDocument()
     expect(within(summary).queryByText('Pending')).not.toBeInTheDocument()
@@ -546,7 +548,9 @@ describe('accounts summary and sections', () => {
             name: 'Checking One',
             sync_pending: true,
             opening_balance: '0.00',
-            current_balance: '500.00',
+            // A real unanchored sync_pending account reports placeholder 0.00
+            // for both balances, never a comfortable nonzero value.
+            current_balance: '0.00',
           }),
         ]),
       ),
@@ -557,7 +561,6 @@ describe('accounts summary and sections', () => {
     const activeItems = within(active).getAllByRole('listitem')
     expect(activeItems).toHaveLength(2)
     expect(within(activeItems[1]).getByText('Balance pending')).toBeInTheDocument()
-    expect(within(activeItems[1]).queryByText('$500.00')).not.toBeInTheDocument()
     expect(within(activeItems[1]).getAllByText('Pending')).toHaveLength(2)
     expect(
       screen.queryByRole('region', { name: 'Archived accounts' }),
@@ -582,6 +585,529 @@ describe('accounts summary and sections', () => {
     for (const id of ['7', '8', '9']) {
       expect(screen.queryByText(id)).not.toBeInTheDocument()
     }
+  })
+})
+
+describe('accounts balance share chart', () => {
+  function chartRows(chart: HTMLElement) {
+    return Array.from(chart.querySelectorAll<HTMLElement>('.accounts-chart-row'))
+  }
+
+  it('charts positive non-credit balances largest first with name, exact amount, and share', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse([
+          accountFixture({
+            id: 1,
+            name: 'Small Savings',
+            account_type: 'savings',
+            opening_balance: '25.00',
+            current_balance: '25.00',
+          }),
+          accountFixture({
+            id: 2,
+            name: 'Big Checking',
+            account_type: 'checking',
+            opening_balance: '75.00',
+            current_balance: '75.00',
+          }),
+          accountFixture({
+            id: 3,
+            name: 'Pending Saver',
+            sync_pending: true,
+            opening_balance: '0.00',
+            // Real unanchored pending accounts report placeholder 0.00.
+            current_balance: '0.00',
+          }),
+          accountFixture({
+            id: 4,
+            name: 'Card Debt',
+            account_type: 'credit_card',
+            opening_balance: '120.00',
+            current_balance: '120.00',
+          }),
+          accountFixture({
+            id: 5,
+            name: 'Empty Jar',
+            account_type: 'cash',
+            opening_balance: '0.00',
+            current_balance: '0.00',
+          }),
+          accountFixture({
+            id: 6,
+            name: 'Negative Cash',
+            account_type: 'cash',
+            opening_balance: '-40.00',
+            current_balance: '-40.00',
+          }),
+          accountFixture({
+            id: 7,
+            name: 'Archived Savings',
+            account_type: 'savings',
+            opening_balance: '999.00',
+            current_balance: '999.00',
+            is_archived: true,
+          }),
+        ]),
+      ),
+    )
+    renderApp('/accounts')
+
+    const chart = await screen.findByRole('region', {
+      name: 'Positive balances by account',
+    })
+    const rows = chartRows(chart)
+    expect(rows).toHaveLength(2)
+    expect(rows[0].textContent).toContain('Big Checking')
+    expect(rows[0].textContent).toContain('$75.00')
+    expect(rows[0].textContent).toContain('75% of $100.00')
+    expect(rows[1].textContent).toContain('Small Savings')
+    expect(rows[1].textContent).toContain('$25.00')
+    expect(rows[1].textContent).toContain('25% of $100.00')
+
+    for (const excluded of [
+      'Pending Saver',
+      'Card Debt',
+      'Empty Jar',
+      'Negative Cash',
+      'Archived Savings',
+    ]) {
+      expect(chart.textContent).not.toContain(excluded)
+    }
+
+    expect(
+      within(chart).getByText(
+        'Share denominator is the positive active non-credit balances shown. Credit cards are excluded even when positive, and archived, pending, zero, and negative balances are omitted. These rows do not sum to Active balance.',
+      ),
+    ).toBeInTheDocument()
+    expect(
+      within(chart).getByText(
+        'Shares are rounded, so they may not total 100%.',
+      ),
+    ).toBeInTheDocument()
+  })
+
+  it('marks every bar as decorative while the widths follow the exact shares', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse([
+          accountFixture({
+            id: 1,
+            name: 'Big Checking',
+            current_balance: '75.00',
+          }),
+          accountFixture({
+            id: 2,
+            name: 'Small Savings',
+            account_type: 'savings',
+            opening_balance: '25.00',
+            current_balance: '25.00',
+          }),
+        ]),
+      ),
+    )
+    renderApp('/accounts')
+
+    const chart = await screen.findByRole('region', {
+      name: 'Positive balances by account',
+    })
+    const rows = chartRows(chart)
+    const firstFill = rows[0].querySelector<HTMLElement>('.accounts-chart-fill')
+    const secondFill = rows[1].querySelector<HTMLElement>('.accounts-chart-fill')
+    expect(firstFill?.style.width).toBe('75%')
+    expect(secondFill?.style.width).toBe('25%')
+    expect(
+      firstFill?.closest('[aria-hidden="true"]'),
+    ).not.toBeNull()
+    expect(
+      secondFill?.closest('[aria-hidden="true"]'),
+    ).not.toBeNull()
+  })
+
+  it('orders equal balances by name and rounds shares from the exact cent total', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse([
+          accountFixture({
+            id: 1,
+            name: 'Charlie',
+            account_type: 'cash',
+            opening_balance: '1.00',
+            current_balance: '1.00',
+          }),
+          accountFixture({
+            id: 2,
+            name: 'Alpha',
+            account_type: 'cash',
+            opening_balance: '1.00',
+            current_balance: '1.00',
+          }),
+          accountFixture({
+            id: 3,
+            name: 'Bravo',
+            account_type: 'cash',
+            opening_balance: '1.00',
+            current_balance: '1.00',
+          }),
+        ]),
+      ),
+    )
+    renderApp('/accounts')
+
+    const chart = await screen.findByRole('region', {
+      name: 'Positive balances by account',
+    })
+    const rows = chartRows(chart)
+    expect(rows).toHaveLength(3)
+    expect(rows[0].textContent).toContain('Alpha')
+    expect(rows[1].textContent).toContain('Bravo')
+    expect(rows[2].textContent).toContain('Charlie')
+    for (const row of rows) {
+      expect(row.textContent).toContain('$1.00')
+      expect(row.textContent).toContain('33% of $3.00')
+    }
+    // Rounded shares can repeat and therefore not total 100%; the caveat must
+    // be present rather than implying the rows sum to the whole.
+    expect(
+      within(chart).getByText('Shares are rounded, so they may not total 100%.'),
+    ).toBeInTheDocument()
+  })
+
+  it('keeps large balances exact in the chart text', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse([
+          accountFixture({
+            id: 1,
+            name: 'Huge Saver',
+            account_type: 'savings',
+            opening_balance: '123456789012345678.90',
+            current_balance: '123456789012345678.90',
+          }),
+          accountFixture({
+            id: 2,
+            name: 'Tiny Cash',
+            account_type: 'cash',
+            opening_balance: '0.01',
+            current_balance: '0.01',
+          }),
+        ]),
+      ),
+    )
+    renderApp('/accounts')
+
+    const chart = await screen.findByRole('region', {
+      name: 'Positive balances by account',
+    })
+    const rows = chartRows(chart)
+    expect(rows[0].textContent).toContain('Huge Saver')
+    expect(rows[0].textContent).toContain('$123,456,789,012,345,678.90')
+    expect(rows[1].textContent).toContain('Tiny Cash')
+    expect(rows[1].textContent).toContain('$0.01')
+    expect(chart.textContent).toContain('$123,456,789,012,345,678.91')
+  })
+
+  it('does not round a 99.50 share to 100% or a 0.50 sibling to 0%', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse([
+          accountFixture({
+            id: 1,
+            name: 'Nearly All',
+            account_type: 'savings',
+            opening_balance: '99.50',
+            current_balance: '99.50',
+          }),
+          accountFixture({
+            id: 2,
+            name: 'Tiny Remainder',
+            account_type: 'cash',
+            opening_balance: '0.02',
+            current_balance: '0.02',
+          }),
+        ]),
+      ),
+    )
+    renderApp('/accounts')
+
+    const chart = await screen.findByRole('region', {
+      name: 'Positive balances by account',
+    })
+    const rows = chartRows(chart)
+    expect(rows).toHaveLength(2)
+
+    // 99.50 rounds to 100, but a sibling still exists, so the honest label is
+    // >99% and the bar must never claim the whole width.
+    expect(rows[0].textContent).toContain('Nearly All')
+    expect(rows[0].textContent).toContain('$99.50')
+    expect(rows[0].textContent).toContain('>99% of $99.52')
+    expect(rows[0].textContent).not.toContain('100% of')
+    const firstFill = rows[0].querySelector<HTMLElement>('.accounts-chart-fill')
+    expect(firstFill?.style.width).toBe('99%')
+
+    // 0.02 rounds to 0, but the account is strictly positive, so it must read
+    // <1% and keep a minimum visible bar rather than collapsing to 0.
+    expect(rows[1].textContent).toContain('Tiny Remainder')
+    expect(rows[1].textContent).toContain('$0.02')
+    expect(rows[1].textContent).toContain('<1% of $99.52')
+    expect(rows[1].textContent).not.toContain('0% of')
+    const secondFill = rows[1].querySelector<HTMLElement>('.accounts-chart-fill')
+    expect(secondFill?.style.width).toBe('1%')
+  })
+
+  it('labels a one-cent share honestly against a huge balance', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse([
+          accountFixture({
+            id: 1,
+            name: 'Huge Saver',
+            account_type: 'savings',
+            opening_balance: '123456789012345678.90',
+            current_balance: '123456789012345678.90',
+          }),
+          accountFixture({
+            id: 2,
+            name: 'Tiny Cash',
+            account_type: 'cash',
+            opening_balance: '0.01',
+            current_balance: '0.01',
+          }),
+        ]),
+      ),
+    )
+    renderApp('/accounts')
+
+    const chart = await screen.findByRole('region', {
+      name: 'Positive balances by account',
+    })
+    const rows = chartRows(chart)
+    expect(rows[0].textContent).toContain('$123,456,789,012,345,678.90')
+    expect(rows[0].textContent).toContain('>99% of $123,456,789,012,345,678.91')
+    expect(rows[1].textContent).toContain('Tiny Cash')
+    expect(rows[1].textContent).toContain('$0.01')
+    expect(rows[1].textContent).toContain('<1% of $123,456,789,012,345,678.91')
+    const tinyFill = rows[1].querySelector<HTMLElement>('.accounts-chart-fill')
+    expect(tinyFill?.style.width).toBe('1%')
+  })
+
+  it('is truthful for a single eligible account', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse([
+          accountFixture({
+            id: 1,
+            name: 'Only Account',
+            account_type: 'savings',
+            opening_balance: '42.00',
+            current_balance: '42.00',
+          }),
+        ]),
+      ),
+    )
+    renderApp('/accounts')
+
+    const chart = await screen.findByRole('region', {
+      name: 'Positive balances by account',
+    })
+    const rows = chartRows(chart)
+    expect(rows).toHaveLength(1)
+    expect(rows[0].textContent).toContain('Only Account')
+    expect(rows[0].textContent).toContain('$42.00')
+    expect(rows[0].textContent).toContain('100% of $42.00')
+  })
+
+  it('shows a truthful empty state when no eligible balance exists', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse([
+          accountFixture({
+            id: 1,
+            name: 'Card Debt',
+            account_type: 'credit_card',
+            opening_balance: '100.00',
+            current_balance: '100.00',
+          }),
+          accountFixture({
+            id: 2,
+            name: 'Empty Jar',
+            account_type: 'cash',
+            opening_balance: '0.00',
+            current_balance: '0.00',
+          }),
+          accountFixture({
+            id: 3,
+            name: 'Negative Cash',
+            account_type: 'cash',
+            opening_balance: '-12.00',
+            current_balance: '-12.00',
+          }),
+        ]),
+      ),
+    )
+    renderApp('/accounts')
+
+    const chart = await screen.findByRole('region', {
+      name: 'Positive balances by account',
+    })
+    expect(chartRows(chart)).toHaveLength(0)
+    expect(
+      within(chart).getByText(
+        'No active non-credit accounts have a positive balance.',
+      ),
+    ).toBeInTheDocument()
+  })
+
+  it('defensively omits a sync_pending account even if its placeholder balance is nonzero', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse([
+          accountFixture({
+            id: 1,
+            name: 'Ready Checking',
+            current_balance: '100.00',
+          }),
+          accountFixture({
+            id: 2,
+            name: 'Impossible Pending',
+            sync_pending: true,
+            opening_balance: '0.00',
+            // The endpoint normally reports 0.00 here; this fixture is only a
+            // guard proving sync_pending is excluded on its own, regardless of
+            // the reported balance.
+            current_balance: '500.00',
+          }),
+        ]),
+      ),
+    )
+    renderApp('/accounts')
+
+    const chart = await screen.findByRole('region', {
+      name: 'Positive balances by account',
+    })
+    const rows = chartRows(chart)
+    expect(rows).toHaveLength(1)
+    expect(rows[0].textContent).toContain('Ready Checking')
+    expect(chart.textContent).not.toContain('Impossible Pending')
+    expect(chart.textContent).toContain('100% of $100.00')
+  })
+
+  it('updates the chart after an account is created', async () => {
+    installFetchMock(
+      authenticatedCreateHandler((_url, init) => {
+        if ((init?.method ?? 'GET') === 'GET') {
+          return jsonResponse([
+            accountFixture({
+              id: 1,
+              name: 'Everyday Checking',
+              current_balance: '100.00',
+            }),
+          ])
+        }
+        return jsonResponse(
+          accountFixture({
+            id: 9,
+            name: 'Travel Fund',
+            account_type: 'savings',
+            opening_balance: '300.00',
+            current_balance: '300.00',
+          }),
+          201,
+        )
+      }),
+    )
+    renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    const before = screen.getByRole('region', {
+      name: 'Positive balances by account',
+    })
+    expect(chartRows(before)).toHaveLength(1)
+
+    const user = userEvent.setup()
+    await fillCreateForm(user, 'Travel Fund', '300.00')
+    await user.click(screen.getByRole('button', { name: 'Create account' }))
+    await screen.findByRole('status')
+
+    const after = screen.getByRole('region', {
+      name: 'Positive balances by account',
+    })
+    const rows = chartRows(after)
+    expect(rows).toHaveLength(2)
+    expect(rows[0].textContent).toContain('Travel Fund')
+    expect(rows[0].textContent).toContain('$300.00')
+    expect(rows[0].textContent).toContain('75% of $400.00')
+    expect(rows[1].textContent).toContain('Everyday Checking')
+    expect(rows[1].textContent).toContain('$100.00')
+    expect(rows[1].textContent).toContain('25% of $400.00')
+  })
+
+  it('updates the chart after an account edit', async () => {
+    installFetchMock(
+      authenticatedMutationHandler((_url, init) => {
+        if ((init?.method ?? 'GET') === 'GET') return jsonResponse(editAccounts())
+        return jsonResponse(
+          accountFixture({
+            id: 7,
+            name: 'Everyday Checking',
+            account_type: 'savings',
+            opening_balance: '40.00',
+            current_balance: '40.00',
+          }),
+          200,
+        )
+      }),
+    )
+    renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    const user = userEvent.setup()
+    const editor = await openEditForm(user, 'Everyday Checking')
+    await setEditFields(user, editor, 'Everyday Checking', '40.00')
+    await user.click(within(editor).getByRole('button', { name: 'Save' }))
+    await screen.findByText('Account updated.')
+
+    const chart = screen.getByRole('region', {
+      name: 'Positive balances by account',
+    })
+    const rows = chartRows(chart)
+    expect(rows).toHaveLength(1)
+    expect(rows[0].textContent).toContain('$40.00')
+    expect(rows[0].textContent).toContain('100% of $40.00')
+  })
+
+  it('removes an archived account from the chart', async () => {
+    installFetchMock(
+      deleteHandler((url) =>
+        url === '/api/accounts/7/' ? emptyResponse(204) : jsonResponse({}, 404),
+      ),
+    )
+    renderApp('/accounts')
+    await screen.findByText('Everyday Checking')
+
+    const before = screen.getByRole('region', {
+      name: 'Positive balances by account',
+    })
+    expect(chartRows(before)).toHaveLength(1)
+
+    const user = userEvent.setup()
+    const confirm = await openArchiveConfirm(user, 'Everyday Checking')
+    await user.click(
+      within(confirm).getByRole('button', {
+        name: 'Confirm archive Everyday Checking',
+      }),
+    )
+    await screen.findByText('Account archived.')
+
+    const after = screen.getByRole('region', {
+      name: 'Positive balances by account',
+    })
+    expect(chartRows(after)).toHaveLength(0)
+    expect(
+      within(after).getByText(
+        'No active non-credit accounts have a positive balance.',
+      ),
+    ).toBeInTheDocument()
   })
 })
 

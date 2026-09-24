@@ -9,7 +9,13 @@ import {
 } from '../api/accounts'
 import { ApiError, userMessage, type FieldErrors } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
-import { formatMoney, isDecimalString, sumMoney } from '../format/money'
+import {
+  clampedPercent,
+  decimalToCents,
+  formatMoney,
+  isDecimalString,
+  sumMoney,
+} from '../format/money'
 
 const GENERIC_ERROR_MESSAGE = 'Something went wrong. Please try again.'
 const FIELD_ERROR_SUMMARY = 'Please check the highlighted fields.'
@@ -110,6 +116,60 @@ function isNegative(value: string): boolean {
 
 function sectionCountLabel(count: number): string {
   return count === 1 ? '1 account' : `${count} accounts`
+}
+
+const BALANCE_SHARE_HEADING = 'Positive balances by account'
+// This chart is deliberately narrower than the Active balance metric above it.
+// Active balance includes credit-card and negative balances; the chart measures
+// a different question, so its denominator is only the positive active
+// non-credit balances. The note states that plainly and never implies the
+// chart rows sum to Active balance, net worth, or money available to spend.
+const BALANCE_SHARE_NOTE =
+  'Share denominator is the positive active non-credit balances shown. Credit cards are excluded even when positive, and archived, pending, zero, and negative balances are omitted. These rows do not sum to Active balance.'
+const BALANCE_SHARE_ROUNDING =
+  'Shares are rounded, so they may not total 100%.'
+const BALANCE_SHARE_MIN_BAR =
+  'A positive share that rounds to 0% is shown as <1% with a minimum visible bar.'
+const BALANCE_SHARE_EMPTY =
+  'No active non-credit accounts have a positive balance.'
+
+// Shared clampedPercent intentionally stays generic. This chart needs an honest
+// display for the rounding edges: a strictly positive balance must never be
+// labelled 0%, and a balance smaller than its siblings must never be labelled
+// 100%. The exact bigint amounts and denominator are unchanged; only the label
+// and the decorative bar width are adjusted here, locally.
+function balanceShareDisplay(
+  amount: string,
+  total: string,
+  hasSiblings: boolean,
+): { label: string; widthPercent: number } {
+  const percent = clampedPercent(amount, total)
+  if (percent === 0) return { label: '<1%', widthPercent: 1 }
+  if (hasSiblings && percent === 100) return { label: '>99%', widthPercent: 99 }
+  return { label: `${percent}%`, widthPercent: percent }
+}
+
+// The share chart answers one question: which active non-credit accounts hold
+// positive balances. Archived, balance-pending, credit-card, and zero or
+// negative balances cannot answer it, so they are filtered out before the
+// exact cent total is computed. Sorting is deterministic: largest balance
+// first, then account name, then id, so equal balances never reorder randomly.
+function eligibleBalanceAccounts(accounts: Account[]): Account[] {
+  return accounts
+    .filter(
+      (account) =>
+        !account.is_archived &&
+        !account.sync_pending &&
+        account.account_type !== 'credit_card' &&
+        decimalToCents(account.current_balance) > 0n,
+    )
+    .sort((a, b) => {
+      const difference =
+        decimalToCents(b.current_balance) - decimalToCents(a.current_balance)
+      if (difference !== 0n) return difference > 0n ? 1 : -1
+      if (a.name !== b.name) return a.name < b.name ? -1 : 1
+      return a.id - b.id
+    })
 }
 
 function EditAccountForm({
@@ -716,6 +776,10 @@ function AccountsSummary({
   const pending = accounts.filter((account) => !account.is_archived && account.sync_pending)
   const archived = accounts.filter((account) => account.is_archived)
   const activeBalance = sumMoney(ready.map((account) => account.current_balance))
+  const balanceShareAccounts = eligibleBalanceAccounts(accounts)
+  const balanceShareTotal = sumMoney(
+    balanceShareAccounts.map((account) => account.current_balance),
+  )
   return (
     <section
       className="accounts-summary"
@@ -737,7 +801,8 @@ function AccountsSummary({
             {formatMoney(activeBalance)}
           </dd>
           <dd className="accounts-summary-note">
-            Excludes archived and pending accounts.
+            Excludes archived and pending accounts. Includes credit cards and
+            negative balances, so it differs from the balance-share chart below.
           </dd>
         </div>
         <div className="accounts-summary-count">
@@ -753,6 +818,46 @@ function AccountsSummary({
           <dd className="accounts-summary-count-value">{archived.length}</dd>
         </div>
       </dl>
+      <section
+        className="accounts-chart"
+        aria-labelledby="accounts-chart-heading"
+      >
+        <h3 id="accounts-chart-heading" className="accounts-chart-heading">
+          {BALANCE_SHARE_HEADING}
+        </h3>
+        <p className="accounts-chart-note">{BALANCE_SHARE_NOTE}</p>
+        {balanceShareAccounts.length === 0 ? (
+          <p className="accounts-chart-empty">{BALANCE_SHARE_EMPTY}</p>
+        ) : (
+          <>
+            <p className="accounts-chart-note">{BALANCE_SHARE_ROUNDING}</p>
+            <p className="accounts-chart-note">{BALANCE_SHARE_MIN_BAR}</p>
+            <div className="accounts-chart-rows">
+              {balanceShareAccounts.map((account) => {
+                const display = balanceShareDisplay(
+                  account.current_balance,
+                  balanceShareTotal,
+                  balanceShareAccounts.length > 1,
+                )
+                return (
+                  <div className="accounts-chart-row" key={account.id}>
+                    <p className="accounts-chart-label">
+                      {account.name} · {formatMoney(account.current_balance)} ·{' '}
+                      {display.label} of {formatMoney(balanceShareTotal)}
+                    </p>
+                    <div className="accounts-chart-bar" aria-hidden="true">
+                      <span
+                        className="accounts-chart-fill"
+                        style={{ width: `${display.widthPercent}%` }}
+                      />
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </>
+        )}
+      </section>
     </section>
   )
 }

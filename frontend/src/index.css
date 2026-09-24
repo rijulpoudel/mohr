@@ -1129,6 +1129,60 @@ a {
   font-size: 0.8125rem;
 }
 
+.accounts-chart {
+  display: grid;
+  gap: var(--space-2);
+  padding-block-start: var(--space-3);
+  border-top: 1px solid var(--color-border);
+}
+
+.accounts-chart-heading {
+  margin: 0;
+  font-size: 0.9375rem;
+  font-weight: 700;
+}
+
+.accounts-chart-note,
+.accounts-chart-empty {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: 0.8125rem;
+}
+
+.accounts-chart-rows {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.accounts-chart-row {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-1);
+}
+
+.accounts-chart-label {
+  min-width: 0;
+  margin: 0;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.accounts-chart-bar {
+  height: 0.5rem;
+  margin: 0;
+  border-radius: 9999px;
+  background: var(--color-surface-muted);
+  overflow: hidden;
+}
+
+.accounts-chart-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--color-info);
+}
+
 .accounts-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 20rem;
