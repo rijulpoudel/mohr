@@ -778,6 +778,241 @@ a {
   margin-block-start: var(--space-3);
 }
 
+/* Transactions redesign (issue 57). Scoped .transactions-* selectors carry
+   the new visual design on top of the same class hooks; the legacy
+   .transaction-* rules keep their meaning untouched. */
+
+.transactions-toolbar {
+  border-radius: 0.75rem;
+}
+
+.transactions-toolbar .form-field {
+  margin: 0;
+}
+
+.transactions-clear-filters {
+  justify-self: start;
+  align-self: end;
+  min-height: 2.75rem;
+  white-space: nowrap;
+}
+
+.transactions-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: var(--space-6);
+  row-gap: var(--space-1);
+  margin-block-end: var(--space-6);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: 0.75rem;
+  background: var(--color-surface);
+}
+
+.transactions-summary p {
+  margin: 0;
+}
+
+.transactions-summary-count {
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+.transactions-summary-money {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.transactions-summary-money-in {
+  color: var(--color-positive);
+}
+
+.transactions-summary-money-out {
+  color: var(--color-brand);
+}
+
+.transactions-summary-caption {
+  flex-basis: 100%;
+  color: var(--color-muted);
+  font-size: 0.75rem;
+}
+
+.transactions-month + .transactions-month {
+  margin-block-start: var(--space-8);
+}
+
+.transactions-month h3 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.transactions-month-subtotal {
+  margin: var(--space-1) 0 var(--space-3);
+  color: var(--color-muted);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.transactions-month > ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.transactions-list .transaction-main {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-areas:
+    'mark identity'
+    'mark amount';
+  align-items: center;
+  column-gap: var(--space-3);
+}
+
+.transactions-mark {
+  grid-area: mark;
+  display: inline-flex;
+  width: 1.75rem;
+  height: 1.75rem;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: var(--radius-1);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.transactions-mark-income {
+  background: var(--color-surface-muted);
+  color: var(--color-positive);
+}
+
+.transactions-mark-expense {
+  background: var(--color-primary-container);
+  color: var(--color-accent);
+}
+
+.transactions-identity {
+  grid-area: identity;
+  min-width: 0;
+  display: grid;
+  gap: 0.125rem;
+}
+
+.transactions-title {
+  min-width: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.transactions-list .transaction-type {
+  color: var(--color-muted);
+  font-size: 0.75rem;
+}
+
+.transactions-list .transaction-amount {
+  grid-area: amount;
+  justify-self: end;
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.transactions-list .transaction-meta {
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+}
+
+.transactions-list .transaction-note {
+  margin: 0;
+}
+
+.transactions-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 var(--space-2);
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.6;
+}
+
+.transactions-badge-synced {
+  background: var(--color-surface-muted);
+  color: var(--color-info);
+}
+
+.transactions-badge-pending {
+  background: var(--color-surface-muted);
+  color: var(--color-accent);
+}
+
+.transactions-badge-importing {
+  background: var(--color-primary-container);
+  color: var(--color-accent);
+}
+
+.transactions-status {
+  margin-block-end: var(--space-6);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: 0.75rem;
+  background: var(--color-surface);
+  color: var(--color-muted);
+}
+
+.transactions-error {
+  margin-block-end: var(--space-6);
+  padding: var(--space-4);
+  border: 1px solid var(--color-error);
+  border-radius: 0.75rem;
+  background: var(--color-surface);
+}
+
+.transactions-error p {
+  margin: 0 0 var(--space-3);
+}
+
+.transactions-error p:only-child {
+  margin: 0;
+}
+
+.transactions-empty {
+  margin-block-start: 0;
+  padding: var(--space-6);
+  border: 1px dashed var(--color-border);
+  border-radius: 0.75rem;
+  color: var(--color-muted);
+  max-width: none;
+}
+
+.transactions-retention-note {
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: 0.75rem;
+  background: var(--color-surface);
+}
+
+.transactions-create {
+  padding: var(--space-6);
+  border: 1px solid var(--color-border);
+  border-radius: 0.75rem;
+  background: var(--color-surface);
+}
+
+@media (max-width: 36rem) {
+  .transactions-summary {
+    column-gap: var(--space-4);
+  }
+
+  .transactions-create {
+    padding: var(--space-4);
+  }
+}
+
 .btn-edit,
 .btn-delete {
   min-width: 2.75rem;
