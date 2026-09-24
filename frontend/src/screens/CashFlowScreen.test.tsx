@@ -192,12 +192,36 @@ describe('cash flow screen states', () => {
     within(expenseRegion).getByText('40% of money out')
 
     expect(
-      screen.getByText(
-        'Only settled transactions count. Pending or still-importing bank transactions are excluded from these figures.',
-      ),
-    ).toBeInTheDocument()
+      screen.queryByText(/Only settled transactions count/),
+    ).not.toBeInTheDocument()
     const ledger = screen.getByRole('link', { name: 'Open the full ledger' })
     expect(ledger).toHaveAttribute('href', '/transactions')
+  })
+
+  it('keeps the settled-only empty state without the verbose exclusion paragraph', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse(
+          cashFlowFixture({
+            income: '0.00',
+            expenses: '0.00',
+            net: '0.00',
+            transaction_count: 0,
+            income_categories: [],
+            expense_categories: [],
+          }),
+        ),
+      ),
+    )
+    renderApp('/cash-flow')
+
+    expect(
+      await screen.findByText('No settled activity in September 2026 yet.'),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByText(/Pending or still-importing bank transactions/),
+    ).not.toBeInTheDocument()
+    expect(screen.queryByText(/Only settled transactions count/)).not.toBeInTheDocument()
   })
 
   it('renders the exact category order the server returned without re-sorting', async () => {

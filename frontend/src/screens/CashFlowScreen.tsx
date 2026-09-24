@@ -12,9 +12,6 @@ import { clampedPercent, decimalToCents, formatMoney } from '../format/money'
 
 const GENERIC_ERROR_MESSAGE = 'Something went wrong. Please try again.'
 
-const PENDING_NOTE =
-  'Only settled transactions count. Pending or still-importing bank transactions are excluded from these figures.'
-
 type SummaryState =
   | { status: 'loading' }
   | { status: 'idle' }
@@ -300,7 +297,6 @@ export function CashFlowScreen() {
       {state.status === 'ready' && (
         <CashFlowSummaryPanel summary={state.summary} />
       )}
-      <p className="cash-flow-note">{PENDING_NOTE}</p>
       <Link to="/transactions" className="cash-flow-ledger-link">
         Open the full ledger
       </Link>
