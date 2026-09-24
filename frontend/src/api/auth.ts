@@ -11,10 +11,12 @@ function requestRestore(): Promise<User> {
 
 export function restoreSession(): Promise<User> {
   if (inFlightRestore === null) {
-    const request = requestRestore()
-    inFlightRestore = request.finally(() => {
-      inFlightRestore = null
+    const request = requestRestore().finally(() => {
+      if (inFlightRestore === request) {
+        inFlightRestore = null
+      }
     })
+    inFlightRestore = request
   }
   return inFlightRestore
 }

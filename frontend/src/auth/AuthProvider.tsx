@@ -6,6 +6,7 @@ import {
   type ReactNode,
 } from 'react'
 import { loginRequest, logoutRequest, registerRequest, restoreSession } from '../api/auth'
+import { resetApiRequests } from '../api/resetRequests'
 import { ApiError, type User } from '../api/types'
 import { AuthContext, type AuthContextValue, type AuthStatus } from './AuthContext'
 
@@ -28,6 +29,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .catch((error: unknown) => {
         if (cancelled) return
         if (error instanceof ApiError && error.status === 401) {
+          resetApiRequests()
           setUser(null)
           setStatus('unauthenticated')
         } else {
@@ -48,6 +50,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(async (email: string, password: string) => {
     const authenticated = await loginRequest(email, password)
+    resetApiRequests()
     setUser(authenticated)
     setStatus('authenticated')
   }, [])
@@ -58,11 +61,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = useCallback(async () => {
     await logoutRequest()
+    resetApiRequests()
     setUser(null)
     setStatus('unauthenticated')
   }, [])
 
   const clearSession = useCallback(() => {
+    resetApiRequests()
     setUser(null)
     setStatus('unauthenticated')
   }, [])

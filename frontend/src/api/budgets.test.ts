@@ -7,9 +7,11 @@ import {
   updateBudget,
 } from './budgets'
 import type { BudgetInput } from './budgets'
+import { resetApiRequests } from './resetRequests'
 import { ApiError } from './types'
 import {
   calls,
+  deferred,
   emptyResponse,
   installFetchMock,
   jsonResponse,
@@ -318,6 +320,53 @@ describe('fetchBudgets', () => {
     const second = fetchBudgets()
     expect(await first).toHaveLength(1)
     expect(await second).toHaveLength(1)
+    expect(callsCount).toBe(2)
+  })
+
+  it('starts a fresh request after resetApiRequests clears the in-flight entry', async () => {
+    let callsCount = 0
+    installFetchMock((url) => {
+      if (url === '/api/budgets/') {
+        callsCount += 1
+        return jsonResponse([budgetFixture()])
+      }
+      return jsonResponse({}, 404)
+    })
+
+    const first = fetchBudgets()
+    resetApiRequests()
+    const second = fetchBudgets()
+    expect(await first).toHaveLength(1)
+    expect(await second).toHaveLength(1)
+    expect(callsCount).toBe(2)
+  })
+
+  it('does not let a superseded request clear the newer map entry after reset', async () => {
+    let callsCount = 0
+    const firstResponse = deferred<Response>()
+    const secondResponse = deferred<Response>()
+    installFetchMock((url) => {
+      if (url === '/api/budgets/') {
+        callsCount += 1
+        if (callsCount === 1) return firstResponse.promise
+        return secondResponse.promise
+      }
+      return jsonResponse({}, 404)
+    })
+
+    const first = fetchBudgets()
+    resetApiRequests()
+    const second = fetchBudgets()
+    expect(callsCount).toBe(2)
+
+    firstResponse.resolve(jsonResponse([budgetFixture()]))
+    await first
+
+    const third = fetchBudgets()
+    expect(callsCount).toBe(2)
+    secondResponse.resolve(jsonResponse([budgetFixture()]))
+    expect(await second).toHaveLength(1)
+    expect(await third).toHaveLength(1)
     expect(callsCount).toBe(2)
   })
 

@@ -4,9 +4,11 @@ import {
   parseDashboardSummary,
   resetDashboardRequest,
 } from './dashboard'
+import { resetApiRequests } from './resetRequests'
 import { ApiError } from './types'
 import {
   calls,
+  deferred,
   emptyResponse,
   installFetchMock,
   jsonResponse,
@@ -373,6 +375,53 @@ describe('fetchDashboardSummary', () => {
     await fetchDashboardSummary()
     expect(callsCount).toBe(2)
     expect(calls(mock, '/api/dashboard/summary/')).toHaveLength(2)
+  })
+
+  it('starts a fresh request after resetApiRequests clears the in-flight entry', async () => {
+    let callsCount = 0
+    installFetchMock((url) => {
+      if (url === '/api/dashboard/summary/') {
+        callsCount += 1
+        return jsonResponse(summaryFixture())
+      }
+      return jsonResponse({}, 404)
+    })
+
+    const first = fetchDashboardSummary()
+    resetApiRequests()
+    const second = fetchDashboardSummary()
+    expect(await first).toBeDefined()
+    expect(await second).toBeDefined()
+    expect(callsCount).toBe(2)
+  })
+
+  it('does not let a superseded request clear the newer in-flight slot after reset', async () => {
+    let callsCount = 0
+    const firstResponse = deferred<Response>()
+    const secondResponse = deferred<Response>()
+    installFetchMock((url) => {
+      if (url === '/api/dashboard/summary/') {
+        callsCount += 1
+        if (callsCount === 1) return firstResponse.promise
+        return secondResponse.promise
+      }
+      return jsonResponse({}, 404)
+    })
+
+    const first = fetchDashboardSummary()
+    resetApiRequests()
+    const second = fetchDashboardSummary()
+    expect(callsCount).toBe(2)
+
+    firstResponse.resolve(jsonResponse(summaryFixture()))
+    await first
+
+    const third = fetchDashboardSummary()
+    expect(callsCount).toBe(2)
+    secondResponse.resolve(jsonResponse(summaryFixture()))
+    expect(await second).toBeDefined()
+    expect(await third).toBeDefined()
+    expect(callsCount).toBe(2)
   })
 
   it('preserves a 401 status and safe network failures', async () => {

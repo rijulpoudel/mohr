@@ -151,7 +151,9 @@ export function fetchBudgets(): Promise<Budget[]> {
   let request = inFlightBudgets.get(key)
   if (request === undefined) {
     request = requestBudgets().finally(() => {
-      inFlightBudgets.delete(key)
+      if (inFlightBudgets.get(key) === request) {
+        inFlightBudgets.delete(key)
+      }
     })
     inFlightBudgets.set(key, request)
   }

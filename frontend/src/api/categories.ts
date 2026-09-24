@@ -105,9 +105,12 @@ function requestCategories(): Promise<Category[]> {
 
 export function fetchCategories(): Promise<Category[]> {
   if (inFlightCategories === null) {
-    inFlightCategories = requestCategories().finally(() => {
-      inFlightCategories = null
+    const request = requestCategories().finally(() => {
+      if (inFlightCategories === request) {
+        inFlightCategories = null
+      }
     })
+    inFlightCategories = request
   }
   return inFlightCategories
 }

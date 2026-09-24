@@ -140,9 +140,12 @@ function requestAccounts(): Promise<Account[]> {
 
 export function fetchAccounts(): Promise<Account[]> {
   if (inFlightAccounts === null) {
-    inFlightAccounts = requestAccounts().finally(() => {
-      inFlightAccounts = null
+    const request = requestAccounts().finally(() => {
+      if (inFlightAccounts === request) {
+        inFlightAccounts = null
+      }
     })
+    inFlightAccounts = request
   }
   return inFlightAccounts
 }

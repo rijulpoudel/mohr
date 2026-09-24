@@ -1,14 +1,7 @@
 import { StrictMode } from 'react'
 import { cleanup, render } from '@testing-library/react'
 import { afterEach, beforeEach, vi } from 'vitest'
-import { resetRestoreRequest } from '../api/auth'
-import { resetAccountsRequest } from '../api/accounts'
-import { resetDashboardRequest } from '../api/dashboard'
-import { resetCashFlowRequest } from '../api/cashFlow'
-import { resetCategoriesRequest } from '../api/categories'
-import { resetTransactionsRequest } from '../api/transactions'
-import { resetBudgetsRequest } from '../api/budgets'
-import { resetPlaidConnectionsRequest } from '../api/plaid'
+import { resetApiRequests } from '../api/resetRequests'
 import App from '../App'
 
 export const CSRF_TOKEN = 'test-csrf-token'
@@ -81,14 +74,7 @@ export function renderApp(path = '/') {
 }
 
 beforeEach(() => {
-  resetRestoreRequest()
-  resetDashboardRequest()
-  resetCashFlowRequest()
-  resetAccountsRequest()
-  resetCategoriesRequest()
-  resetTransactionsRequest()
-  resetBudgetsRequest()
-  resetPlaidConnectionsRequest()
+  resetApiRequests()
   clearCookies()
   localStorage.clear()
   sessionStorage.clear()
