@@ -10,7 +10,6 @@ import {
 import { ApiError, userMessage, type FieldErrors } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
 import {
-  clampedPercent,
   decimalToCents,
   formatMoney,
   isDecimalString,
@@ -118,35 +117,159 @@ function sectionCountLabel(count: number): string {
   return count === 1 ? '1 account' : `${count} accounts`
 }
 
-const BALANCE_SHARE_HEADING = 'Positive balances by account'
-// This chart is deliberately narrower than the Active balance metric above it.
-// Active balance includes credit-card and negative balances; the chart measures
-// a different question, so its denominator is only the positive active
-// non-credit balances. The note states that plainly and never implies the
-// chart rows sum to Active balance, net worth, or money available to spend.
-const BALANCE_SHARE_NOTE =
-  'Share denominator is the positive active non-credit balances shown. Credit cards are excluded even when positive, and archived, pending, zero, and negative balances are omitted. These rows do not sum to Active balance.'
-const BALANCE_SHARE_ROUNDING =
-  'Shares are rounded, so they may not total 100%.'
-const BALANCE_SHARE_MIN_BAR =
-  'A positive share that rounds to 0% is shown as <1% with a minimum visible bar.'
-const BALANCE_SHARE_EMPTY =
-  'No active non-credit accounts have a positive balance.'
+// This card is deliberately narrow in scope: it measures the composition of one
+// question, the positive balances held in checking, savings, and cash. Credit
+// cards are excluded even when positive, and archived, pending, zero, and
+// negative balances never enter the denominator, so a lone negative or
+// credit-card balance can never be dressed up as a positive share.
+const BALANCE_SCOPE_HEADING = 'Positive balances · checking, savings & cash'
+const BALANCE_SCOPE_EMPTY =
+  'No positive checking, savings, or cash balances yet.'
+// A bounded number of slices keeps the doughnut readable. Beyond it the
+// smallest balances are aggregated into one truthful "Other (N)" slice so the
+// exact total is preserved without an unbounded legend.
+const MAX_CHART_SLICES = 5
+// The hole is small; a formatted total longer than this is moved immediately
+// below the doughnut instead of being wrapped across the ring.
+const DOUGHNUT_HOLE_TOTAL_MAX_LENGTH = 9
 
-// Shared clampedPercent intentionally stays generic. This chart needs an honest
-// display for the rounding edges: a strictly positive balance must never be
-// labelled 0%, and a balance smaller than its siblings must never be labelled
-// 100%. The exact bigint amounts and denominator are unchanged; only the label
-// and the decorative bar width are adjusted here, locally.
-function balanceShareDisplay(
-  amount: string,
-  total: string,
+const DOUGHNUT_SIZE = 120
+const DOUGHNUT_CENTER = DOUGHNUT_SIZE / 2
+const DOUGHNUT_OUTER = 55
+const DOUGHNUT_INNER = 36
+const DOUGHNUT_GAP = 0.02
+
+type BalanceSlice = {
+  key: string
+  label: string
+  amount: string
+  cents: bigint
+}
+
+// The percent label rounds the exact cent share to the nearest whole percent
+// but keeps the rounding edges honest: a strictly positive share never reads
+// 0%, and a share with siblings never claims the whole 100%.
+function balancePercentLabel(
+  cents: bigint,
+  total: bigint,
   hasSiblings: boolean,
-): { label: string; widthPercent: number } {
-  const percent = clampedPercent(amount, total)
-  if (percent === 0) return { label: '<1%', widthPercent: 1 }
-  if (hasSiblings && percent === 100) return { label: '>99%', widthPercent: 99 }
-  return { label: `${percent}%`, widthPercent: percent }
+): string {
+  if (total <= 0n) return '0%'
+  const percent = (cents * 100n + total / 2n) / total
+  if (percent <= 0n) return '<1%'
+  if (hasSiblings && percent >= 100n) return '>99%'
+  return `${percent}%`
+}
+
+// The monetary values stay exact in bigint cents. Only the decorative arc
+// geometry uses this fraction, which is truncated to six decimal places so a
+// very long cent value never becomes an imprecise floating-point total.
+function balanceShareFraction(cents: bigint, total: bigint): number {
+  if (total <= 0n) return 0
+  return Number((cents * 1_000_000n) / total) / 1_000_000
+}
+
+// Precompute each slice's start and end fraction on the circle so the render
+// path never mutates a running total across the map.
+function balanceShareFractions(
+  slices: BalanceSlice[],
+  totalCents: bigint,
+): Array<{ start: number; end: number }> {
+  const fractions: Array<{ start: number; end: number }> = []
+  let running = 0n
+  for (const slice of slices) {
+    const start = balanceShareFraction(running, totalCents)
+    running += slice.cents
+    const end = balanceShareFraction(running, totalCents)
+    fractions.push({ start, end })
+  }
+  return fractions
+}
+
+function buildBalanceSlices(accounts: Account[]): {
+  slices: BalanceSlice[]
+  total: string
+  totalCents: bigint
+} {
+  const eligible = eligibleBalanceAccounts(accounts)
+  const totalCents = eligible.reduce(
+    (sum, account) => sum + decimalToCents(account.current_balance),
+    0n,
+  )
+  const entries: BalanceSlice[] =
+    eligible.length > MAX_CHART_SLICES
+      ? [
+          ...eligible.slice(0, MAX_CHART_SLICES - 1).map((account) => ({
+            key: `account-${account.id}`,
+            label: account.name,
+            amount: account.current_balance,
+            cents: decimalToCents(account.current_balance),
+          })),
+          (() => {
+            const rest = eligible.slice(MAX_CHART_SLICES - 1)
+            return {
+              key: 'other',
+              label: `Other (${rest.length})`,
+              amount: sumMoney(rest.map((account) => account.current_balance)),
+              cents: rest.reduce(
+                (sum, account) => sum + decimalToCents(account.current_balance),
+                0n,
+              ),
+            }
+          })(),
+        ]
+      : eligible.map((account) => ({
+          key: `account-${account.id}`,
+          label: account.name,
+          amount: account.current_balance,
+          cents: decimalToCents(account.current_balance),
+        }))
+  return {
+    slices: entries,
+    total: sumMoney(eligible.map((account) => account.current_balance)),
+    totalCents,
+  }
+}
+
+function polarPoint(radius: number, angle: number): [number, number] {
+  return [
+    DOUGHNUT_CENTER + radius * Math.cos(angle),
+    DOUGHNUT_CENTER + radius * Math.sin(angle),
+  ]
+}
+
+function roundCoordinate(value: number): number {
+  return Math.round(value * 1000) / 1000
+}
+
+function doughnutArcPath(startAngle: number, endAngle: number): string {
+  // A single 100% slice spans the whole circle. Two identical start and end
+  // points would make one SVG arc degenerate, so a full annulus is drawn as
+  // two outer semicircles plus two opposite-winding inner semicircles.
+  if (endAngle - startAngle >= Math.PI * 2 - 0.001) {
+    return [
+      `M ${DOUGHNUT_CENTER - DOUGHNUT_OUTER} ${DOUGHNUT_CENTER}`,
+      `A ${DOUGHNUT_OUTER} ${DOUGHNUT_OUTER} 0 1 1 ${DOUGHNUT_CENTER + DOUGHNUT_OUTER} ${DOUGHNUT_CENTER}`,
+      `A ${DOUGHNUT_OUTER} ${DOUGHNUT_OUTER} 0 1 1 ${DOUGHNUT_CENTER - DOUGHNUT_OUTER} ${DOUGHNUT_CENTER}`,
+      'Z',
+      `M ${DOUGHNUT_CENTER - DOUGHNUT_INNER} ${DOUGHNUT_CENTER}`,
+      `A ${DOUGHNUT_INNER} ${DOUGHNUT_INNER} 0 1 0 ${DOUGHNUT_CENTER + DOUGHNUT_INNER} ${DOUGHNUT_CENTER}`,
+      `A ${DOUGHNUT_INNER} ${DOUGHNUT_INNER} 0 1 0 ${DOUGHNUT_CENTER - DOUGHNUT_INNER} ${DOUGHNUT_CENTER}`,
+      'Z',
+    ].join(' ')
+  }
+  const largeArc = endAngle - startAngle > Math.PI ? 1 : 0
+  const [outerStartX, outerStartY] = polarPoint(DOUGHNUT_OUTER, startAngle)
+  const [outerEndX, outerEndY] = polarPoint(DOUGHNUT_OUTER, endAngle)
+  const [innerEndX, innerEndY] = polarPoint(DOUGHNUT_INNER, endAngle)
+  const [innerStartX, innerStartY] = polarPoint(DOUGHNUT_INNER, startAngle)
+  return [
+    `M ${roundCoordinate(outerStartX)} ${roundCoordinate(outerStartY)}`,
+    `A ${DOUGHNUT_OUTER} ${DOUGHNUT_OUTER} 0 ${largeArc} 1 ${roundCoordinate(outerEndX)} ${roundCoordinate(outerEndY)}`,
+    `L ${roundCoordinate(innerEndX)} ${roundCoordinate(innerEndY)}`,
+    `A ${DOUGHNUT_INNER} ${DOUGHNUT_INNER} 0 ${largeArc} 0 ${roundCoordinate(innerStartX)} ${roundCoordinate(innerStartY)}`,
+    'Z',
+  ].join(' ')
 }
 
 // The share chart answers one question: which active non-credit accounts hold
@@ -767,97 +890,94 @@ function CreateAccountForm({ onCreated }: { onCreated: (account: Account) => voi
   )
 }
 
-function AccountsSummary({
-  accounts,
-}: {
-  accounts: Account[]
-}) {
-  const ready = accounts.filter((account) => !account.is_archived && !account.sync_pending)
-  const pending = accounts.filter((account) => !account.is_archived && account.sync_pending)
-  const archived = accounts.filter((account) => account.is_archived)
-  const activeBalance = sumMoney(ready.map((account) => account.current_balance))
-  const balanceShareAccounts = eligibleBalanceAccounts(accounts)
-  const balanceShareTotal = sumMoney(
-    balanceShareAccounts.map((account) => account.current_balance),
-  )
+function AccountsSummary({ accounts }: { accounts: Account[] }) {
+  const { slices, total, totalCents } = buildBalanceSlices(accounts)
+  const hasSiblings = slices.length > 1
+  const fractions = balanceShareFractions(slices, totalCents)
+  const segments = slices.map((slice, index) => {
+    const { start, end } = fractions[index]
+    const startAngle = -Math.PI / 2 + start * 2 * Math.PI
+    const endAngle = -Math.PI / 2 + end * 2 * Math.PI
+    const gap = hasSiblings ? DOUGHNUT_GAP : 0
+    const path =
+      endAngle - startAngle > gap * 2
+        ? doughnutArcPath(startAngle + gap, endAngle - gap)
+        : doughnutArcPath(startAngle, endAngle)
+    return {
+      ...slice,
+      index,
+      path,
+      percentLabel: balancePercentLabel(slice.cents, totalCents, hasSiblings),
+    }
+  })
+  const formattedTotal = formatMoney(total)
+  const totalFitsHole = formattedTotal.length <= DOUGHNUT_HOLE_TOTAL_MAX_LENGTH
+
   return (
     <section
       className="accounts-summary"
       aria-labelledby="accounts-summary-heading"
     >
-      <h2 id="accounts-summary-heading" className="accounts-summary-heading">
-        Summary
-      </h2>
-      <dl className="accounts-summary-grid">
-        <div className="accounts-summary-total">
-          <dt>Active balance</dt>
-          <dd
-            className={
-              isNegative(activeBalance)
-                ? 'accounts-summary-total-value accounts-summary-total-value-negative'
-                : 'accounts-summary-total-value'
-            }
-          >
-            {formatMoney(activeBalance)}
-          </dd>
-          <dd className="accounts-summary-note">
-            Excludes archived and pending accounts. Includes credit cards and
-            negative balances, so it differs from the balance-share chart below.
-          </dd>
-        </div>
-        <div className="accounts-summary-count">
-          <dt>Ready count</dt>
-          <dd className="accounts-summary-count-value">{ready.length}</dd>
-        </div>
-        <div className="accounts-summary-count">
-          <dt>Pending count</dt>
-          <dd className="accounts-summary-count-value">{pending.length}</dd>
-        </div>
-        <div className="accounts-summary-count">
-          <dt>Archived count</dt>
-          <dd className="accounts-summary-count-value">{archived.length}</dd>
-        </div>
-      </dl>
-      <section
-        className="accounts-chart"
-        aria-labelledby="accounts-chart-heading"
-      >
-        <h3 id="accounts-chart-heading" className="accounts-chart-heading">
-          {BALANCE_SHARE_HEADING}
-        </h3>
-        <p className="accounts-chart-note">{BALANCE_SHARE_NOTE}</p>
-        {balanceShareAccounts.length === 0 ? (
-          <p className="accounts-chart-empty">{BALANCE_SHARE_EMPTY}</p>
-        ) : (
-          <>
-            <p className="accounts-chart-note">{BALANCE_SHARE_ROUNDING}</p>
-            <p className="accounts-chart-note">{BALANCE_SHARE_MIN_BAR}</p>
-            <div className="accounts-chart-rows">
-              {balanceShareAccounts.map((account) => {
-                const display = balanceShareDisplay(
-                  account.current_balance,
-                  balanceShareTotal,
-                  balanceShareAccounts.length > 1,
-                )
-                return (
-                  <div className="accounts-chart-row" key={account.id}>
-                    <p className="accounts-chart-label">
-                      {account.name} · {formatMoney(account.current_balance)} ·{' '}
-                      {display.label} of {formatMoney(balanceShareTotal)}
-                    </p>
-                    <div className="accounts-chart-bar" aria-hidden="true">
-                      <span
-                        className="accounts-chart-fill"
-                        style={{ width: `${display.widthPercent}%` }}
-                      />
-                    </div>
-                  </div>
-                )
-              })}
+      <h3 id="accounts-summary-heading" className="accounts-summary-heading">
+        {BALANCE_SCOPE_HEADING}
+      </h3>
+      {slices.length === 0 ? (
+        <p className="accounts-chart-empty">{BALANCE_SCOPE_EMPTY}</p>
+      ) : (
+        <div className="accounts-chart">
+          <div className="accounts-doughnut-figure">
+            <div className="accounts-doughnut">
+              <svg
+                viewBox={`0 0 ${DOUGHNUT_SIZE} ${DOUGHNUT_SIZE}`}
+                className="accounts-doughnut-svg"
+                role="presentation"
+                aria-hidden="true"
+                focusable="false"
+              >
+                {segments.map((segment) => (
+                  <path
+                    key={segment.key}
+                    className={`accounts-doughnut-segment accounts-seg-${segment.index}`}
+                    d={segment.path}
+                  />
+                ))}
+              </svg>
+              <div className="accounts-doughnut-center">
+                {totalFitsHole && (
+                  <span className="accounts-doughnut-total">
+                    {formattedTotal}
+                  </span>
+                )}
+                <span className="accounts-doughnut-label">
+                  Positive balances
+                </span>
+              </div>
             </div>
-          </>
-        )}
-      </section>
+            {!totalFitsHole && (
+              <p className="accounts-doughnut-total accounts-doughnut-total-below">
+                {formattedTotal}
+              </p>
+            )}
+          </div>
+          <ul className="accounts-legend">
+            {segments.map((segment) => (
+              <li className="accounts-legend-item" key={segment.key}>
+                <span
+                  className={`accounts-legend-swatch accounts-seg-${segment.index}`}
+                  aria-hidden="true"
+                />
+                <span className="accounts-legend-name">{segment.label}</span>
+                <span className="accounts-legend-amount">
+                  {formatMoney(segment.amount)}
+                </span>
+                <span className="accounts-legend-percent">
+                  {segment.percentLabel}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </section>
   )
 }

@@ -201,7 +201,7 @@ describe('dashboard summary', () => {
     const nav = screen.getByRole('navigation', { name: 'Primary' })
     await user.click(within(nav).getByRole('link', { name: 'Accounts' }))
 
-    expect(await screen.findByText('Everyday Checking')).toBeInTheDocument()
+    expect(await screen.findAllByText('Everyday Checking')).not.toHaveLength(0)
     expect(window.location.pathname).toBe('/accounts')
 
     await act(async () => {
@@ -214,7 +214,7 @@ describe('dashboard summary', () => {
     })
 
     expect(window.location.pathname).toBe('/accounts')
-    expect(screen.getByText('Everyday Checking')).toBeInTheDocument()
+    expect(screen.getAllByText('Everyday Checking').length).toBeGreaterThan(0)
     expect(
       screen.getByRole('navigation', { name: 'Primary' }),
     ).toBeInTheDocument()
@@ -310,27 +310,36 @@ describe('dashboard ready state', () => {
     expect(summaryValue('Budget remaining')).toContain('-$100.10')
   })
 
-  it('renders an Income vs spending comparison with exact amounts and proportional decorative bars', async () => {
+  it('renders an Income vs spending this month chart as two vertical columns on a shared zero baseline', async () => {
     installFetchMock(authenticatedHandler(() => jsonResponse(summaryFixture())))
     renderApp('/')
 
     const compare = await screen.findByRole('region', {
-      name: 'Income vs spending',
+      name: 'Income vs spending this month',
     })
     within(compare).getByText('Money in')
     within(compare).getByText('Money out')
     within(compare).getByText('$2,000.00')
     within(compare).getByText('$765.44')
 
-    const fills = compare.querySelectorAll('.dashboard-compare-fill')
+    const columns = compare.querySelectorAll('.dashboard-compare-column')
+    expect(columns).toHaveLength(2)
+    expect(columns[0]).toHaveClass('dashboard-compare-column-income')
+    expect(columns[1]).toHaveClass('dashboard-compare-column-expense')
+
+    const tracks = compare.querySelectorAll('.dashboard-compare-column-track')
+    expect(tracks).toHaveLength(2)
+
+    const fills = compare.querySelectorAll('.dashboard-compare-column-fill')
     expect(fills).toHaveLength(2)
-    expect((fills[0] as HTMLElement).style.width).toBe('100%')
-    expect((fills[1] as HTMLElement).style.width).toBe('38%')
+    expect((fills[0] as HTMLElement).style.height).toBe('100%')
+    expect((fills[1] as HTMLElement).style.height).toBe('38%')
+    expect((fills[0] as HTMLElement).style.width).toBe('')
     expect(fills[0].closest('[aria-hidden="true"]')).not.toBeNull()
     expect(fills[1].closest('[aria-hidden="true"]')).not.toBeNull()
   })
 
-  it('scales the comparison bars to the larger amount when one side is zero', async () => {
+  it('scales the comparison columns to the larger amount when one side is zero', async () => {
     installFetchMock(
       authenticatedHandler(() =>
         jsonResponse(
@@ -344,11 +353,60 @@ describe('dashboard ready state', () => {
     renderApp('/')
 
     const compare = await screen.findByRole('region', {
-      name: 'Income vs spending',
+      name: 'Income vs spending this month',
     })
-    const fills = compare.querySelectorAll('.dashboard-compare-fill')
-    expect((fills[0] as HTMLElement).style.width).toBe('0%')
-    expect((fills[1] as HTMLElement).style.width).toBe('100%')
+    const fills = compare.querySelectorAll('.dashboard-compare-column-fill')
+    expect((fills[0] as HTMLElement).style.height).toBe('0%')
+    expect((fills[1] as HTMLElement).style.height).toBe('100%')
+  })
+
+  it('keeps a tiny positive amount visible with a minimum column height while the exact value stays authoritative', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse(
+          summaryFixture({
+            current_month_income: '0.01',
+            current_month_expenses: '100000.00',
+          }),
+        ),
+      ),
+    )
+    renderApp('/')
+
+    const compare = await screen.findByRole('region', {
+      name: 'Income vs spending this month',
+    })
+    within(compare).getByText('$0.01')
+    within(compare).getByText('$100,000.00')
+
+    const fills = compare.querySelectorAll('.dashboard-compare-column-fill')
+    expect((fills[0] as HTMLElement).style.height).toBe('0%')
+    expect(fills[0]).toHaveClass('dashboard-compare-column-fill-positive')
+  })
+
+  it('renders both comparison columns at zero height when income and spending are both zero', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse(
+          summaryFixture({
+            current_month_income: '0.00',
+            current_month_expenses: '0.00',
+          }),
+        ),
+      ),
+    )
+    renderApp('/')
+
+    const compare = await screen.findByRole('region', {
+      name: 'Income vs spending this month',
+    })
+    expect(within(compare).getAllByText('$0.00')).toHaveLength(2)
+
+    const fills = compare.querySelectorAll('.dashboard-compare-column-fill')
+    expect((fills[0] as HTMLElement).style.height).toBe('0%')
+    expect((fills[1] as HTMLElement).style.height).toBe('0%')
+    expect(fills[0]).not.toHaveClass('dashboard-compare-column-fill-positive')
+    expect(fills[1]).not.toHaveClass('dashboard-compare-column-fill-positive')
   })
 
   it('renders a very large exact income and expense pair without losing precision', async () => {
@@ -365,13 +423,13 @@ describe('dashboard ready state', () => {
     renderApp('/')
 
     const compare = await screen.findByRole('region', {
-      name: 'Income vs spending',
+      name: 'Income vs spending this month',
     })
     within(compare).getByText('$123,456,789,012,345,678.90')
     within(compare).getByText('$99,999,999,999,999.99')
-    const fills = compare.querySelectorAll('.dashboard-compare-fill')
-    expect((fills[0] as HTMLElement).style.width).toBe('100%')
-    expect((fills[1] as HTMLElement).style.width).toBe('0%')
+    const fills = compare.querySelectorAll('.dashboard-compare-column-fill')
+    expect((fills[0] as HTMLElement).style.height).toBe('100%')
+    expect((fills[1] as HTMLElement).style.height).toBe('0%')
   })
 
   it('renders the monthly budget card with an accessible progressbar for a positive budget', async () => {

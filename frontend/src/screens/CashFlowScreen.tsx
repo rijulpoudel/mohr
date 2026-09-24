@@ -8,12 +8,14 @@ import {
 import { ApiError, userMessage } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
 import { formatMonthLabel } from '../format/month'
-import { clampedPercent, decimalToCents, formatMoney } from '../format/money'
+import {
+  clampedPercent,
+  decimalToCents,
+  formatMoney,
+  sumMoney,
+} from '../format/money'
 
 const GENERIC_ERROR_MESSAGE = 'Something went wrong. Please try again.'
-
-const PENDING_NOTE =
-  'Only settled transactions count. Pending or still-importing bank transactions are excluded from these figures.'
 
 type SummaryState =
   | { status: 'loading' }
@@ -107,6 +109,162 @@ function transactionWord(count: number): string {
   return count === 1 ? 'transaction' : 'transactions'
 }
 
+// The money-out composition keeps a bounded number of segments so the palette
+// and legend stay readable. When a month has more than five categories the
+// four largest keep their own segment and the remainder are aggregated into a
+// single truthful "Other (N)" segment whose exact sum is preserved. The API
+// returns categories sorted by descending amount.
+const MAX_COMPOSITION_SEGMENTS = 5
+
+type CompositionSegment = {
+  key: string
+  label: string
+  amount: string
+  cents: bigint
+  transactionCount: number
+  index: number
+}
+
+function buildCompositionSegments(
+  categories: CashFlowCategory[],
+): CompositionSegment[] {
+  const toSegment = (
+    category: CashFlowCategory,
+    index: number,
+  ): CompositionSegment => ({
+    key: `category-${category.category_id}`,
+    label: category.category_name,
+    amount: category.amount,
+    cents: decimalToCents(category.amount),
+    transactionCount: category.transaction_count,
+    index,
+  })
+  if (categories.length <= MAX_COMPOSITION_SEGMENTS) {
+    return categories.map(toSegment)
+  }
+  const head = categories.slice(0, MAX_COMPOSITION_SEGMENTS - 1)
+  const rest = categories.slice(MAX_COMPOSITION_SEGMENTS - 1)
+  const other: CompositionSegment = {
+    key: 'other',
+    label: `Other (${rest.length})`,
+    amount: sumMoney(rest.map((category) => category.amount)),
+    cents: rest.reduce(
+      (sum, category) => sum + decimalToCents(category.amount),
+      0n,
+    ),
+    transactionCount: rest.reduce(
+      (sum, category) => sum + category.transaction_count,
+      0,
+    ),
+    index: MAX_COMPOSITION_SEGMENTS - 1,
+  }
+  return [...head.map(toSegment), other]
+}
+
+// Rounds the exact bigint share to a whole percent while keeping the edges
+// honest: a strictly positive share never reads 0%, and a share among siblings
+// never claims the whole 100%.
+function compositionPercentLabel(
+  cents: bigint,
+  totalCents: bigint,
+  hasSiblings: boolean,
+): string {
+  if (cents <= 0n || totalCents <= 0n) return '0%'
+  const percent = (cents * 100n + totalCents / 2n) / totalCents
+  if (percent <= 0n) return '<1%'
+  if (hasSiblings && percent >= 100n) return '>99%'
+  return `${percent}%`
+}
+
+// Money and ratios stay in bigint cents; this float is only the bounded visual
+// width for the decorative strip.
+function compositionWidthPercent(cents: bigint, totalCents: bigint): number {
+  if (totalCents <= 0n) return 0
+  return Number((cents * 1_000_000n) / totalCents) / 10_000
+}
+
+function compositionSegmentClassName(segment: CompositionSegment): string {
+  const base = `cash-flow-composition-segment cash-flow-seg-${segment.index}`
+  return segment.cents > 0n
+    ? `${base} cash-flow-composition-segment-positive`
+    : base
+}
+
+function ExpenseComposition({
+  headingId,
+  items,
+  total,
+}: {
+  headingId: string
+  items: CashFlowCategory[]
+  total: string
+}) {
+  const segments = buildCompositionSegments(items)
+  // The overall expense total is authoritative: it is what the metrics and the
+  // comparison report, so it is both the displayed Total and the denominator
+  // for shares. The aggregated "Other" segment still keeps its own exact sum.
+  const totalCents = decimalToCents(total)
+  const hasSiblings = segments.length > 1
+  return (
+    <section
+      className="cash-flow-card cash-flow-categories"
+      aria-labelledby={headingId}
+    >
+      <h3 id={headingId}>Money out by category</h3>
+      {segments.length === 0 ? (
+        <p className="cash-flow-categories-empty">
+          No spending recorded this month.
+        </p>
+      ) : (
+        <>
+          <p className="cash-flow-composition-total">
+            Total{' '}
+            <span className="cash-flow-composition-total-value">
+              {formatMoney(total)}
+            </span>
+          </p>
+          <div className="cash-flow-composition-strip" aria-hidden="true">
+            {segments.map((segment) => (
+              <span
+                key={segment.key}
+                className={compositionSegmentClassName(segment)}
+                style={{
+                  width: `${compositionWidthPercent(segment.cents, totalCents)}%`,
+                }}
+              />
+            ))}
+          </div>
+          <ul className="cash-flow-composition-legend">
+            {segments.map((segment) => (
+              <li className="cash-flow-composition-item" key={segment.key}>
+                <span
+                  className={`cash-flow-composition-swatch cash-flow-seg-${segment.index}`}
+                  aria-hidden="true"
+                />
+                <span className="cash-flow-composition-name">
+                  {segment.label}
+                </span>
+                <span className="cash-flow-composition-amount">
+                  {formatMoney(segment.amount)}
+                </span>
+                <span className="cash-flow-composition-meta">
+                  {`${segment.transactionCount} ${transactionWord(
+                    segment.transactionCount,
+                  )} · ${compositionPercentLabel(
+                    segment.cents,
+                    totalCents,
+                    hasSiblings,
+                  )} of money out`}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </section>
+  )
+}
+
 function CategoryBreakdown({
   headingId,
   title,
@@ -188,13 +346,10 @@ function CashFlowSummaryPanel({ summary }: { summary: CashFlowSummary }) {
               items={summary.income_categories}
               sideTotal={summary.income}
             />
-            <CategoryBreakdown
+            <ExpenseComposition
               headingId="cash-flow-expense-categories-heading"
-              title="Money out by category"
-              percentLabel="money out"
-              emptyMessage="No spending recorded this month."
               items={summary.expense_categories}
-              sideTotal={summary.expenses}
+              total={summary.expenses}
             />
           </div>
         </>
@@ -300,7 +455,6 @@ export function CashFlowScreen() {
       {state.status === 'ready' && (
         <CashFlowSummaryPanel summary={state.summary} />
       )}
-      <p className="cash-flow-note">{PENDING_NOTE}</p>
       <Link to="/transactions" className="cash-flow-ledger-link">
         Open the full ledger
       </Link>

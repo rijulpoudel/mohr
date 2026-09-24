@@ -493,7 +493,7 @@ describe('transactions list', () => {
     expect(
       await screen.findByRole('heading', { name: 'Accounts' }),
     ).toBeInTheDocument()
-    expect(await screen.findByText('Everyday Checking')).toBeInTheDocument()
+    expect(await screen.findAllByText('Everyday Checking')).not.toHaveLength(0)
     expect(window.location.pathname).toBe('/accounts')
     expect(calls(mock, '/api/transactions/')).toHaveLength(1)
     expect(calls(mock, '/api/accounts/')).toHaveLength(2)
@@ -513,7 +513,7 @@ describe('transactions list', () => {
     expect(
       await screen.findByRole('heading', { name: 'Accounts' }),
     ).toBeInTheDocument()
-    expect(screen.getByText('Everyday Checking')).toBeInTheDocument()
+    expect(screen.getAllByText('Everyday Checking').length).toBeGreaterThan(0)
     expect(
       await screen.findByRole('navigation', { name: 'Primary' }),
     ).toBeInTheDocument()
@@ -2154,7 +2154,7 @@ describe('transaction creation session expiry', () => {
     expect(
       await screen.findByRole('heading', { name: 'Accounts' }),
     ).toBeInTheDocument()
-    expect(await screen.findByText('Everyday Checking')).toBeInTheDocument()
+    expect(await screen.findAllByText('Everyday Checking')).not.toHaveLength(0)
     expect(window.location.pathname).toBe('/accounts')
     expect(calls(mock, '/api/transactions/')).toHaveLength(1)
     expect(calls(mock, '/api/accounts/')).toHaveLength(2)
@@ -2173,7 +2173,7 @@ describe('transaction creation session expiry', () => {
     expect(
       await screen.findByRole('heading', { name: 'Accounts' }),
     ).toBeInTheDocument()
-    expect(screen.getByText('Everyday Checking')).toBeInTheDocument()
+    expect(screen.getAllByText('Everyday Checking').length).toBeGreaterThan(0)
     expect(
       await screen.findByRole('navigation', { name: 'Primary' }),
     ).toBeInTheDocument()
@@ -4443,7 +4443,7 @@ describe('transaction editing independent review defects', () => {
     expect(
       await screen.findByRole('heading', { name: 'Accounts' }),
     ).toBeInTheDocument()
-    expect(await screen.findByText('Everyday Checking')).toBeInTheDocument()
+    expect(await screen.findAllByText('Everyday Checking')).not.toHaveLength(0)
     expect(window.location.pathname).toBe('/accounts')
     expect(calls(mock, '/api/transactions/')).toHaveLength(1)
     expect(calls(mock, '/api/accounts/')).toHaveLength(2)
@@ -4462,7 +4462,7 @@ describe('transaction editing independent review defects', () => {
     expect(
       await screen.findByRole('heading', { name: 'Accounts' }),
     ).toBeInTheDocument()
-    expect(screen.getByText('Everyday Checking')).toBeInTheDocument()
+    expect(screen.getAllByText('Everyday Checking').length).toBeGreaterThan(0)
     expect(
       await screen.findByRole('navigation', { name: 'Primary' }),
     ).toBeInTheDocument()

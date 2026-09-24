@@ -109,6 +109,12 @@ function TransactionItem({
   )
 }
 
+function compareFillClassName(value: string): string {
+  return decimalToCents(value) > 0n
+    ? 'dashboard-compare-column-fill dashboard-compare-column-fill-positive'
+    : 'dashboard-compare-column-fill'
+}
+
 function ComparisonCard({
   income,
   expenses,
@@ -118,32 +124,32 @@ function ComparisonCard({
 }) {
   const larger =
     decimalToCents(income) >= decimalToCents(expenses) ? income : expenses
-  const incomeWidth = clampedPercent(income, larger)
-  const expenseWidth = clampedPercent(expenses, larger)
+  const incomeHeight = clampedPercent(income, larger)
+  const expenseHeight = clampedPercent(expenses, larger)
   return (
     <section
       className="dashboard-card dashboard-compare-card"
       aria-labelledby="compare-heading"
     >
-      <h3 id="compare-heading">Income vs spending</h3>
-      <dl className="dashboard-compare-rows">
-        <div className="dashboard-compare-row dashboard-compare-row-income">
+      <h3 id="compare-heading">Income vs spending this month</h3>
+      <dl className="dashboard-compare-chart">
+        <div className="dashboard-compare-column dashboard-compare-column-income">
           <dt>Money in</dt>
           <dd className="dashboard-compare-value">{formatMoney(income)}</dd>
-          <dd className="dashboard-compare-bar" aria-hidden="true">
+          <dd className="dashboard-compare-column-track" aria-hidden="true">
             <span
-              className="dashboard-compare-fill"
-              style={{ width: `${incomeWidth}%` }}
+              className={compareFillClassName(income)}
+              style={{ height: `${incomeHeight}%` }}
             />
           </dd>
         </div>
-        <div className="dashboard-compare-row dashboard-compare-row-expense">
+        <div className="dashboard-compare-column dashboard-compare-column-expense">
           <dt>Money out</dt>
           <dd className="dashboard-compare-value">{formatMoney(expenses)}</dd>
-          <dd className="dashboard-compare-bar" aria-hidden="true">
+          <dd className="dashboard-compare-column-track" aria-hidden="true">
             <span
-              className="dashboard-compare-fill"
-              style={{ width: `${expenseWidth}%` }}
+              className={compareFillClassName(expenses)}
+              style={{ height: `${expenseHeight}%` }}
             />
           </dd>
         </div>
