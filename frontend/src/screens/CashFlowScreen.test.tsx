@@ -185,11 +185,20 @@ describe('cash flow screen states', () => {
     })
     within(expenseRegion).getByText('Groceries')
     within(expenseRegion).getByText('$300.00')
-    within(expenseRegion).getByText('3 transactions')
-    within(expenseRegion).getByText('60% of money out')
     within(expenseRegion).getByText('Transport')
     within(expenseRegion).getByText('$200.00')
-    within(expenseRegion).getByText('40% of money out')
+    within(expenseRegion).getByText('3 transactions · 60% of money out')
+    within(expenseRegion).getByText('2 transactions · 40% of money out')
+
+    const strip = expenseRegion.querySelector('.cash-flow-composition-strip')
+    expect(strip).not.toBeNull()
+    expect(strip?.getAttribute('aria-hidden')).toBe('true')
+    const segments = expenseRegion.querySelectorAll(
+      '.cash-flow-composition-segment',
+    )
+    expect(segments).toHaveLength(2)
+    expect((segments[0] as HTMLElement).style.width).toBe('60%')
+    expect((segments[1] as HTMLElement).style.width).toBe('40%')
 
     expect(
       screen.queryByText(/Only settled transactions count/),
@@ -471,6 +480,376 @@ describe('cash flow screen states', () => {
     ).toHaveLength(1)
     expect(localStorage.length).toBe(0)
     expect(sessionStorage.length).toBe(0)
+  })
+})
+
+describe('cash flow money-out composition', () => {
+  it('renders two ordinary expense categories as a keyed strip and legend with exact amounts and shares', async () => {
+    installFetchMock(
+      authenticatedHandler(() => jsonResponse(cashFlowFixture())),
+    )
+    renderApp('/cash-flow')
+
+    const expenseRegion = await screen.findByRole('region', {
+      name: 'Money out by category',
+    })
+    const segments = expenseRegion.querySelectorAll(
+      '.cash-flow-composition-segment',
+    )
+    expect(segments).toHaveLength(2)
+    expect(segments[0]).toHaveClass('cash-flow-seg-0')
+    expect(segments[1]).toHaveClass('cash-flow-seg-1')
+    expect((segments[0] as HTMLElement).style.width).toBe('60%')
+    expect((segments[1] as HTMLElement).style.width).toBe('40%')
+
+    const items = within(expenseRegion).getAllByRole('listitem')
+    expect(items).toHaveLength(2)
+    expect(items[0]).toHaveTextContent('Groceries')
+    expect(items[0]).toHaveTextContent('$300.00')
+    expect(items[0]).toHaveTextContent('60% of money out')
+    expect(items[1]).toHaveTextContent('Transport')
+    expect(items[1]).toHaveTextContent('$200.00')
+    expect(items[1]).toHaveTextContent('40% of money out')
+    expect(expenseRegion.querySelectorAll('.cash-flow-composition-swatch')).toHaveLength(2)
+    expect(within(expenseRegion).getByText('$500.00')).toBeInTheDocument()
+  })
+
+  it('bounds more than five expense categories into four keyed segments plus a truthful Other aggregate', async () => {
+    const amounts = ['700.00', '600.00', '500.00', '400.00', '300.00', '200.00', '150.00']
+    const names = [
+      'Rent',
+      'Groceries',
+      'Transport',
+      'Utilities',
+      'Dining',
+      'Coffee',
+      'Books',
+    ]
+    const expenseCategories = amounts.map((amount, index) =>
+      categoryFixture({
+        category_id: 10 + index,
+        category_name: names[index],
+        amount,
+        transaction_count: index + 1,
+      }),
+    )
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse(
+          cashFlowFixture({
+            expenses: '2850.00',
+            net: '-850.00',
+            expense_categories: expenseCategories,
+          }),
+        ),
+      ),
+    )
+    renderApp('/cash-flow')
+
+    const expenseRegion = await screen.findByRole('region', {
+      name: 'Money out by category',
+    })
+    const segments = expenseRegion.querySelectorAll(
+      '.cash-flow-composition-segment',
+    )
+    expect(segments).toHaveLength(5)
+
+    const items = within(expenseRegion).getAllByRole('listitem')
+    expect(items).toHaveLength(5)
+    expect(items[0]).toHaveTextContent('Rent')
+    expect(items[1]).toHaveTextContent('Groceries')
+    expect(items[2]).toHaveTextContent('Transport')
+    expect(items[3]).toHaveTextContent('Utilities')
+    expect(items[4]).toHaveTextContent('Other (3)')
+    expect(items[4]).toHaveTextContent('$650.00')
+    expect(
+      expenseRegion.querySelectorAll('.cash-flow-composition-swatch'),
+    ).toHaveLength(5)
+    expect(within(expenseRegion).queryByText('Dining')).not.toBeInTheDocument()
+    expect(within(expenseRegion).queryByText('Coffee')).not.toBeInTheDocument()
+    expect(within(expenseRegion).queryByText('Books')).not.toBeInTheDocument()
+    expect(within(expenseRegion).getByText('$2,850.00')).toBeInTheDocument()
+
+    const widths = Array.from(segments).map((segment) =>
+      Number.parseFloat((segment as HTMLElement).style.width),
+    )
+    expect(widths.reduce((sum, width) => sum + width, 0)).toBeCloseTo(100, 1)
+  })
+
+  it('keeps a tiny positive category visible and labelled below one percent without inflating it', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse(
+          cashFlowFixture({
+            expenses: '100000.01',
+            net: '-98000.01',
+            expense_categories: [
+              categoryFixture({
+                category_id: 3,
+                category_name: 'Rent',
+                amount: '100000.00',
+                transaction_count: 1,
+              }),
+              categoryFixture({
+                category_id: 4,
+                category_name: 'Gum',
+                amount: '0.01',
+                transaction_count: 1,
+              }),
+            ],
+          }),
+        ),
+      ),
+    )
+    renderApp('/cash-flow')
+
+    const expenseRegion = await screen.findByRole('region', {
+      name: 'Money out by category',
+    })
+    within(expenseRegion).getByText('<1% of money out', { exact: false })
+    within(expenseRegion).getByText('>99% of money out', { exact: false })
+    const segments = expenseRegion.querySelectorAll(
+      '.cash-flow-composition-segment',
+    )
+    expect((segments[1] as HTMLElement).style.width).toBe('0%')
+    expect(segments[1]).toHaveClass('cash-flow-composition-segment-positive')
+    expect(
+      Number.parseFloat((segments[0] as HTMLElement).style.width),
+    ).toBeCloseTo(100, 3)
+    within(expenseRegion).getByText('$0.01')
+  })
+
+  it('renders a zero-value category at 0% without a positive sliver', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse(
+          cashFlowFixture({
+            income: '10.00',
+            expenses: '0.00',
+            net: '10.00',
+            transaction_count: 1,
+            income_categories: [
+              categoryFixture({ amount: '10.00', transaction_count: 1 }),
+            ],
+            expense_categories: [
+              categoryFixture({
+                category_id: 3,
+                category_name: 'Refunded',
+                amount: '0.00',
+                transaction_count: 1,
+              }),
+            ],
+          }),
+        ),
+      ),
+    )
+    renderApp('/cash-flow')
+
+    const expenseRegion = await screen.findByRole('region', {
+      name: 'Money out by category',
+    })
+    const segments = expenseRegion.querySelectorAll(
+      '.cash-flow-composition-segment',
+    )
+    expect(segments).toHaveLength(1)
+    expect((segments[0] as HTMLElement).style.width).toBe('0%')
+    expect(segments[0]).not.toHaveClass(
+      'cash-flow-composition-segment-positive',
+    )
+    expect(
+      within(expenseRegion).getByText('0% of money out', { exact: false }),
+    ).toBeInTheDocument()
+  })
+
+  it('renders a long expense category label without hiding it or its exact amount', async () => {
+    const longName = 'A very long household category name that keeps going for a while'
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse(
+          cashFlowFixture({
+            expenses: '10.00',
+            net: '1990.00',
+            expense_categories: [
+              categoryFixture({
+                category_id: 9,
+                category_name: longName,
+                amount: '10.00',
+                transaction_count: 1,
+              }),
+            ],
+          }),
+        ),
+      ),
+    )
+    renderApp('/cash-flow')
+
+    const expenseRegion = await screen.findByRole('region', {
+      name: 'Money out by category',
+    })
+    expect(within(expenseRegion).getByText(longName)).toBeInTheDocument()
+    const items = within(expenseRegion).getAllByRole('listitem')
+    expect(items).toHaveLength(1)
+    expect(items[0]).toHaveTextContent('$10.00')
+    expect(items[0]).toHaveTextContent('100% of money out')
+  })
+
+  it('uses the overall expense total, not the category sum, as the displayed Total and denominator', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse(
+          cashFlowFixture({
+            expenses: '600.00',
+            net: '1400.00',
+            expense_categories: [
+              categoryFixture({
+                category_id: 3,
+                category_name: 'Groceries',
+                amount: '300.00',
+                transaction_count: 3,
+              }),
+              categoryFixture({
+                category_id: 4,
+                category_name: 'Transport',
+                amount: '200.00',
+                transaction_count: 2,
+              }),
+            ],
+          }),
+        ),
+      ),
+    )
+    renderApp('/cash-flow')
+
+    const expenseRegion = await screen.findByRole('region', {
+      name: 'Money out by category',
+    })
+    expect(within(expenseRegion).getByText('$600.00')).toBeInTheDocument()
+    expect(within(expenseRegion).queryByText('$500.00')).not.toBeInTheDocument()
+
+    const items = within(expenseRegion).getAllByRole('listitem')
+    expect(items[0]).toHaveTextContent('50% of money out')
+    expect(items[1]).toHaveTextContent('33% of money out')
+
+    const segments = expenseRegion.querySelectorAll(
+      '.cash-flow-composition-segment',
+    )
+    expect((segments[0] as HTMLElement).style.width).toBe('50%')
+    expect(
+      Number.parseFloat((segments[1] as HTMLElement).style.width),
+    ).toBeCloseTo(33.3333, 3)
+  })
+
+  it('labels a zero-value category as 0% beside a non-zero total instead of below one percent', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse(
+          cashFlowFixture({
+            expenses: '100.00',
+            net: '1900.00',
+            expense_categories: [
+              categoryFixture({
+                category_id: 3,
+                category_name: 'Rent',
+                amount: '100.00',
+                transaction_count: 1,
+              }),
+              categoryFixture({
+                category_id: 4,
+                category_name: 'Refunded',
+                amount: '0.00',
+                transaction_count: 1,
+              }),
+            ],
+          }),
+        ),
+      ),
+    )
+    renderApp('/cash-flow')
+
+    const expenseRegion = await screen.findByRole('region', {
+      name: 'Money out by category',
+    })
+    const items = within(expenseRegion).getAllByRole('listitem')
+    expect(items[1]).toHaveTextContent('0% of money out')
+    expect(items[1]).not.toHaveTextContent('<1% of money out')
+  })
+
+  it('shows all five categories without an Other aggregate at exactly five', async () => {
+    const amounts = ['900.00', '800.00', '700.00', '600.00', '500.00']
+    const expenseCategories = amounts.map((amount, index) =>
+      categoryFixture({
+        category_id: 20 + index,
+        category_name: `Category ${index + 1}`,
+        amount,
+        transaction_count: index + 1,
+      }),
+    )
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse(
+          cashFlowFixture({
+            expenses: '3500.00',
+            net: '-1500.00',
+            expense_categories: expenseCategories,
+          }),
+        ),
+      ),
+    )
+    renderApp('/cash-flow')
+
+    const expenseRegion = await screen.findByRole('region', {
+      name: 'Money out by category',
+    })
+    const items = within(expenseRegion).getAllByRole('listitem')
+    expect(items).toHaveLength(5)
+    expect(items[0]).toHaveTextContent('Category 1')
+    expect(items[4]).toHaveTextContent('Category 5')
+    expect(
+      expenseRegion.querySelectorAll('.cash-flow-composition-segment'),
+    ).toHaveLength(5)
+    expect(within(expenseRegion).queryByText(/Other \(/)).not.toBeInTheDocument()
+  })
+
+  it('aggregates exactly the two smallest categories into Other (2) with its exact sum and aggregate share', async () => {
+    const amounts = ['600.00', '500.00', '400.00', '300.00', '200.00', '100.00']
+    const expenseCategories = amounts.map((amount, index) =>
+      categoryFixture({
+        category_id: 30 + index,
+        category_name: `Category ${index + 1}`,
+        amount,
+        transaction_count: index + 1,
+      }),
+    )
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse(
+          cashFlowFixture({
+            expenses: '2100.00',
+            net: '-100.00',
+            expense_categories: expenseCategories,
+          }),
+        ),
+      ),
+    )
+    renderApp('/cash-flow')
+
+    const expenseRegion = await screen.findByRole('region', {
+      name: 'Money out by category',
+    })
+    const items = within(expenseRegion).getAllByRole('listitem')
+    expect(items).toHaveLength(5)
+    expect(items[4]).toHaveTextContent('Other (2)')
+    expect(items[4]).toHaveTextContent('$300.00')
+    expect(items[4]).toHaveTextContent('11 transactions')
+    expect(items[4]).toHaveTextContent('14% of money out')
+
+    const segments = expenseRegion.querySelectorAll(
+      '.cash-flow-composition-segment',
+    )
+    expect(segments).toHaveLength(5)
+    expect(
+      Number.parseFloat((segments[4] as HTMLElement).style.width),
+    ).toBeCloseTo(14.2857, 3)
   })
 })
 

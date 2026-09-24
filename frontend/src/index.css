@@ -2011,6 +2011,109 @@ a {
   font-size: 0.875rem;
 }
 
+/* The money-out composition is a substantial, readable strip rather than a
+   hairline track. Segments use a small, restrained palette of existing tokens
+   with no gradients, and each has a matching legend label with its exact
+   amount and share so color is never the only key. */
+.cash-flow-composition-total {
+  margin: 0 0 var(--space-3);
+  color: var(--color-muted);
+  font-size: 0.8125rem;
+}
+
+.cash-flow-composition-total-value {
+  color: var(--color-text);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.cash-flow-composition-strip {
+  display: flex;
+  height: 1.5rem;
+  margin-block-end: var(--space-3);
+  border-radius: 9999px;
+  background: var(--color-surface-muted);
+  overflow: hidden;
+}
+
+.cash-flow-composition-segment {
+  display: block;
+  min-width: 0;
+  height: 100%;
+  background: var(--cash-flow-seg, var(--color-info));
+}
+
+/* A strictly positive amount whose rounded share is 0% still keeps a visible
+   sliver; the legend amount and percent stay authoritative. */
+.cash-flow-composition-segment-positive {
+  min-width: 0.25rem;
+}
+
+.cash-flow-seg-0 {
+  --cash-flow-seg: var(--color-accent);
+}
+
+.cash-flow-seg-1 {
+  --cash-flow-seg: var(--color-info);
+}
+
+.cash-flow-seg-2 {
+  --cash-flow-seg: var(--color-positive);
+}
+
+.cash-flow-seg-3 {
+  --cash-flow-seg: var(--color-text);
+}
+
+.cash-flow-seg-4 {
+  --cash-flow-seg: var(--color-muted);
+}
+
+.cash-flow-composition-legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-2);
+}
+
+.cash-flow-composition-item {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: var(--space-1) var(--space-3);
+  align-items: baseline;
+}
+
+.cash-flow-composition-swatch {
+  grid-row: 1;
+  align-self: center;
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 0.25rem;
+  background: var(--cash-flow-seg, var(--color-info));
+}
+
+.cash-flow-composition-name {
+  min-width: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.cash-flow-composition-amount {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  text-align: end;
+  overflow-wrap: anywhere;
+}
+
+.cash-flow-composition-meta {
+  grid-column: 2 / -1;
+  color: var(--color-muted);
+  font-size: 0.8125rem;
+}
+
 .cash-flow-status {
   margin-block-end: var(--space-6);
   padding: var(--space-4);
