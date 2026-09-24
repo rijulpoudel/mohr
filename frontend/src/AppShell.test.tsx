@@ -125,6 +125,7 @@ describe('application shell navigation', () => {
     ).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Menu' })).not.toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'Dashboard' })).not.toBeInTheDocument()
+    expect(screen.getByRole('main')).toHaveClass('site-main-guest')
   })
 
   it('exposes an accessible menu button that opens and closes the navigation', async () => {
