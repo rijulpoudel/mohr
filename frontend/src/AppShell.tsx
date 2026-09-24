@@ -98,7 +98,7 @@ export function AppShell() {
       )}
       <main
         id="main"
-        className="site-main"
+        className={`site-main${authenticated ? '' : ' site-main-guest'}`}
         inert={(authenticated && menuOpen) || undefined}
       >
         <Outlet />

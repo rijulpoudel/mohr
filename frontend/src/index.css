@@ -218,6 +218,10 @@ a {
   scroll-margin-top: var(--shell-header-height);
 }
 
+.site-main-guest {
+  grid-column: 1 / -1;
+}
+
 @media (min-width: 48rem) {
   .app-shell {
     grid-template-columns: var(--shell-rail-width) 1fr;
