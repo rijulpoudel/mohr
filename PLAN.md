@@ -318,3 +318,18 @@ Production bank access.
 Delivery: five focused follow-up issues (configuration and persistence;
 Link and exchange; account import and sync; webhook and lifecycle; React
 UI and Sandbox end-to-end), each on one issue branch with one reviewed PR.
+
+## After v0.2 (planned)
+
+The next engineering step after the v0.2 Plaid Sandbox work is the transfer and
+card-payment ledger contract, roadmap item Q02, a proposed contract in
+`docs/ledger-transfers.md`. As a contract it
+adds no code, schema, API, or UI change: it defines semantic classification
+(earning, spending, transfer, refund) separate from account direction, so an
+owned-account transfer or credit-card payment moves account balances without
+inflating income, spending, budgets, or Cash Flow, while the v0.1/v0.2
+ledger, opening-balance anchor, and ownership rules stay unchanged. The
+separately reviewed Q03 slice implements user-confirmed transfers and card
+payments, their reporting exclusions, and balance invariance. Refund
+subtraction is contract for a later slice and is not implemented by Q03.
+Safe-to-spend is part of neither the contract nor Q03.
