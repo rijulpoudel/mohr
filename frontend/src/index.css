@@ -409,6 +409,12 @@ a {
   font-size: 0.875rem;
 }
 
+.field-hint {
+  margin: var(--space-1) 0 0;
+  color: var(--color-muted);
+  font-size: 0.75rem;
+}
+
 .error-summary {
   margin-block-end: var(--space-4);
   color: var(--color-error);
@@ -926,6 +932,11 @@ a {
 .transactions-list .transaction-type {
   color: var(--color-muted);
   font-size: 0.75rem;
+}
+
+.transactions-list .transaction-type-transfer {
+  color: var(--color-accent);
+  font-weight: 600;
 }
 
 .transactions-list .transaction-amount {

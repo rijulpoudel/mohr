@@ -3857,6 +3857,350 @@ describe('transaction editing', () => {
   })
 })
 
+describe('transaction transfer marking', () => {
+  const TRANSFER_LABEL = 'Mark as transfer or card payment'
+  const TRANSFER_HINT =
+    'Only this transaction is marked. The other side is not verified.'
+
+  it('sets the transfer flag, prefilled false, and patches only is_transfer', async () => {
+    const rows = [
+      transactionFixture({
+        id: 1,
+        account: 1,
+        category: 2,
+        transaction_type: 'expense',
+        amount: '12.50',
+        date: '2026-09-10',
+        note: 'Groceries',
+        is_transfer: false,
+      }),
+    ]
+    const mock = installFetchMock(editListHandler(rows))
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    const checkbox = screen.getByLabelText(TRANSFER_LABEL)
+    expect(checkbox).not.toBeChecked()
+    expect(screen.getByText(TRANSFER_HINT)).toBeInTheDocument()
+    await user.click(checkbox)
+    expect(checkbox).toBeChecked()
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() =>
+      expect(calls(mock, '/api/transactions/1/', 'PATCH')).toHaveLength(1),
+    )
+    const [, init] = calls(mock, '/api/transactions/1/', 'PATCH')[0]
+    expect(JSON.parse(String(init?.body))).toEqual({ is_transfer: true })
+    expect(await screen.findByText('Transaction updated.')).toBeInTheDocument()
+  })
+
+  it('clears a prefilled transfer flag and patches only is_transfer', async () => {
+    const rows = [
+      transactionFixture({
+        id: 1,
+        account: 1,
+        category: 2,
+        transaction_type: 'expense',
+        amount: '12.50',
+        date: '2026-09-10',
+        note: 'Groceries',
+        is_transfer: true,
+      }),
+    ]
+    const mock = installFetchMock(editListHandler(rows))
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    const checkbox = screen.getByLabelText(TRANSFER_LABEL)
+    expect(checkbox).toBeChecked()
+    await user.click(checkbox)
+    expect(checkbox).not.toBeChecked()
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() =>
+      expect(calls(mock, '/api/transactions/1/', 'PATCH')).toHaveLength(1),
+    )
+    const [, init] = calls(mock, '/api/transactions/1/', 'PATCH')[0]
+    expect(JSON.parse(String(init?.body))).toEqual({ is_transfer: false })
+  })
+
+  it('toggles the transfer flag on a posted bank-synced row', async () => {
+    const rows = [
+      plaidTransactionFixture({
+        id: 4,
+        account: 1,
+        category: 2,
+        amount: '25.00',
+        date: '2026-09-12',
+        note: 'Card payment',
+        is_transfer: false,
+      }),
+    ]
+    const mock = installFetchMock(editListHandler(rows))
+    renderApp('/transactions')
+    await screen.findByText('Card payment')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    const checkbox = screen.getByLabelText(TRANSFER_LABEL)
+    expect(checkbox).toBeEnabled()
+    await user.click(checkbox)
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() =>
+      expect(calls(mock, '/api/transactions/4/', 'PATCH')).toHaveLength(1),
+    )
+    const [, init] = calls(mock, '/api/transactions/4/', 'PATCH')[0]
+    expect(JSON.parse(String(init?.body))).toEqual({ is_transfer: true })
+  })
+
+  it('clears the transfer flag on a posted bank-synced row', async () => {
+    const rows = [
+      plaidTransactionFixture({
+        id: 4,
+        account: 1,
+        category: 2,
+        amount: '25.00',
+        date: '2026-09-12',
+        note: 'Card payment',
+        is_transfer: true,
+      }),
+    ]
+    const mock = installFetchMock(editListHandler(rows))
+    renderApp('/transactions')
+    await screen.findByText('Card payment')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    const checkbox = screen.getByLabelText(TRANSFER_LABEL)
+    expect(checkbox).toBeEnabled()
+    await user.click(checkbox)
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() =>
+      expect(calls(mock, '/api/transactions/4/', 'PATCH')).toHaveLength(1),
+    )
+    const [, init] = calls(mock, '/api/transactions/4/', 'PATCH')[0]
+    expect(JSON.parse(String(init?.body))).toEqual({ is_transfer: false })
+  })
+
+  it('disables the transfer checkbox for a pending row', async () => {
+    const rows = [
+      plaidTransactionFixture({
+        id: 4,
+        account: 1,
+        category: 2,
+        amount: '25.00',
+        date: '2026-09-12',
+        note: 'Pending purchase',
+        is_pending: true,
+      }),
+    ]
+    installFetchMock(editListHandler(rows))
+    renderApp('/transactions')
+    await screen.findByText('Pending purchase')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    expect(screen.getByLabelText(TRANSFER_LABEL)).toBeDisabled()
+  })
+
+  it('disables the transfer checkbox while the row is still initially importing', async () => {
+    const rows = [
+      plaidTransactionFixture({
+        id: 6,
+        account: 1,
+        category: 2,
+        amount: '40.00',
+        date: '2026-09-12',
+        note: 'History row',
+        is_pending_initial_import: true,
+      }),
+    ]
+    installFetchMock(editListHandler(rows))
+    renderApp('/transactions')
+    await screen.findByText('History row')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    expect(screen.getByLabelText(TRANSFER_LABEL)).toBeDisabled()
+    expect(
+      screen.getByText('Wait for posting or history import before marking.'),
+    ).toBeInTheDocument()
+  })
+
+  it('allows a manual row on an account still importing history', async () => {
+    installFetchMock(
+      authenticatedEditHandler({
+        accounts: [
+          accountFixture({ id: 1, name: 'Everyday Checking' }),
+          accountFixture({ id: 2, name: 'Savings', sync_pending: true }),
+        ],
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'GET') {
+            return jsonResponse([
+              transactionFixture({
+                id: 5,
+                account: 2,
+                category: 2,
+                amount: '30.00',
+                date: '2026-09-12',
+                note: 'Importing account row',
+              }),
+            ])
+          }
+          return jsonResponse(transactionFixture(), 200)
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Importing account row')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    expect(screen.getByLabelText(TRANSFER_LABEL)).toBeEnabled()
+  })
+
+  it('maps an is_transfer backend error at the checkbox without exposing unknown fields', async () => {
+    const mock = installFetchMock(
+      editListHandler(
+        [
+          transactionFixture({
+            id: 1,
+            account: 1,
+            category: 2,
+            amount: '12.50',
+            date: '2026-09-10',
+            note: 'Groceries',
+          }),
+        ],
+        () =>
+          jsonResponse(
+            {
+              is_transfer: ['Transfers cannot be classified here.'],
+              mystery: ['boom-exposed'],
+            },
+            400,
+          ),
+      ),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    await user.click(screen.getByLabelText(TRANSFER_LABEL))
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(
+      await screen.findByText('Transfers cannot be classified here.'),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Please check the highlighted fields.',
+    )
+    expect(screen.getByLabelText(TRANSFER_LABEL)).toHaveAttribute(
+      'aria-invalid',
+      'true',
+    )
+    expect(screen.queryByText('boom-exposed')).not.toBeInTheDocument()
+    expect(calls(mock, '/api/transactions/1/', 'PATCH')).toHaveLength(1)
+  })
+
+  it('dedups a same-tick transfer submit while the patch is in flight', async () => {
+    const pending = deferred<Response>()
+    const mock = installFetchMock(
+      authenticatedEditHandler({
+        transactions: (_url, init) => {
+          if ((init?.method ?? 'GET') === 'GET') {
+            return jsonResponse([
+              transactionFixture({
+                id: 1,
+                account: 1,
+                category: 2,
+                amount: '12.50',
+                date: '2026-09-10',
+                note: 'Groceries',
+              }),
+            ])
+          }
+          return pending.promise
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Groceries')
+
+    const user = userEvent.setup()
+    await openEditorFor(user, 0)
+    await user.click(screen.getByLabelText(TRANSFER_LABEL))
+    const form = screen
+      .getByRole('button', { name: 'Save changes' })
+      .closest('form') as HTMLFormElement
+    await act(async () => {
+      fireEvent.submit(form)
+      fireEvent.submit(form)
+    })
+
+    await waitFor(() =>
+      expect(calls(mock, '/api/transactions/1/', 'PATCH')).toHaveLength(1),
+    )
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(1)
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Updating transaction…',
+    )
+    expect(screen.getByLabelText(TRANSFER_LABEL)).toBeDisabled()
+
+    await act(async () => {
+      pending.resolve(
+        jsonResponse(
+          transactionFixture({
+            id: 1,
+            account: 1,
+            category: 2,
+            amount: '12.50',
+            date: '2026-09-10',
+            note: 'Groceries',
+            is_transfer: true,
+          }),
+        ),
+      )
+    })
+    expect(await screen.findByText('Transaction updated.')).toBeInTheDocument()
+  })
+
+  it('shows a compact Transfer label on a marked row and keeps the signed amount', async () => {
+    installFetchMock(
+      authenticatedTransactionsHandler(
+        () =>
+          jsonResponse([
+            transactionFixture({
+              id: 1,
+              account: 1,
+              category: 2,
+              transaction_type: 'expense',
+              amount: '12.50',
+              date: '2026-09-10',
+              note: 'Card payment',
+              is_transfer: true,
+            }),
+          ]),
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+
+    const item = (await screen.findAllByRole('listitem'))[0]
+    expect(within(item).getByText('Transfer')).toBeInTheDocument()
+    expect(within(item).getByText('Other side unverified')).toBeInTheDocument()
+    expect(within(item).queryByText('Expense')).not.toBeInTheDocument()
+    expect(within(item).getByText('-$12.50')).toBeInTheDocument()
+  })
+})
+
 describe('transaction editing independent review defects', () => {
   it('(a) sends the exact account-only patch on active account change', async () => {
     const rows = [
@@ -5667,7 +6011,7 @@ describe('transactions result summary', () => {
     await screen.findByText('Monthly paycheck')
     expect(
       screen.getByText(
-        'Money in and out count settled transactions in this view only. Pending or still-importing rows, and rows on accounts still importing history, are not counted.',
+        'Settled account movement in this view, including transfers. Pending/importing rows and accounts are omitted. Marked transfers are excluded from Dashboard, Cash Flow, and budgets.',
       ),
     ).toBeInTheDocument()
   })

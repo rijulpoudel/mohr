@@ -283,6 +283,48 @@ describe('recent transaction semantics', () => {
 
     expect(screen.getAllByRole('listitem')).toHaveLength(2)
   })
+
+  it('labels a confirmed transfer as Transfer while keeping the signed amount', async () => {
+    installFetchMock(
+      authenticatedHandler(() =>
+        jsonResponse(
+          summaryFixture({
+            recent_transactions: [
+              transactionFixture({
+                id: 13,
+                account: 1,
+                category: 2,
+                transaction_type: 'expense',
+                amount: '425.00',
+                date: '2026-09-20',
+                note: 'Card payment',
+                is_transfer: true,
+              }),
+              transactionFixture({
+                id: 14,
+                account: 3,
+                category: 4,
+                transaction_type: 'income',
+                amount: '1000.00',
+                date: '2026-09-14',
+                note: 'Paycheck',
+              }),
+            ],
+          }),
+        ),
+      ),
+    )
+    renderApp('/')
+
+    const items = await screen.findAllByRole('listitem')
+    expect(items).toHaveLength(2)
+    expect(within(items[0]).getByText('Transfer')).toBeInTheDocument()
+    expect(within(items[0]).getByText('Other side unverified')).toBeInTheDocument()
+    expect(within(items[0]).queryByText('Expense')).not.toBeInTheDocument()
+    expect(within(items[0]).getByText('-$425.00')).toBeInTheDocument()
+    expect(within(items[1]).getByText('Income')).toBeInTheDocument()
+    expect(within(items[1]).getByText('+$1,000.00')).toBeInTheDocument()
+  })
 })
 
 describe('dashboard ready state', () => {
