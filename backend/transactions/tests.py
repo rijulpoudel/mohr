@@ -16,7 +16,7 @@ from rest_framework.test import APIClient, APITestCase
 from accounts.models import Account, AccountType
 from categories.models import Category, CategoryType
 from plaid_integration.models import PlaidAccountLink, PlaidConnection
-from transactions.models import Transaction, TransactionType
+from transactions.models import Transaction, TransactionSource, TransactionType
 from transactions.serializers import SYNCED_DELETE_MESSAGE, SYNCED_PATCH_MESSAGE
 
 TRANSACTION_TYPE_CHOICES = [
@@ -135,6 +135,18 @@ class TransactionModelTests(TestCase):
         transaction.refresh_from_db()
 
         self.assertEqual(transaction.date, date(2026, 9, 15))
+
+    def test_is_transfer_defaults_to_false_for_legacy_rows(self):
+        transaction = self.create_transaction()
+        transaction.refresh_from_db()
+
+        self.assertFalse(transaction.is_transfer)
+
+    def test_is_transfer_true_persists(self):
+        transaction = self.create_transaction(is_transfer=True)
+        transaction.refresh_from_db()
+
+        self.assertTrue(transaction.is_transfer)
 
     def test_note_defaults_to_empty_string_and_accepts_text(self):
         default = self.create_transaction()
@@ -481,6 +493,7 @@ class TransactionCollectionAPITests(APITestCase):
                     "provider_name": "",
                     "is_pending": False,
                     "is_pending_initial_import": False,
+                    "is_transfer": False,
                     "created_at": format_datetime(second.created_at),
                     "updated_at": format_datetime(second.updated_at),
                 },
@@ -496,6 +509,7 @@ class TransactionCollectionAPITests(APITestCase):
                     "provider_name": "",
                     "is_pending": False,
                     "is_pending_initial_import": False,
+                    "is_transfer": False,
                     "created_at": format_datetime(first.created_at),
                     "updated_at": format_datetime(first.updated_at),
                 },
@@ -572,6 +586,7 @@ class TransactionCollectionAPITests(APITestCase):
                 "provider_name": "",
                 "is_pending": False,
                 "is_pending_initial_import": False,
+                "is_transfer": False,
                 "created_at": format_datetime(transaction.created_at),
                 "updated_at": format_datetime(transaction.updated_at),
             },
@@ -610,6 +625,7 @@ class TransactionCollectionAPITests(APITestCase):
                 "provider_name": "",
                 "is_pending": False,
                 "is_pending_initial_import": False,
+                "is_transfer": False,
                 "created_at": format_datetime(transaction.created_at),
                 "updated_at": format_datetime(transaction.updated_at),
             },
@@ -797,6 +813,33 @@ class TransactionCollectionAPITests(APITestCase):
                 self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
                 self.assertIn("date", response.data)
                 self.assertFalse(Transaction.objects.exists())
+
+    def test_create_defaults_is_transfer_false_when_omitted(self):
+        self.client.force_login(self.user)
+
+        response = self.post_transaction()
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertFalse(response.data["is_transfer"])
+        self.assertFalse(Transaction.objects.get().is_transfer)
+
+    def test_create_accepts_explicit_is_transfer_true(self):
+        self.client.force_login(self.user)
+
+        response = self.post_transaction(is_transfer=True)
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(response.data["is_transfer"])
+        self.assertTrue(Transaction.objects.get().is_transfer)
+
+    def test_create_rejects_nonboolean_is_transfer(self):
+        self.client.force_login(self.user)
+
+        response = self.post_transaction(is_transfer="maybe")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("is_transfer", response.data)
+        self.assertFalse(Transaction.objects.exists())
 
     def test_create_note_defaults_to_empty_string_when_omitted(self):
         self.client.force_login(self.user)
@@ -1010,6 +1053,16 @@ class TransactionDetailAPITests(APITestCase):
             name="Their Groceries",
             category_type=CategoryType.EXPENSE,
         )
+        cls.connection = PlaidConnection.objects.create(
+            user=cls.user,
+            item_id="item-transaction-detail-0001",
+            institution_name="Detail Bank",
+        )
+        cls.other_connection = PlaidConnection.objects.create(
+            user=cls.other_user,
+            item_id="item-transaction-detail-other-0001",
+            institution_name="Their Detail Bank",
+        )
 
     def create_transaction(self, **overrides):
         values = {
@@ -1019,6 +1072,22 @@ class TransactionDetailAPITests(APITestCase):
             "transaction_type": TransactionType.INCOME,
             "amount": Decimal("25.50"),
             "date": date(2026, 9, 1),
+        }
+        values.update(overrides)
+        return Transaction.objects.create(**values)
+
+    def create_plaid_transaction(self, **overrides):
+        values = {
+            "user": self.user,
+            "connection": self.connection,
+            "account": self.account,
+            "category": self.expense_category,
+            "transaction_type": TransactionType.EXPENSE,
+            "amount": Decimal("25.50"),
+            "date": date(2026, 9, 1),
+            "source": TransactionSource.PLAID,
+            "plaid_transaction_id": "plaid-detail-0001",
+            "provider_name": "Synthetic Merchant",
         }
         values.update(overrides)
         return Transaction.objects.create(**values)
@@ -1062,6 +1131,7 @@ class TransactionDetailAPITests(APITestCase):
                 "provider_name": "",
                 "is_pending": False,
                 "is_pending_initial_import": False,
+                "is_transfer": False,
                 "created_at": format_datetime(transaction.created_at),
                 "updated_at": format_datetime(transaction.updated_at),
             },
@@ -1135,6 +1205,152 @@ class TransactionDetailAPITests(APITestCase):
             format="json",
         )
 
+    def test_patch_manual_row_sets_and_clears_is_transfer(self):
+        transaction = self.create_transaction()
+        self.client.force_login(self.user)
+
+        set_response = self.patch_transaction(transaction, {"is_transfer": True})
+        self.assertEqual(set_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(set_response.data["is_transfer"])
+        transaction.refresh_from_db()
+        self.assertTrue(transaction.is_transfer)
+
+        clear_response = self.patch_transaction(transaction, {"is_transfer": False})
+        self.assertEqual(clear_response.status_code, status.HTTP_200_OK)
+        self.assertFalse(clear_response.data["is_transfer"])
+        transaction.refresh_from_db()
+        self.assertFalse(transaction.is_transfer)
+
+    def test_patch_posted_plaid_row_sets_is_transfer(self):
+        transaction = self.create_plaid_transaction()
+        self.client.force_login(self.user)
+
+        response = self.patch_transaction(transaction, {"is_transfer": True})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["is_transfer"])
+        transaction.refresh_from_db()
+        self.assertTrue(transaction.is_transfer)
+
+    def test_patch_pending_plaid_row_rejects_is_transfer(self):
+        transaction = self.create_plaid_transaction(is_pending=True)
+        self.client.force_login(self.user)
+
+        response = self.patch_transaction(transaction, {"is_transfer": True})
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("is_transfer", response.data)
+        transaction.refresh_from_db()
+        self.assertFalse(transaction.is_transfer)
+
+    def test_patch_provider_removed_row_rejects_is_transfer(self):
+        transaction = self.create_plaid_transaction(is_provider_removed=True)
+        self.client.force_login(self.user)
+
+        response = self.patch_transaction(transaction, {"is_transfer": True})
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("is_transfer", response.data)
+        transaction.refresh_from_db()
+        self.assertFalse(transaction.is_transfer)
+
+    def test_patch_superseded_row_rejects_is_transfer(self):
+        posted = self.create_plaid_transaction(
+            plaid_transaction_id="plaid-detail-posted"
+        )
+        superseded = self.create_plaid_transaction(
+            plaid_transaction_id="plaid-detail-superseded",
+            is_superseded=True,
+            superseded_by=posted,
+        )
+        self.client.force_login(self.user)
+
+        response = self.patch_transaction(superseded, {"is_transfer": True})
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("is_transfer", response.data)
+        superseded.refresh_from_db()
+        self.assertFalse(superseded.is_transfer)
+
+    def test_patch_unanchored_posted_plaid_row_rejects_is_transfer(self):
+        PlaidAccountLink.objects.create(
+            connection=self.connection,
+            user=self.user,
+            account=self.account,
+            plaid_account_id="plaid-detail-unanchored",
+            plaid_type="depository",
+            plaid_subtype="checking",
+            mask="0001",
+        )
+        transaction = self.create_plaid_transaction()
+        self.client.force_login(self.user)
+
+        response = self.patch_transaction(transaction, {"is_transfer": True})
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("is_transfer", response.data)
+        transaction.refresh_from_db()
+        self.assertFalse(transaction.is_transfer)
+
+    def test_patch_unanchored_posted_plaid_row_still_allows_category_and_note(self):
+        PlaidAccountLink.objects.create(
+            connection=self.connection,
+            user=self.user,
+            account=self.account,
+            plaid_account_id="plaid-detail-unanchored-edits",
+            plaid_type="depository",
+            plaid_subtype="checking",
+            mask="0002",
+        )
+        transaction = self.create_plaid_transaction()
+        self.client.force_login(self.user)
+
+        response = self.patch_transaction(
+            transaction,
+            {"category": self.expense_category.id, "note": "kept editable"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        transaction.refresh_from_db()
+        self.assertEqual(transaction.note, "kept editable")
+        self.assertTrue(transaction.note_customized)
+        self.assertTrue(transaction.category_customized)
+
+    def test_patch_rejects_nonboolean_is_transfer_without_mutation(self):
+        transaction = self.create_transaction()
+        self.client.force_login(self.user)
+
+        response = self.patch_transaction(transaction, {"is_transfer": "maybe"})
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("is_transfer", response.data)
+        transaction.refresh_from_db()
+        self.assertFalse(transaction.is_transfer)
+
+    def test_patch_is_transfer_returns_404_for_another_users_row(self):
+        other_transaction = self.create_plaid_transaction(
+            user=self.other_user,
+            connection=self.other_connection,
+            account=self.other_account,
+            category=self.other_expense_category,
+        )
+        self.client.force_login(self.user)
+
+        response = self.patch_transaction(other_transaction, {"is_transfer": True})
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        other_transaction.refresh_from_db()
+        self.assertFalse(other_transaction.is_transfer)
+
+    def test_patch_is_transfer_requires_authentication(self):
+        transaction = self.create_transaction()
+
+        response = self.patch_transaction(transaction, {"is_transfer": True})
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        transaction.refresh_from_db()
+        self.assertFalse(transaction.is_transfer)
+
     def test_patch_partially_updates_note_only_and_keeps_other_fields(self):
         transaction = self.create_transaction()
         before = self.snapshot(transaction)
@@ -1171,6 +1387,7 @@ class TransactionDetailAPITests(APITestCase):
                 "provider_name": "",
                 "is_pending": False,
                 "is_pending_initial_import": False,
+                "is_transfer": False,
                 "created_at": format_datetime(transaction.created_at),
                 "updated_at": format_datetime(transaction.updated_at),
             },
@@ -2717,6 +2934,7 @@ class TransactionProviderVisibilityAPITests(APITestCase):
                 "provider_name",
                 "is_pending",
                 "is_pending_initial_import",
+                "is_transfer",
                 "created_at",
                 "updated_at",
             },
@@ -2936,8 +3154,10 @@ class TransactionProviderVisibilityAPITests(APITestCase):
 
 
 class SyncedTransactionPatchAPITests(APITestCase):
-    """Slice A PATCH contract: source=plaid rows accept only category and
-    note, and each explicit edit pins its override flag forever."""
+    """Slice A PATCH contract: source=plaid rows accept only category, note,
+    and transfer edits on a settled anchored row, each explicit category/note
+    edit pins its override flag forever, and transfer edits are rejected on
+    pending, removed, superseded, or not-yet-anchored rows."""
 
     @classmethod
     def setUpTestData(cls):

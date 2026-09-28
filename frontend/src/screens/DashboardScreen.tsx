@@ -91,7 +91,11 @@ function TransactionItem({
     <li className="transaction-item">
       <div className="transaction-main">
         <span className="transaction-type">
-          {transaction.transaction_type === 'income' ? 'Income' : 'Expense'}
+          {transaction.is_transfer
+            ? 'Transfer'
+            : transaction.transaction_type === 'income'
+              ? 'Income'
+              : 'Expense'}
         </span>
         <span className="transaction-amount">
           {formatSignedMoney(transaction.amount, transaction.transaction_type)}
@@ -101,6 +105,7 @@ function TransactionItem({
         <time dateTime={transaction.date}>
           {formatUtcDate(transaction.date)}
         </time>
+        {transaction.is_transfer && <span>Other side unverified</span>}
       </div>
       {transaction.note !== '' && (
         <p className="transaction-note">{transaction.note}</p>

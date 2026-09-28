@@ -18,6 +18,7 @@ export interface DashboardTransaction {
   provider_name: string
   is_pending: boolean
   is_pending_initial_import: boolean
+  is_transfer: boolean
   created_at: string
   updated_at: string
 }
@@ -54,6 +55,7 @@ const TRANSACTION_KEYS = [
   'provider_name',
   'is_pending',
   'is_pending_initial_import',
+  'is_transfer',
   'created_at',
   'updated_at',
 ] as const
@@ -107,6 +109,7 @@ function parseTransaction(value: unknown): DashboardTransaction | null {
     provider_name,
     is_pending,
     is_pending_initial_import,
+    is_transfer,
     created_at,
     updated_at,
   } = value
@@ -127,6 +130,7 @@ function parseTransaction(value: unknown): DashboardTransaction | null {
   }
   if (typeof is_pending !== 'boolean') return null
   if (typeof is_pending_initial_import !== 'boolean') return null
+  if (typeof is_transfer !== 'boolean') return null
   if (source === 'manual' && (provider_name !== '' || is_pending !== false)) {
     return null
   }
@@ -144,6 +148,7 @@ function parseTransaction(value: unknown): DashboardTransaction | null {
     provider_name,
     is_pending,
     is_pending_initial_import,
+    is_transfer,
     created_at,
     updated_at,
   }

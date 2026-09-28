@@ -58,6 +58,7 @@ class Transaction(models.Model):
     )
     category_customized = models.BooleanField(default=False)
     note_customized = models.BooleanField(default=False)
+    is_transfer = models.BooleanField(default=False)
     connection = models.ForeignKey(
         "plaid_integration.PlaidConnection",
         on_delete=models.RESTRICT,

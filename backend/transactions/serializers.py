@@ -10,9 +10,15 @@ from transactions.models import Transaction, TransactionSource, TransactionType
 ARCHIVED_ACCOUNT_MESSAGE = "Archived accounts cannot be used for new transactions."
 ARCHIVED_CATEGORY_MESSAGE = "Archived categories cannot be used for new transactions."
 CATEGORY_TYPE_MISMATCH_MESSAGE = "Category type must match the transaction type."
-SYNCED_PATCH_MESSAGE = "Synced transactions accept only category and note edits."
+SYNCED_PATCH_MESSAGE = (
+    "Synced transactions accept only category, note, and transfer edits."
+)
 SYNCED_DELETE_MESSAGE = (
     "Synced transactions are retained for audit and cannot be deleted."
+)
+AUDIT_TRANSFER_EDIT_MESSAGE = (
+    "Transfers cannot be classified on pending, removed, superseded, or "
+    "not-yet-anchored transactions."
 )
 
 
@@ -121,6 +127,7 @@ class TransactionSerializer(serializers.ModelSerializer):
             "provider_name",
             "is_pending",
             "is_pending_initial_import",
+            "is_transfer",
             "created_at",
             "updated_at",
         )
@@ -162,10 +169,24 @@ class TransactionSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"category": [CATEGORY_TYPE_MISMATCH_MESSAGE]}
             )
+        if (
+            isinstance(self.initial_data, Mapping)
+            and "is_transfer" in self.initial_data
+            and self.instance is not None
+            and (
+                self.instance.is_pending
+                or self.instance.is_provider_removed
+                or self.instance.is_superseded
+                or self.instance.is_pending_initial_import
+            )
+        ):
+            raise serializers.ValidationError(
+                {"is_transfer": [AUDIT_TRANSFER_EDIT_MESSAGE]}
+            )
         if getattr(
             self.instance, "source", None
         ) == TransactionSource.PLAID and isinstance(self.initial_data, Mapping):
-            blocked = set(self.initial_data) - {"category", "note"}
+            blocked = set(self.initial_data) - {"category", "note", "is_transfer"}
             if blocked:
                 raise serializers.ValidationError(
                     {"non_field_errors": [SYNCED_PATCH_MESSAGE]}
@@ -176,12 +197,15 @@ class TransactionSerializer(serializers.ModelSerializer):
         if instance.source == TransactionSource.PLAID:
             category = validated_data.pop("category", None)
             note = validated_data.pop("note", None)
+            is_transfer = validated_data.pop("is_transfer", None)
             if category is not None:
                 instance.category = category
                 instance.category_customized = True
             if note is not None:
                 instance.note = note
                 instance.note_customized = True
+            if is_transfer is not None:
+                instance.is_transfer = is_transfer
             instance.save()
             return instance
         return super().update(instance, validated_data)

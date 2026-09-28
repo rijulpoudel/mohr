@@ -931,6 +931,16 @@ class BudgetCalculationTests(APITestCase):
 
         self.assertEqual(item["spent"], "0.00")
 
+    def test_spent_excludes_confirmed_transfer_expenses(self):
+        budget = self.create_budget()
+        self.create_transaction(amount=Decimal("25.50"))
+        self.create_transaction(amount=Decimal("100.00"), is_transfer=True)
+
+        item = self.fetch_budget(budget)
+
+        self.assertEqual(item["spent"], "25.50")
+        self.assertEqual(item["remaining"], "474.50")
+
     def test_spent_defensively_excludes_foreign_user_transactions_on_same_category(
         self,
     ):

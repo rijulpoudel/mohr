@@ -45,12 +45,19 @@ const NO_ACTIVE_CATEGORIES_MESSAGE =
 
 const NO_CHANGES_MESSAGE = 'Make at least one change before saving.'
 
+const TRANSFER_LABEL = 'Mark as transfer or card payment'
+const TRANSFER_HINT =
+  'Only this transaction is marked. The other side is not verified.'
+const TRANSFER_LOCKED_HINT = 'Wait for posting or history import before marking.'
+
 // The two money figures count only rows that have settled: pending and
 // still-importing bank rows, and every row on an account whose Plaid anchor
 // is still pending (Account.sync_pending), are visible in the list but never
-// counted, so the scope is always stated instead of implied.
+// counted, so the scope is always stated instead of implied. Confirming a
+// transfer changes reporting only, never account direction, so a marked row
+// still appears in these direction totals.
 const SUMMARY_CAPTION =
-  'Money in and out count settled transactions in this view only. Pending or still-importing rows, and rows on accounts still importing history, are not counted.'
+  'Settled account movement in this view, including transfers. Pending/importing rows and accounts are omitted. Marked transfers are excluded from Dashboard, Cash Flow, and budgets.'
 const UNCATEGORIZED_LABEL = 'Uncategorized'
 
 function monthSubtotal(
@@ -102,6 +109,10 @@ const KNOWN_CREATE_FIELDS = [
   'date',
   'note',
 ] as const
+
+// Only the edit form can send `is_transfer`, so the create form must not
+// surface a backend error for a field it never submits.
+const KNOWN_EDIT_FIELDS = [...KNOWN_CREATE_FIELDS, 'is_transfer'] as const
 
 type TransactionsState =
   | { status: 'loading' }
@@ -283,6 +294,7 @@ function buildEditPatch(
   amount: string,
   date: string,
   note: string,
+  isTransfer: boolean,
 ): TransactionPatch {
   const patch: TransactionPatch = {}
   if (account !== String(original.account)) {
@@ -302,6 +314,9 @@ function buildEditPatch(
   }
   if (note !== original.note) {
     patch.note = note
+  }
+  if (isTransfer !== original.is_transfer) {
+    patch.is_transfer = isTransfer
   }
   return patch
 }
@@ -364,8 +379,18 @@ function TransactionItem({
           <span className="transactions-title">
             {categoryName ?? UNCATEGORIZED_LABEL}
           </span>
-          <span className="transaction-type">
-            {transaction.transaction_type === 'income' ? 'Income' : 'Expense'}
+          <span
+            className={
+              transaction.is_transfer
+                ? 'transaction-type transaction-type-transfer'
+                : 'transaction-type'
+            }
+          >
+            {transaction.is_transfer
+              ? 'Transfer'
+              : transaction.transaction_type === 'income'
+                ? 'Income'
+                : 'Expense'}
           </span>
         </div>
         <span className="transaction-amount">
@@ -375,6 +400,7 @@ function TransactionItem({
       <div className="transaction-meta">
         <time dateTime={transaction.date}>{transaction.date}</time>
         {accountName !== undefined && <span>{accountName}</span>}
+        {transaction.is_transfer && <span>Other side unverified</span>}
         {transaction.source === 'plaid' && (
           <span className="transaction-source transactions-badge transactions-badge-synced">
             From your bank
@@ -566,6 +592,7 @@ function EditTransactionForm({
   const [amount, setAmount] = useState(transaction.amount)
   const [date, setDate] = useState(transaction.date)
   const [note, setNote] = useState(transaction.note)
+  const [isTransfer, setIsTransfer] = useState(transaction.is_transfer)
   const [pending, setPending] = useState(false)
   const [fieldErrors, setFieldErrors] = useState<FieldErrors | null>(null)
   const [submitError, setSubmitError] = useState<string | null>(null)
@@ -602,6 +629,10 @@ function EditTransactionForm({
     originalAccount !== undefined && originalAccount.is_archived
       ? [...activeAccounts, originalAccount]
       : activeAccounts
+  // Only pending or still-importing bank rows are ineligible. Manual rows
+  // remain markable even if their account is importing bank history.
+  const transferLocked =
+    transaction.is_pending || transaction.is_pending_initial_import
   const originalCategory = categories.find(
     (item) => item.id === transaction.category,
   )
@@ -680,6 +711,7 @@ function EditTransactionForm({
       amount,
       date,
       note,
+      isTransfer,
     )
     if (Object.keys(patch).length === 0) {
       setSubmitError(NO_CHANGES_MESSAGE)
@@ -702,7 +734,7 @@ function EditTransactionForm({
       if (caught instanceof ApiError) {
         const backendFields = caught.fieldErrors ?? {}
         const known: FieldErrors = {}
-        for (const field of KNOWN_CREATE_FIELDS) {
+        for (const field of KNOWN_EDIT_FIELDS) {
           const messages = backendFields[field]
           if (messages !== undefined && messages.length > 0) {
             known[field] = [...messages]
@@ -733,15 +765,22 @@ function EditTransactionForm({
   const amountError = firstCreateError(fieldErrors, 'amount')
   const dateError = firstCreateError(fieldErrors, 'date')
   const noteError = firstCreateError(fieldErrors, 'note')
+  const isTransferError = firstCreateError(fieldErrors, 'is_transfer')
   const hasFieldErrors =
     accountError !== null ||
     categoryError !== null ||
     typeError !== null ||
     amountError !== null ||
     dateError !== null ||
-    noteError !== null
+    noteError !== null ||
+    isTransferError !== null
   const summary = submitError ?? (hasFieldErrors ? FIELD_ERROR_SUMMARY : null)
   const base = `edit-transaction-${transaction.id}`
+  const isTransferDescriptionId = `${base}-is-transfer-hint`
+  const isTransferDescribedBy =
+    isTransferError !== null
+      ? `${isTransferDescriptionId} ${base}-is-transfer-error`
+      : isTransferDescriptionId
 
   return (
     <li className="transaction-item transaction-edit">
@@ -924,6 +963,34 @@ function EditTransactionForm({
           {noteError !== null && (
             <ul id={`${base}-note-error`} className="field-errors">
               {fieldErrors?.note?.map((message) => (
+                <li key={message}>{message}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div className="form-field">
+          <label htmlFor={`${base}-is-transfer`}>
+            <input
+              id={`${base}-is-transfer`}
+              type="checkbox"
+              name="is_transfer"
+              checked={isTransfer}
+              onChange={(event) => {
+                setIsTransfer(event.target.checked)
+                clearEditFieldError('is_transfer')
+              }}
+              disabled={pending || transferLocked}
+              aria-invalid={isTransferError !== null}
+              aria-describedby={isTransferDescribedBy}
+            />{' '}
+            {TRANSFER_LABEL}
+          </label>
+          <p id={isTransferDescriptionId} className="field-hint">
+            {transferLocked ? TRANSFER_LOCKED_HINT : TRANSFER_HINT}
+          </p>
+          {isTransferError !== null && (
+            <ul id={`${base}-is-transfer-error`} className="field-errors">
+              {fieldErrors?.is_transfer?.map((message) => (
                 <li key={message}>{message}</li>
               ))}
             </ul>

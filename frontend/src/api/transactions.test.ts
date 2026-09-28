@@ -32,6 +32,7 @@ function transactionFixture(overrides: Record<string, unknown> = {}) {
     provider_name: '',
     is_pending: false,
     is_pending_initial_import: false,
+    is_transfer: false,
     created_at: '2026-09-11T14:52:48.008850Z',
     updated_at: '2026-09-11T14:52:48.008850Z',
     ...overrides,
@@ -82,7 +83,7 @@ afterEach(() => {
 })
 
 describe('fetchTransactions', () => {
-  it('parses the transaction list in server order with all thirteen fields', async () => {
+  it('parses the transaction list in server order with all fourteen fields', async () => {
     const mock = installFetchMock((url) => {
       if (url === '/api/transactions/') {
         return jsonResponse([
@@ -129,6 +130,7 @@ describe('fetchTransactions', () => {
       provider_name: '',
       is_pending: false,
       is_pending_initial_import: false,
+      is_transfer: false,
       created_at: '2026-09-10T10:00:00Z',
       updated_at: '2026-09-10T10:00:00Z',
     })
@@ -144,6 +146,7 @@ describe('fetchTransactions', () => {
       provider_name: '',
       is_pending: false,
       is_pending_initial_import: false,
+      is_transfer: false,
       created_at: '2026-09-11T16:08:00.000000Z',
       updated_at: '2026-09-11T16:08:00.000000Z',
     })
@@ -165,6 +168,7 @@ describe('fetchTransactions', () => {
             provider_name: '',
             is_pending: false,
             is_pending_initial_import: false,
+            is_transfer: false,
             created_at: '2026-09-10T10:00:00Z',
             updated_at: '2026-09-10T10:00:00Z',
           },
@@ -188,9 +192,29 @@ describe('fetchTransactions', () => {
         provider_name: '',
         is_pending: false,
         is_pending_initial_import: false,
+        is_transfer: false,
         created_at: '2026-09-10T10:00:00Z',
         updated_at: '2026-09-10T10:00:00Z',
       },
+    ])
+  })
+
+  it('parses is_transfer as a boolean classification flag', async () => {
+    installFetchMock((url) => {
+      if (url === '/api/transactions/') {
+        return jsonResponse([
+          transactionFixture({ id: 1, is_transfer: false }),
+          transactionFixture({ id: 2, is_transfer: true }),
+        ])
+      }
+      return jsonResponse({}, 404)
+    })
+
+    const transactions = await fetchTransactions()
+
+    expect(transactions.map((item) => [item.id, item.is_transfer])).toEqual([
+      [1, false],
+      [2, true],
     ])
   })
 
@@ -224,6 +248,7 @@ describe('fetchTransactions', () => {
       provider_name: '',
       is_pending: true,
       is_pending_initial_import: true,
+      is_transfer: false,
       created_at: '2026-09-11T14:52:48.008850Z',
       updated_at: '2026-09-11T14:52:48.008850Z',
     })
@@ -287,6 +312,10 @@ describe('fetchTransactions', () => {
     ['a null is_pending', [transactionFixture({ is_pending: null })]],
     ['a numeric is_pending_initial_import', [transactionFixture({ is_pending_initial_import: 1 })]],
     ['a string is_pending_initial_import', [transactionFixture({ is_pending_initial_import: 'false' })]],
+    ['a missing is_transfer', [withoutKey(transactionFixture(), 'is_transfer')]],
+    ['a numeric is_transfer', [transactionFixture({ is_transfer: 1 })]],
+    ['a string is_transfer', [transactionFixture({ is_transfer: 'true' })]],
+    ['a null is_transfer', [transactionFixture({ is_transfer: null })]],
     ['a manual row with a provider_name', [transactionFixture({ provider_name: 'Chase' })]],
     ['a manual row with is_pending', [transactionFixture({ is_pending: true })]],
     ['a manual row with is_pending_initial_import', [transactionFixture({ is_pending_initial_import: true })]],
@@ -840,7 +869,40 @@ describe('updateTransaction', () => {
     expect(transaction.note).toBe('Updated note')
   })
 
-  it('PATCHes all six writable fields and never server-controlled fields', async () => {
+  it('PATCHes is_transfer true and false and omits it when not provided', async () => {
+    const mock = installFetchMock(
+      mutationHandler((url, init) => {
+        const match = /^\/api\/transactions\/(\d+)\/$/.exec(url)
+        if (match !== null) {
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+          return jsonResponse(
+            transactionFixture({ id: Number(match[1]), ...body }),
+            200,
+          )
+        }
+        return jsonResponse({}, 404)
+      }),
+    )
+
+    const marked = await updateTransaction(7, { is_transfer: true })
+    expect(marked.is_transfer).toBe(true)
+    expect(JSON.parse(String(calls(mock, '/api/transactions/7/', 'PATCH')[0][1]?.body))).toEqual({
+      is_transfer: true,
+    })
+
+    const unmarked = await updateTransaction(7, { is_transfer: false })
+    expect(unmarked.is_transfer).toBe(false)
+    expect(JSON.parse(String(calls(mock, '/api/transactions/7/', 'PATCH')[1][1]?.body))).toEqual({
+      is_transfer: false,
+    })
+
+    await updateTransaction(7, { note: 'No classification change' })
+    expect(
+      JSON.parse(String(calls(mock, '/api/transactions/7/', 'PATCH')[2][1]?.body)),
+    ).toEqual({ note: 'No classification change' })
+  })
+
+  it('PATCHes all seven writable fields and never server-controlled fields', async () => {
     const mock = installFetchMock(
       mutationHandler((url, init) => {
         if (url === '/api/transactions/11/') {
@@ -858,6 +920,7 @@ describe('updateTransaction', () => {
       amount: '100.00',
       date: '2026-09-01',
       note: 'Paycheck',
+      is_transfer: true,
     })
 
     const patches = calls(mock, '/api/transactions/11/', 'PATCH')
@@ -869,6 +932,7 @@ describe('updateTransaction', () => {
       amount: '100.00',
       date: '2026-09-01',
       note: 'Paycheck',
+      is_transfer: true,
     })
     expect(transaction.id).toBe(11)
     expect(transaction.account).toBe(3)
@@ -877,6 +941,7 @@ describe('updateTransaction', () => {
     expect(transaction.amount).toBe('100.00')
     expect(transaction.date).toBe('2026-09-01')
     expect(transaction.note).toBe('Paycheck')
+    expect(transaction.is_transfer).toBe(true)
   })
 
   it.each([
