@@ -40,6 +40,7 @@ function transactionFixture(overrides: Record<string, unknown> = {}) {
     provider_name: '',
     is_pending: false,
     is_pending_initial_import: false,
+    is_transfer: false,
     created_at: '2026-09-11T14:52:48.008850Z',
     updated_at: '2026-09-11T14:52:48.008850Z',
     ...overrides,
@@ -66,7 +67,7 @@ afterEach(() => {
 })
 
 describe('fetchDashboardSummary', () => {
-  it('parses five money values and recent transactions with all thirteen fields', async () => {
+  it('parses five money values and recent transactions with all fourteen fields', async () => {
     const mock = installFetchMock((url) => {
       if (url === '/api/dashboard/summary/') {
         return jsonResponse(
@@ -89,6 +90,7 @@ describe('fetchDashboardSummary', () => {
                 provider_name: 'Chase',
                 is_pending: true,
                 is_pending_initial_import: true,
+                is_transfer: false,
               }),
             ],
           }),
@@ -118,6 +120,7 @@ describe('fetchDashboardSummary', () => {
         provider_name: '',
         is_pending: false,
         is_pending_initial_import: false,
+        is_transfer: false,
         created_at: '2026-09-14T08:00:00.000000Z',
         updated_at: '2026-09-14T08:00:00.000000Z',
       },
@@ -133,6 +136,7 @@ describe('fetchDashboardSummary', () => {
         provider_name: 'Chase',
         is_pending: true,
         is_pending_initial_import: true,
+        is_transfer: false,
         created_at: '2026-09-11T14:52:48.008850Z',
         updated_at: '2026-09-11T14:52:48.008850Z',
       },
@@ -160,6 +164,7 @@ describe('fetchDashboardSummary', () => {
             provider_name: '',
             is_pending: false,
             is_pending_initial_import: false,
+            is_transfer: false,
             created_at: '2026-09-10T10:00:00Z',
             updated_at: '2026-09-10T10:00:00Z',
           },
@@ -180,12 +185,13 @@ describe('fetchDashboardSummary', () => {
       provider_name: '',
       is_pending: false,
       is_pending_initial_import: false,
+      is_transfer: false,
       created_at: '2026-09-10T10:00:00Z',
       updated_at: '2026-09-10T10:00:00Z',
     })
   })
 
-  it('parses a valid thirteen-key recent transaction', async () => {
+  it('parses a valid fourteen-key recent transaction', async () => {
     installFetchMock((url) => {
       if (url === '/api/dashboard/summary/') {
         return jsonResponse(
@@ -205,6 +211,29 @@ describe('fetchDashboardSummary', () => {
     expect(summary.recent_transactions[0].provider_name).toBe('')
     expect(summary.recent_transactions[0].is_pending).toBe(false)
     expect(summary.recent_transactions[0].is_pending_initial_import).toBe(false)
+  })
+
+  it('decodes is_transfer on nested recent transactions', async () => {
+    installFetchMock((url) => {
+      if (url === '/api/dashboard/summary/') {
+        return jsonResponse(
+          summaryFixture({
+            recent_transactions: [
+              transactionFixture({ id: 7, is_transfer: true }),
+              transactionFixture({ id: 8, is_transfer: false }),
+            ],
+          }),
+        )
+      }
+      return jsonResponse({}, 404)
+    })
+
+    const summary = await fetchDashboardSummary()
+
+    expect(summary.recent_transactions.map((item) => item.is_transfer)).toEqual([
+      true,
+      false,
+    ])
   })
 
   it('rejects a recent transaction missing source as malformed', async () => {
@@ -284,6 +313,10 @@ describe('fetchDashboardSummary', () => {
     ['a null is_pending', summaryFixture({ recent_transactions: [transactionFixture({ is_pending: null })] })],
     ['a numeric is_pending_initial_import', summaryFixture({ recent_transactions: [transactionFixture({ is_pending_initial_import: 1 })] })],
     ['a string is_pending_initial_import', summaryFixture({ recent_transactions: [transactionFixture({ is_pending_initial_import: 'false' })] })],
+    ['a missing is_transfer', summaryFixture({ recent_transactions: [withoutKey(transactionFixture(), 'is_transfer')] })],
+    ['a numeric is_transfer', summaryFixture({ recent_transactions: [transactionFixture({ is_transfer: 1 })] })],
+    ['a string is_transfer', summaryFixture({ recent_transactions: [transactionFixture({ is_transfer: 'true' })] })],
+    ['a null is_transfer', summaryFixture({ recent_transactions: [transactionFixture({ is_transfer: null })] })],
     ['a null is_pending_initial_import', summaryFixture({ recent_transactions: [transactionFixture({ is_pending_initial_import: null })] })],
     ['a manual row with a provider_name', summaryFixture({ recent_transactions: [transactionFixture({ provider_name: 'Chase' })] })],
     ['a manual row with is_pending', summaryFixture({ recent_transactions: [transactionFixture({ is_pending: true })] })],

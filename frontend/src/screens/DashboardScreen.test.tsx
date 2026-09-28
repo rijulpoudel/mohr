@@ -36,6 +36,7 @@ function transactionFixture(overrides: Record<string, unknown> = {}) {
     provider_name: '',
     is_pending: false,
     is_pending_initial_import: false,
+    is_transfer: false,
     created_at: '2026-09-15T12:00:00.123456Z',
     updated_at: '2026-09-15T12:00:00.123456Z',
     ...overrides,

@@ -20,6 +20,7 @@ export interface Transaction {
   provider_name: string
   is_pending: boolean
   is_pending_initial_import: boolean
+  is_transfer: boolean
   created_at: string
   updated_at: string
 }
@@ -48,6 +49,7 @@ export interface TransactionPatch {
   amount?: string
   date?: string
   note?: string
+  is_transfer?: boolean
 }
 
 // Mirrors backend/transactions/serializers.py TransactionSerializer.Meta.fields.
@@ -63,6 +65,7 @@ const TRANSACTION_KEYS = [
   'provider_name',
   'is_pending',
   'is_pending_initial_import',
+  'is_transfer',
   'created_at',
   'updated_at',
 ] as const
@@ -135,6 +138,7 @@ function parseTransaction(value: unknown): Transaction | null {
     provider_name,
     is_pending,
     is_pending_initial_import,
+    is_transfer,
     created_at,
     updated_at,
   } = value
@@ -156,6 +160,7 @@ function parseTransaction(value: unknown): Transaction | null {
   }
   if (typeof is_pending !== 'boolean') return null
   if (typeof is_pending_initial_import !== 'boolean') return null
+  if (typeof is_transfer !== 'boolean') return null
   if (source === 'manual' && (provider_name !== '' || is_pending !== false)) {
     return null
   }
@@ -173,6 +178,7 @@ function parseTransaction(value: unknown): Transaction | null {
     provider_name,
     is_pending,
     is_pending_initial_import,
+    is_transfer,
     created_at,
     updated_at,
   }
@@ -312,6 +318,7 @@ export async function updateTransaction(
   if (patch.amount !== undefined) body.amount = patch.amount
   if (patch.date !== undefined) body.date = patch.date
   if (patch.note !== undefined) body.note = patch.note
+  if (patch.is_transfer !== undefined) body.is_transfer = patch.is_transfer
   const token = await getCsrfToken()
   return apiFetch(
     `/api/transactions/${transactionId}/`,

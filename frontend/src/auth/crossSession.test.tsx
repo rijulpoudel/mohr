@@ -30,6 +30,7 @@ function summaryFixture(note: string) {
         provider_name: '',
         is_pending: false,
         is_pending_initial_import: false,
+        is_transfer: false,
         created_at: '2026-09-14T08:00:00.000000Z',
         updated_at: '2026-09-14T08:00:00.000000Z',
       },
