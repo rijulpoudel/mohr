@@ -7,6 +7,7 @@ import {
 } from '../api/dashboard'
 import { ApiError, userMessage } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
+import { BankSyncNotice } from '../components/BankSyncNotice'
 import {
   clampedPercent,
   decimalToCents,
@@ -370,6 +371,7 @@ export function DashboardScreen() {
           {logoutError}
         </div>
       )}
+      <BankSyncNotice />
       <DashboardSummaryPanel
         key={attempt}
         onRetry={() => setAttempt((current) => current + 1)}

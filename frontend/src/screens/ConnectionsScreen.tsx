@@ -12,6 +12,11 @@ import {
 } from '../api/plaid'
 import { ApiError, userMessage } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
+import {
+  CONNECTION_STALE_AFTER_MS as CONNECTION_STALE_AFTER_MS_VALUE,
+  formatSyncTime,
+  isConnectionStale,
+} from '../format/bankSync'
 import { ConnectBankButton } from './ConnectBankButton'
 
 const GENERIC_ERROR_MESSAGE = 'Something went wrong. Please try again.'
@@ -25,7 +30,7 @@ const LINK_LOAD_ERROR_MESSAGE =
   'We could not start the bank connection. Please try again.'
 const VERIFYING_REPAIRED_MESSAGE = 'Verifying the repaired connection…'
 
-export const CONNECTION_STALE_AFTER_MS = 24 * 60 * 60 * 1000
+export const CONNECTION_STALE_AFTER_MS = CONNECTION_STALE_AFTER_MS_VALUE
 
 const CONNECTION_STATUS_LABELS: Record<PlaidConnectionStatus, string> = {
   active: 'Connected',
@@ -106,10 +111,6 @@ function syncSummaryMessage(summary: SyncSummary): string {
   return `${parts.join(', ')}.`
 }
 
-function isConnectionStale(lastSyncedAt: string, now: number): boolean {
-  return now - Date.parse(lastSyncedAt) > CONNECTION_STALE_AFTER_MS
-}
-
 function connectionSyncStatus(
   connection: PlaidConnection,
   now: number,
@@ -132,16 +133,6 @@ function connectionSyncStatus(
   return isConnectionStale(connection.last_synced_at, now)
     ? 'Data may be stale'
     : 'Up to date'
-}
-
-function formatSyncTime(iso: string): string {
-  const date = new Date(iso)
-  const formatted = date.toLocaleString('en-US', {
-    dateStyle: 'medium',
-    timeStyle: 'short',
-    timeZone: 'UTC',
-  })
-  return `${formatted} UTC`
 }
 
 function ConnectionCard({

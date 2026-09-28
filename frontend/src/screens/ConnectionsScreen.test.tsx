@@ -785,7 +785,7 @@ describe('connections error handling', () => {
     expect(calls(mock, '/api/plaid/connections/')).toHaveLength(1)
   })
 
-  it('ignores a late connections 401 after navigating to dashboard', async () => {
+  it('clears the session when the live dashboard shares a late connections 401', async () => {
     const pending = deferred<Response>()
     const mock = installFetchMock((url: string) => {
       if (url === '/api/auth/me/') {
@@ -817,13 +817,9 @@ describe('connections error handling', () => {
       )
     })
 
-    expect(window.location.pathname).toBe('/')
-    expect(screen.getByRole('heading', { name: 'Overview' })).toBeInTheDocument()
-    expect(screen.getByText('$1,234.56')).toBeInTheDocument()
-    expect(
-      screen.getByRole('navigation', { name: 'Primary' }),
-    ).toBeInTheDocument()
-    expect(screen.queryByLabelText('Email')).not.toBeInTheDocument()
+    expect(await screen.findByLabelText('Email')).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/login')
+    expect(screen.queryByRole('heading', { name: 'Overview' })).not.toBeInTheDocument()
     expect(
       requestLog(mock).some((entry) => entry.includes('/api/auth/logout/')),
     ).toBe(false)
@@ -831,6 +827,32 @@ describe('connections error handling', () => {
     expect(sessionStorage.length).toBe(0)
     expect(calls(mock, '/api/plaid/connections/')).toHaveLength(1)
     expect(calls(mock, '/api/dashboard/summary/')).toHaveLength(1)
+  })
+
+  it('ignores a late connections 401 after leaving for Accounts', async () => {
+    const pending = deferred<Response>()
+    const mock = installFetchMock((url: string) => {
+      if (url === '/api/auth/me/') {
+        return jsonResponse({ id: 1, email: 'student@example.com' })
+      }
+      if (url === '/api/plaid/connections/') return pending.promise
+      if (url === '/api/accounts/') return jsonResponse([])
+      return jsonResponse({}, 404)
+    })
+    renderApp('/connections')
+    await waitFor(() => expect(calls(mock, '/api/plaid/connections/')).toHaveLength(1))
+    const user = userEvent.setup()
+    await user.click(
+      within(screen.getByRole('navigation', { name: 'Primary' })).getByRole('link', { name: 'Accounts' }),
+    )
+    expect(await screen.findByRole('heading', { name: 'Accounts' })).toBeInTheDocument()
+
+    await act(async () => {
+      pending.resolve(jsonResponse({ detail: 'Authentication credentials were not provided.' }, 401))
+    })
+    expect(window.location.pathname).toBe('/accounts')
+    expect(screen.queryByLabelText('Email')).not.toBeInTheDocument()
+    expect(calls(mock, '/api/plaid/connections/')).toHaveLength(1)
   })
 })
 

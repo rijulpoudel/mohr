@@ -1,6 +1,6 @@
-import { act, screen, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   calls,
   deferred,
@@ -79,6 +79,42 @@ function authenticatedHandler(
       return jsonResponse({ id: 1, email: 'student@example.com' })
     }
     if (url === '/api/dashboard/summary/') return dashboard(url, init)
+    return jsonResponse({}, 404)
+  }
+}
+
+function linkedAccountFixture(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 2,
+    name: 'Everyday Checking',
+    account_type: 'checking',
+    mask: '1234',
+    sync_pending: false,
+    ...overrides,
+  }
+}
+
+function connectionFixture(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 5,
+    institution_name: 'First Plaid Bank',
+    status: 'active',
+    sync_pending: false,
+    last_synced_at: '2026-09-11T14:52:48.008850Z',
+    linked_accounts: [linkedAccountFixture()],
+    ...overrides,
+  }
+}
+
+function bankSyncHandler(
+  connections: (url: string, init?: RequestInit) => Response | Promise<Response>,
+) {
+  return (url: string, init?: RequestInit) => {
+    if (url === '/api/auth/me/') {
+      return jsonResponse({ id: 1, email: 'student@example.com' })
+    }
+    if (url === '/api/dashboard/summary/') return jsonResponse(summaryFixture())
+    if (url === '/api/plaid/connections/') return connections(url, init)
     return jsonResponse({}, 404)
   }
 }
@@ -815,6 +851,7 @@ describe('dashboard session expiry', () => {
     expect(window.location.pathname).toBe('/login')
     expect(requestLog(mock)).toEqual([
       'GET /api/auth/me/',
+      'GET /api/plaid/connections/',
       'GET /api/dashboard/summary/',
     ])
     expect(localStorage.length).toBe(0)
@@ -847,6 +884,7 @@ describe('logout from the dashboard', () => {
     expect(window.location.pathname).toBe('/login')
     expect(requestLog(mock)).toEqual([
       'GET /api/auth/me/',
+      'GET /api/plaid/connections/',
       'GET /api/dashboard/summary/',
       'GET /api/auth/csrf/',
       'POST /api/auth/logout/',
@@ -924,5 +962,260 @@ describe('logout from the dashboard', () => {
     expect(
       calls(mock, '/api/auth/logout/', 'POST'),
     ).toHaveLength(1)
+  })
+})
+
+describe('bank sync notice', () => {
+  it('shows no bank notice when the user has no bank connections', async () => {
+    installFetchMock(bankSyncHandler(() => jsonResponse([])))
+    renderApp('/')
+
+    expect(await screen.findByText('$1,234.56')).toBeInTheDocument()
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('region', { name: 'Bank sync status' }),
+      ).not.toBeInTheDocument(),
+    )
+    expect(
+      screen.queryByText('Bank sync status unavailable.'),
+    ).not.toBeInTheDocument()
+  })
+
+  it('reports the oldest bank sync without claiming live data', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-09-12T14:52:48.008850Z'))
+    try {
+      installFetchMock(
+        bankSyncHandler(() =>
+          jsonResponse([
+            connectionFixture({
+              id: 1,
+              institution_name: 'Alpha Bank',
+              last_synced_at: '2026-09-12T12:00:00.000000Z',
+            }),
+            connectionFixture({
+              id: 2,
+              institution_name: 'Beta Bank',
+              last_synced_at: '2026-09-11T18:00:00.000000Z',
+            }),
+          ]),
+        ),
+      )
+      renderApp('/')
+
+      const region = await screen.findByRole('region', {
+        name: 'Bank sync status',
+      })
+      expect(
+        await within(region).findByText('Bank sync recorded in the last 24 hours.'),
+      ).toBeInTheDocument()
+      expect(
+        within(region).getByText(
+          'Oldest bank sync: Sep 11, 2026, 6:00 PM UTC.',
+        ),
+      ).toBeInTheDocument()
+      expect(
+        within(region).queryByText(/Sep 12, 2026, 12:00 PM UTC/),
+      ).not.toBeInTheDocument()
+      expect(
+        within(region).getByText(
+          'Figures reflect last saved transactions, not live balances.',
+        ),
+      ).toBeInTheDocument()
+      expect(
+        within(region).getByRole('link', { name: 'Review connections' }),
+      ).toHaveAttribute('href', '/connections')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('shows the last bank sync for a single recently synced connection', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-09-12T14:52:48.008850Z'))
+    try {
+      installFetchMock(
+        bankSyncHandler(() =>
+          jsonResponse([
+            connectionFixture({
+              last_synced_at: '2026-09-12T12:00:00.000000Z',
+            }),
+          ]),
+        ),
+      )
+      renderApp('/')
+
+      const region = await screen.findByRole('region', {
+        name: 'Bank sync status',
+      })
+      expect(
+        await within(region).findByText(
+          'Last bank sync: Sep 12, 2026, 12:00 PM UTC.',
+        ),
+      ).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  const attentionCases: Array<[string, Record<string, unknown>, string]> = [
+    ['an updating connection', { status: 'updating' }, 'Bank connection needs attention.'],
+    ['an errored connection', { status: 'error' }, 'Bank connection needs attention.'],
+    ['a revoked connection', { status: 'revoked' }, 'Bank connection needs attention.'],
+    ['a disconnected connection', { status: 'disconnected' }, 'Bank connection needs attention.'],
+    [
+      'an active connection still importing history',
+      {
+        linked_accounts: [linkedAccountFixture({ id: 30, sync_pending: true })],
+      },
+      'Bank updates are incomplete.',
+    ],
+    ['an active connection with a waiting bank update', { sync_pending: true }, 'Bank updates are incomplete.'],
+    ['an active connection that never synced', { last_synced_at: null }, 'Some bank data may be out of date.'],
+  ]
+
+  it.each(attentionCases)('warns for %s', async (_label, overrides, message) => {
+    installFetchMock(
+      bankSyncHandler(() => jsonResponse([connectionFixture(overrides)])),
+    )
+    renderApp('/')
+
+    const region = await screen.findByRole('region', {
+      name: 'Bank sync status',
+    })
+    expect(await within(region).findByText(message)).toBeInTheDocument()
+    expect(
+      within(region).getByText(
+        'Figures reflect last saved transactions, not live balances.',
+      ),
+    ).toBeInTheDocument()
+    expect(
+      within(region).getByRole('link', { name: 'Review connections' }),
+    ).toHaveAttribute('href', '/connections')
+    expect(
+      within(region).queryByText('Bank sync recorded in the last 24 hours.'),
+    ).not.toBeInTheDocument()
+  })
+
+  it('warns for an active connection whose last sync is stale', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-09-12T14:52:48.008850Z'))
+    try {
+      installFetchMock(
+        bankSyncHandler(() =>
+          jsonResponse([
+            connectionFixture({
+              last_synced_at: '2026-09-11T14:00:00.000000Z',
+            }),
+          ]),
+        ),
+      )
+      renderApp('/')
+
+      const region = await screen.findByRole('region', {
+        name: 'Bank sync status',
+      })
+      expect(
+        await within(region).findByText('Some bank data may be out of date.'),
+      ).toBeInTheDocument()
+      expect(within(region).getByText('Last bank sync: Sep 11, 2026, 2:00 PM UTC.')).toBeInTheDocument()
+      expect(
+        within(region).queryByText('Bank sync recorded in the last 24 hours.'),
+      ).not.toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('retries a failed bank-status request without retrying the dashboard summary', async () => {
+    let attempts = 0
+    const mock = installFetchMock(bankSyncHandler(() => {
+      attempts += 1
+      return attempts === 1
+        ? new Response(null, { status: 500 })
+        : jsonResponse([])
+    }))
+    const user = userEvent.setup()
+    renderApp('/')
+
+    const region = await screen.findByRole('region', { name: 'Bank sync status' })
+    await within(region).findByText('Bank sync status unavailable.')
+    await user.click(within(region).getByRole('button', { name: 'Retry bank status' }))
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Bank sync status' })).not.toBeInTheDocument())
+    expect(calls(mock, '/api/plaid/connections/')).toHaveLength(2)
+    expect(calls(mock, '/api/dashboard/summary/')).toHaveLength(1)
+  })
+
+  it('reports status unavailable instead of fresh when the connections request fails', async () => {
+    installFetchMock(bankSyncHandler(() => new Response(null, { status: 500 })))
+    renderApp('/')
+
+    const region = await screen.findByRole('region', {
+      name: 'Bank sync status',
+    })
+    expect(
+      await within(region).findByText('Bank sync status unavailable.'),
+    ).toBeInTheDocument()
+    expect(
+      within(region).getByText(
+        'Figures reflect last saved transactions, not live balances.',
+      ),
+    ).toBeInTheDocument()
+    expect(
+      within(region).getByRole('link', { name: 'Review connections' }),
+    ).toHaveAttribute('href', '/connections')
+    expect(
+      within(region).queryByText('Bank sync recorded in the last 24 hours.'),
+    ).not.toBeInTheDocument()
+    expect(
+      within(region).queryByText('Some bank data may be out of date.'),
+    ).not.toBeInTheDocument()
+  })
+
+  it('shows a checking message without a fresh state while connections load', async () => {
+    const pending = deferred<Response>()
+    installFetchMock(bankSyncHandler(() => pending.promise))
+    renderApp('/')
+
+    expect(await screen.findByText('$1,234.56')).toBeInTheDocument()
+    const region = await screen.findByRole('region', {
+      name: 'Bank sync status',
+    })
+    expect(
+      within(region).getByText('Checking bank sync status…'),
+    ).toBeInTheDocument()
+    expect(
+      within(region).queryByText('Bank sync recorded in the last 24 hours.'),
+    ).not.toBeInTheDocument()
+
+    await act(async () => {
+      pending.resolve(jsonResponse([]))
+    })
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('region', { name: 'Bank sync status' }),
+      ).not.toBeInTheDocument(),
+    )
+  })
+
+  it('clears the session on a 401 without rendering a bank notice', async () => {
+    const mock = installFetchMock(
+      bankSyncHandler(() =>
+        jsonResponse(
+          { detail: 'Authentication credentials were not provided.' },
+          401,
+        ),
+      ),
+    )
+    renderApp('/')
+
+    expect(await screen.findByLabelText('Email')).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/login')
+    expect(
+      screen.queryByRole('region', { name: 'Bank sync status' }),
+    ).not.toBeInTheDocument()
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+    expect(calls(mock, '/api/auth/logout/', 'POST')).toHaveLength(0)
   })
 })

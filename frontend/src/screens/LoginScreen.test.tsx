@@ -49,11 +49,12 @@ describe('login', () => {
     expect(await screen.findByText('Signed in as me@example.com')).toBeInTheDocument()
     expect(window.location.pathname).toBe('/')
 
-    expect(mock.mock.calls).toHaveLength(4)
+    expect(mock.mock.calls).toHaveLength(5)
     expect(requestLog(mock)).toEqual([
       'GET /api/auth/me/',
       'GET /api/auth/csrf/',
       'POST /api/auth/login/',
+      'GET /api/plaid/connections/',
       'GET /api/dashboard/summary/',
     ])
 
