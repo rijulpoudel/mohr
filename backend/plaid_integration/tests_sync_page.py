@@ -399,6 +399,60 @@ class SyncPageApplicationTests(TestCase):
         self.assertTrue(row.category_customized)
         self.assertTrue(row.note_customized)
 
+    def test_modified_preserves_confirmed_transfer_flag(self):
+        self.apply(
+            make_page(
+                added=(added_tx(transaction_id="tx-1", amount="10.00"),),
+                next_cursor=CURSOR_A,
+            )
+        )
+        row = Transaction.objects.get()
+        row.is_transfer = True
+        row.save(update_fields=["is_transfer"])
+
+        result = self.apply(
+            make_page(
+                modified=(
+                    modified_tx(
+                        transaction_id="tx-1",
+                        amount="25.00",
+                        transaction_date=date(2024, 2, 1),
+                        name="New Name",
+                    ),
+                ),
+                next_cursor=CURSOR_B,
+            ),
+            request_cursor=CURSOR_A,
+        )
+
+        self.assertEqual(result.modified, 1)
+        row.refresh_from_db()
+        self.assertEqual(row.amount, Decimal("25.00"))
+        self.assertTrue(row.is_transfer)
+
+    def test_duplicate_added_replay_preserves_confirmed_transfer_flag(self):
+        self.apply(
+            make_page(
+                added=(added_tx(transaction_id="tx-1", amount="10.00"),),
+                next_cursor=CURSOR_A,
+            )
+        )
+        row = Transaction.objects.get()
+        row.is_transfer = True
+        row.save(update_fields=["is_transfer"])
+
+        result = self.apply(
+            make_page(
+                added=(added_tx(transaction_id="tx-1", amount="10.00"),),
+                next_cursor=CURSOR_B,
+            ),
+            request_cursor=CURSOR_A,
+        )
+
+        self.assertEqual(result.added, 0)
+        row.refresh_from_db()
+        self.assertTrue(row.is_transfer)
+
     def test_modified_updates_provider_fields_when_not_customized(self):
         self.apply(
             make_page(

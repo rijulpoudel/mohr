@@ -443,6 +443,72 @@ class CashFlowTotalsTests(APITestCase):
         self.assertEqual(summary["expenses"], "0.00")
         self.assertEqual(summary["transaction_count"], 1)
 
+    def test_confirmed_transfer_legs_do_not_count_as_income_or_expense(self):
+        savings = Account.objects.create(
+            user=self.user,
+            name="Savings",
+            account_type=AccountType.SAVINGS,
+            opening_balance=Decimal("0.00"),
+        )
+        self.create_transaction(
+            account=savings,
+            category=self.income_category,
+            amount=Decimal("250.00"),
+            is_transfer=True,
+        )
+        self.create_transaction(
+            transaction_type=TransactionType.EXPENSE,
+            category=self.expense_category,
+            amount=Decimal("250.00"),
+            is_transfer=True,
+        )
+        self.create_transaction(
+            transaction_type=TransactionType.EXPENSE,
+            category=self.expense_category,
+            amount=Decimal("25.00"),
+        )
+
+        summary = self.fetch_summary("2026-09")
+
+        self.assertEqual(summary["income"], "0.00")
+        self.assertEqual(summary["expenses"], "25.00")
+        self.assertEqual(summary["net"], "-25.00")
+        self.assertEqual(summary["transaction_count"], 1)
+
+    def test_transfer_legs_split_across_months_report_zero_in_each_month(self):
+        savings = Account.objects.create(
+            user=self.user,
+            name="Savings",
+            account_type=AccountType.SAVINGS,
+            opening_balance=Decimal("0.00"),
+        )
+        self.create_transaction(
+            transaction_type=TransactionType.EXPENSE,
+            category=self.expense_category,
+            amount=Decimal("425.00"),
+            date=date(2026, 9, 30),
+            is_transfer=True,
+        )
+        self.create_transaction(
+            account=savings,
+            category=self.income_category,
+            amount=Decimal("425.00"),
+            date=date(2026, 10, 1),
+            is_transfer=True,
+        )
+
+        september = self.fetch_summary("2026-09")
+        october = self.fetch_summary("2026-10")
+
+        self.assertEqual(september["income"], "0.00")
+        self.assertEqual(september["expenses"], "0.00")
+        self.assertEqual(september["net"], "0.00")
+        self.assertEqual(september["transaction_count"], 0)
+        self.assertEqual(october["income"], "0.00")
+        self.assertEqual(october["expenses"], "0.00")
+        self.assertEqual(october["net"], "0.00")
+        self.assertEqual(october["transaction_count"], 0)
+
 
 class CashFlowCategoryBreakdownTests(APITestCase):
     @classmethod
@@ -549,6 +615,40 @@ class CashFlowCategoryBreakdownTests(APITestCase):
                 }
             ],
         )
+
+    def test_confirmed_transfer_rows_are_absent_from_category_breakdown(self):
+        self.create_transaction(
+            transaction_type=TransactionType.EXPENSE,
+            category=self.groceries_category,
+            amount=Decimal("40.00"),
+        )
+        self.create_transaction(
+            transaction_type=TransactionType.EXPENSE,
+            category=self.groceries_category,
+            amount=Decimal("60.00"),
+            is_transfer=True,
+        )
+        self.create_transaction(
+            category=self.income_category,
+            amount=Decimal("900.00"),
+            is_transfer=True,
+        )
+
+        summary = self.fetch_summary()
+
+        self.assertEqual(
+            summary["expense_categories"],
+            [
+                {
+                    "category_id": self.groceries_category.id,
+                    "category_name": "Groceries",
+                    "amount": "40.00",
+                    "transaction_count": 1,
+                }
+            ],
+        )
+        self.assertEqual(summary["income_categories"], [])
+        self.assertEqual(summary["transaction_count"], 1)
 
     def test_categories_sort_amount_desc_then_name_asc(self):
         self.create_transaction(

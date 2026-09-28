@@ -520,6 +520,103 @@ class DashboardCurrentMonthTotalsTests(APITestCase):
         self.assertEqual(summary["current_month_income"], "0.00")
         self.assertEqual(summary["current_month_expenses"], "0.00")
 
+    def test_current_month_totals_exclude_confirmed_transfer_legs(self):
+        savings = Account.objects.create(
+            user=self.user,
+            name="Savings",
+            account_type=AccountType.SAVINGS,
+            opening_balance=Decimal("0.00"),
+        )
+        self.create_transaction(
+            account=savings,
+            category=self.income_category,
+            transaction_type=TransactionType.INCOME,
+            amount=Decimal("250.00"),
+            is_transfer=True,
+        )
+        self.create_transaction(
+            category=self.expense_category,
+            transaction_type=TransactionType.EXPENSE,
+            amount=Decimal("250.00"),
+            is_transfer=True,
+        )
+        self.create_transaction(
+            category=self.expense_category,
+            transaction_type=TransactionType.EXPENSE,
+            amount=Decimal("25.00"),
+        )
+
+        summary = self.fetch_summary(date(2026, 9, 15))
+
+        self.assertEqual(summary["current_month_income"], "0.00")
+        self.assertEqual(summary["current_month_expenses"], "25.00")
+
+    def test_confirmed_transfer_moves_balances_but_not_month_totals(self):
+        from accounts.selectors import owned_accounts_with_balances
+
+        savings = Account.objects.create(
+            user=self.user,
+            name="Savings",
+            account_type=AccountType.SAVINGS,
+            opening_balance=Decimal("0.00"),
+        )
+        self.create_transaction(
+            category=self.expense_category,
+            transaction_type=TransactionType.EXPENSE,
+            amount=Decimal("250.00"),
+            is_transfer=True,
+        )
+        self.create_transaction(
+            account=savings,
+            category=self.income_category,
+            transaction_type=TransactionType.INCOME,
+            amount=Decimal("250.00"),
+            is_transfer=True,
+        )
+
+        summary = self.fetch_summary(date(2026, 9, 15))
+        balances = {
+            account.name: account.current_balance
+            for account in owned_accounts_with_balances(self.user)
+        }
+
+        self.assertEqual(summary["current_month_income"], "0.00")
+        self.assertEqual(summary["current_month_expenses"], "0.00")
+        self.assertEqual(balances["Checking"], Decimal("-150.00"))
+        self.assertEqual(balances["Savings"], Decimal("250.00"))
+        self.assertEqual(summary["total_balance"], "100.00")
+
+    def test_recent_transactions_still_include_confirmed_transfer_rows(self):
+        savings = Account.objects.create(
+            user=self.user,
+            name="Savings",
+            account_type=AccountType.SAVINGS,
+            opening_balance=Decimal("0.00"),
+        )
+        expense_leg = self.create_transaction(
+            category=self.expense_category,
+            transaction_type=TransactionType.EXPENSE,
+            amount=Decimal("250.00"),
+            is_transfer=True,
+        )
+        income_leg = self.create_transaction(
+            account=savings,
+            category=self.income_category,
+            transaction_type=TransactionType.INCOME,
+            amount=Decimal("250.00"),
+            is_transfer=True,
+        )
+
+        summary = self.fetch_summary(date(2026, 9, 15))
+
+        returned = {
+            item["id"]: item["is_transfer"] for item in summary["recent_transactions"]
+        }
+        self.assertEqual(
+            returned,
+            {expense_leg.id: True, income_leg.id: True},
+        )
+
 
 class DashboardBudgetTotalsTests(APITestCase):
     @classmethod
@@ -813,6 +910,7 @@ class DashboardRecentTransactionsTests(APITestCase):
                 "provider_name": "",
                 "is_pending": False,
                 "is_pending_initial_import": False,
+                "is_transfer": False,
                 "created_at": format_datetime(expected[0].created_at),
                 "updated_at": format_datetime(expected[0].updated_at),
             },
@@ -831,6 +929,7 @@ class DashboardRecentTransactionsTests(APITestCase):
                 "provider_name",
                 "is_pending",
                 "is_pending_initial_import",
+                "is_transfer",
                 "created_at",
                 "updated_at",
             ],

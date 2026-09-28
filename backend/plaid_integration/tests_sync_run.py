@@ -22,6 +22,9 @@ from decimal import Decimal
 from cryptography.fernet import Fernet
 from django.contrib.auth import get_user_model
 from django.test import SimpleTestCase, TestCase, override_settings
+from django.urls import reverse
+from rest_framework import status as http_status
+from rest_framework.test import APITestCase
 
 from accounts.models import Account, AccountType
 from categories.models import Category, CategoryType
@@ -1103,6 +1106,97 @@ class SyncRunAnchorTests(TestCase):
         )
         other.refresh_from_db()
         self.assertEqual(other.opening_balance, Decimal("0.00"))
+
+
+@override_settings(**PLAID_API_SETTINGS)
+class SyncRunAnchoredTransferTests(APITestCase):
+    """Q03 #9: classifying a posted card leg as a transfer after the anchor is
+    applied must leave the provider owed amount (same magnitude, opposite
+    sign) intact while the reporting lenses drop it.
+
+    A card payment inflow of 400.00 and a 25.00 purchase post before the
+    anchor runs, so ``opening_balance`` is -775.00 and ``current_balance``
+    matches the provider's 400.00 owed as -400.00. Marking the payment leg as
+    a transfer may not move either number; only income/spending reporting
+    changes.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = get_user_model().objects.create_user(
+            email="sync-run-anchored-transfer@example.com",
+            password="TestOnlyPassword123!",
+        )
+        cls.connection = PlaidConnection.objects.create(
+            user=cls.user,
+            item_id="item-sandbox-sync-run-anchored-transfer-00001",
+            institution_name="Anchored Transfer Bank",
+            access_token_encrypted=_encrypt(SYNTHETIC_ACCESS_TOKEN),
+            encryption_key_id="key-a",
+        )
+
+    def setUp(self):
+        result = perform_sync(
+            self.connection,
+            gateway=FakeSyncGateway(
+                [
+                    make_page(
+                        added=(
+                            added_tx(
+                                transaction_id="tx-cc-payment",
+                                account_id=CREDIT_ACCOUNT_ID,
+                                amount="400.00",
+                                transaction_type="income",
+                            ),
+                            added_tx(
+                                transaction_id="tx-cc-purchase",
+                                account_id=CREDIT_ACCOUNT_ID,
+                                amount="25.00",
+                            ),
+                        ),
+                        account_outcomes=(credit_card_outcome(current="400.00"),),
+                        next_cursor=CURSOR_A,
+                        has_more=False,
+                        status="HISTORICAL_UPDATE_COMPLETE",
+                    ),
+                ]
+            ),
+            page_cap=10,
+        )
+        self.assertEqual(result.anchors_applied, 1)
+
+    def test_anchored_confirmed_transfer_preserves_provider_owed(self):
+        card = Account.objects.get()
+        link = PlaidAccountLink.objects.get()
+        self.assertEqual(card.opening_balance, Decimal("-775.00"))
+        self.assertEqual(card.current_balance, Decimal("-400.00"))
+        self.assertEqual(link.anchor_provider_current_balance, Decimal("400.00"))
+        payment = Transaction.objects.get(plaid_transaction_id="tx-cc-payment")
+        self.client.force_login(self.user)
+
+        response = self.client.patch(
+            reverse("transaction-detail", args=[payment.pk]),
+            {"is_transfer": True},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, http_status.HTTP_200_OK)
+        payment.refresh_from_db()
+        self.assertTrue(payment.is_transfer)
+        card.refresh_from_db()
+        link.refresh_from_db()
+        self.assertEqual(card.opening_balance, Decimal("-775.00"))
+        self.assertEqual(card.current_balance, Decimal("-400.00"))
+        self.assertEqual(link.anchor_provider_current_balance, Decimal("400.00"))
+
+        cash_flow = self.client.get(
+            reverse("cash-flow-summary"),
+            {"month": "2024-01"},
+        ).data
+        self.assertEqual(cash_flow["income"], "0.00")
+        self.assertEqual(cash_flow["expenses"], "25.00")
+        self.assertEqual(cash_flow["net"], "-25.00")
+        self.assertEqual(cash_flow["transaction_count"], 1)
 
 
 @override_settings(**PLAID_API_SETTINGS)

@@ -7,7 +7,10 @@ from django.utils import timezone
 from accounts.selectors import owned_accounts_with_balances
 from budgets.selectors import budgets_with_spending
 from transactions.models import Transaction, TransactionType
-from transactions.selectors import counting_transactions, ledger_transactions_q
+from transactions.selectors import (
+    counting_transactions,
+    reporting_transactions_q,
+)
 
 
 def month_bounds(today):
@@ -50,8 +53,9 @@ def total_balance(user):
 def current_month_totals(user, month_start, next_month_start):
     """Income and expense sums for the user's transactions in the month.
 
-    Applies the shared ledger predicate so provider lifecycle rows and rows
-    on not-yet-anchored linked accounts never move month totals.
+    Applies the shared reporting predicate so provider lifecycle rows, rows
+    on not-yet-anchored linked accounts, and user-confirmed transfer legs
+    never move month totals.
     """
     totals = (
         Transaction.objects.filter(
@@ -59,7 +63,7 @@ def current_month_totals(user, month_start, next_month_start):
             date__gte=month_start,
             date__lt=next_month_start,
         )
-        .filter(ledger_transactions_q())
+        .filter(reporting_transactions_q())
         .aggregate(
             income_total=Sum(
                 "amount",
@@ -113,8 +117,9 @@ def cash_flow_summary(user, month_key):
     """Cash-flow totals and category breakdowns for one month.
 
     `month_key` is a validated ``YYYY-MM`` string. Applies the shared
-    ledger predicate so provider lifecycle rows and rows on not-yet-anchored
-    linked accounts never count. The category join is restricted to the
+    reporting predicate so provider lifecycle rows, rows on not-yet-anchored
+    linked accounts, and user-confirmed transfer legs never count. The
+    category join is restricted to the
     owner's own categories so a defensively malformed cross-user row can
     neither move a total nor leak a foreign category name.
     """
@@ -130,7 +135,7 @@ def cash_flow_summary(user, month_key):
         )
     else:
         rows = rows.filter(date__lt=next_month_start)
-    rows = rows.filter(ledger_transactions_q()).filter(category__user=user)
+    rows = rows.filter(reporting_transactions_q()).filter(category__user=user)
 
     totals = rows.aggregate(
         income_total=Sum(
