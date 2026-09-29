@@ -220,6 +220,25 @@ Important database rules:
   restore point. Test the restore before pointing the service at it.
 - Treat application rollback and database recovery as separate operations.
 
+Plaid token recovery is a separate dependency of database recovery. The
+`PlaidConnection` and pending `PlaidItemRemovalRequest` rows contain encrypted
+tokens; the database alone cannot decrypt them. Keep a protected,
+access-controlled backup of the **entire** `PLAID_TOKEN_KEYS` ring, including
+older keys still used by retained rows, outside Git, tickets, logs, screenshots,
+and chat. Recover the matching key IDs and keys with the database **before**
+serving a restored database. Do not replace missing keys with new ones or remove
+older keys just because an application rollback succeeded.
+
+For a recovery drill, restore a non-production database and its matching
+non-production key ring in an isolated environment. With a non-secret canary
+record, verify decryption of both a linked connection and a pending item-removal
+request using their stored key IDs, without logging tokens or calling Plaid.
+If the matching keys are unavailable, do not serve the restored database or
+retry Plaid removal with substitute keys; plan user re-linking and unresolved
+provider Items explicitly rather than pretending tokens were recovered.
+An actual production restore drill has **not** been verified by this runbook
+and remains a gate before a real-user beta.
+
 After recovery, verify all of the following before re-enabling auto-deploy:
 
 - Migrations are applied (`manage.py migrate --check` locally against the
