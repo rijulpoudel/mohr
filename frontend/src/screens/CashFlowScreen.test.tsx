@@ -166,7 +166,7 @@ describe('cash flow screen states', () => {
         level: 2,
         name: 'Cash Flow',
       })
-      const caption = screen.getByText('September 2026')
+      const caption = await screen.findByText('September 2026')
       expect(
         title.compareDocumentPosition(caption) & Node.DOCUMENT_POSITION_FOLLOWING,
       ).toBeTruthy()
