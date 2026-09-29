@@ -1,6 +1,10 @@
+from datetime import timedelta
+
+from axes.models import AccessAttempt, AccessAttemptExpiration
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
 
@@ -358,6 +362,176 @@ class LoginAPITests(APITestCase):
             int(csrf_client.session["_auth_user_id"]),
             self.user.id,
         )
+
+
+class LoginLockoutAPITests(APITestCase):
+    lockout_detail = "Too many failed login attempts. Try again later."
+
+    def setUp(self):
+        self.password = "StrongTestPassword123!"
+        self.lockout_url = reverse("auth-login")
+        self.user = get_user_model().objects.create_user(
+            email="user@example.com",
+            password=self.password,
+        )
+
+    def _login(self, email, password, ip=None):
+        extra = {}
+        if ip is not None:
+            extra["HTTP_CF_CONNECTING_IP"] = ip
+        return self.client.post(
+            self.lockout_url,
+            {"email": email, "password": password},
+            format="json",
+            **extra,
+        )
+
+    def _fail_login(self, email, times=5, ip=None):
+        response = None
+        for _ in range(times):
+            response = self._login(email, "WrongTestPassword123!", ip=ip)
+        return response
+
+    def test_login_locks_out_username_and_ip_after_five_failures(self):
+        cases = (
+            (self.user.email, self.password),
+            ("missing@example.com", self.password),
+        )
+
+        for email, correct_password in cases:
+            with self.subTest(email=email):
+                for _ in range(5):
+                    failed = self._login(email, "WrongTestPassword123!")
+                self.assertEqual(
+                    failed.status_code,
+                    status.HTTP_429_TOO_MANY_REQUESTS,
+                )
+
+                locked = self._login(email, correct_password)
+                self.assertEqual(
+                    locked.status_code,
+                    status.HTTP_429_TOO_MANY_REQUESTS,
+                )
+                self.assertEqual(locked.json(), {"detail": self.lockout_detail})
+                self.assertNotIn("_auth_user_id", self.client.session)
+
+    def test_other_username_from_same_ip_is_not_locked(self):
+        other = get_user_model().objects.create_user(
+            email="other@example.com",
+            password="OtherStrongPassword123!",
+        )
+        self._fail_login(self.user.email)
+
+        response = self._login(other.email, "OtherStrongPassword123!")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(int(self.client.session["_auth_user_id"]), other.id)
+
+    def test_same_username_from_other_ip_is_not_locked(self):
+        self._fail_login(self.user.email, ip="203.0.113.10")
+
+        response = self._login(self.user.email, self.password, ip="198.51.100.20")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(int(self.client.session["_auth_user_id"]), self.user.id)
+
+    def test_untrusted_forwarded_for_does_not_change_client_ip(self):
+        self.client.post(
+            self.lockout_url,
+            {"email": self.user.email, "password": "WrongTestPassword123!"},
+            format="json",
+            HTTP_X_FORWARDED_FOR="203.0.113.10",
+        )
+
+        attempt = AccessAttempt.objects.get(username=self.user.email)
+        self.assertEqual(attempt.ip_address, "127.0.0.1")
+
+    def test_success_before_threshold_resets_failures(self):
+        self._fail_login(self.user.email, times=4)
+
+        success = self._login(self.user.email, self.password)
+        self.assertEqual(success.status_code, status.HTTP_200_OK)
+
+        after_reset = self._login(self.user.email, "WrongTestPassword123!")
+        self.assertEqual(after_reset.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_lockout_expires_after_cooldown(self):
+        self._fail_login(self.user.email)
+        locked = self._login(self.user.email, self.password)
+        self.assertEqual(locked.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+        aged = timezone.now() - timedelta(minutes=16)
+        AccessAttempt.objects.update(attempt_time=aged)
+        AccessAttemptExpiration.objects.update(expires_at=aged)
+
+        recovered = self._login(self.user.email, self.password)
+        self.assertEqual(recovered.status_code, status.HTTP_200_OK)
+        self.assertEqual(int(self.client.session["_auth_user_id"]), self.user.id)
+
+    def test_lockout_does_not_bypass_csrf(self):
+        self._fail_login(self.user.email)
+        csrf_client = APIClient(enforce_csrf_checks=True)
+
+        response = csrf_client.post(
+            self.lockout_url,
+            {"email": self.user.email, "password": self.password},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.json(), {"detail": "CSRF verification failed."})
+
+    def test_admin_login_is_locked_out_too(self):
+        self.user.is_staff = True
+        self.user.is_superuser = True
+        self.user.save(update_fields=["is_staff", "is_superuser"])
+        admin_url = reverse("admin:login")
+
+        response = self.client.post(
+            admin_url,
+            {"username": self.user.email, "password": "WrongTestPassword123!"},
+        )
+        for _ in range(4):
+            response = self.client.post(
+                admin_url,
+                {"username": self.user.email, "password": "WrongTestPassword123!"},
+            )
+        self.assertEqual(response.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+        attempt = AccessAttempt.objects.get(username=self.user.email)
+        self.assertNotIn("WrongTestPassword123!", attempt.post_data)
+
+        locked = self.client.post(
+            admin_url,
+            {"username": self.user.email, "password": self.password},
+        )
+        self.assertEqual(locked.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+        self.assertNotIn("_auth_user_id", self.client.session)
+
+    def test_admin_and_api_share_failed_attempts(self):
+        self.user.is_staff = True
+        self.user.save(update_fields=["is_staff"])
+        self._fail_login(self.user.email, times=4)
+
+        response = self.client.post(
+            reverse("admin:login"),
+            {"username": self.user.email, "password": "WrongTestPassword123!"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+        self.assertEqual(
+            self._login(self.user.email, self.password).status_code,
+            status.HTTP_429_TOO_MANY_REQUESTS,
+        )
+
+    def test_failed_login_does_not_store_password(self):
+        self._fail_login(self.user.email)
+
+        attempts = list(AccessAttempt.objects.all())
+        self.assertTrue(attempts)
+        for attempt in attempts:
+            self.assertNotIn("WrongTestPassword123!", attempt.post_data)
+            self.assertNotIn(self.password, attempt.post_data)
+            self.assertNotIn(self.password, attempt.get_data)
 
 
 class LogoutAPITests(APITestCase):
