@@ -1017,11 +1017,13 @@ function EditTransactionForm({
 function CreateTransactionForm({
   accounts,
   categories,
+  setupLoaded,
   onCreated,
   submitLocked,
 }: {
   accounts: Account[]
   categories: Category[]
+  setupLoaded: boolean
   onCreated: () => void
   submitLocked: boolean
 }) {
@@ -1191,10 +1193,10 @@ function CreateTransactionForm({
           {summary}
         </div>
       )}
-      {!hasActiveAccounts && (
+      {setupLoaded && !hasActiveAccounts && (
         <p className="notice">{NO_ACTIVE_ACCOUNTS_MESSAGE}</p>
       )}
-      {hasActiveAccounts && !hasVisibleCategories && (
+      {setupLoaded && hasActiveAccounts && !hasVisibleCategories && (
         <p className="notice">{NO_ACTIVE_CATEGORIES_MESSAGE}</p>
       )}
       <form className="form" onSubmit={handleSubmit} noValidate>
@@ -1680,6 +1682,7 @@ export function TransactionsScreen() {
       <CreateTransactionForm
         accounts={accounts}
         categories={categories}
+        setupLoaded={state.status === 'ready'}
         onCreated={handleTransactionCreated}
         submitLocked={filtersLocked}
       />

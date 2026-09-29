@@ -359,6 +359,77 @@ describe('budgets list', () => {
     expect(await screen.findByText(/no budgets exist yet/i)).toBeInTheDocument()
   })
 
+  it('does not claim an expense category is missing while the initial load is pending', async () => {
+    const pending = deferred<Response>()
+    installFetchMock(
+      authenticatedBudgetsHandler(() => pending.promise, { categories: [] }),
+    )
+    renderApp('/budgets')
+
+    expect(await screen.findByText('Loading your budgets…')).toBeInTheDocument()
+    expect(
+      screen.queryByText(
+        'Create an active expense category before adding budgets.',
+      ),
+    ).not.toBeInTheDocument()
+
+    await act(async () => {
+      pending.resolve(jsonResponse([]))
+    })
+    expect(
+      await screen.findByText(
+        'Create an active expense category before adding budgets.',
+      ),
+    ).toBeInTheDocument()
+  })
+
+  it('does not claim an expense category is missing on a failed load and keeps a typed draft through retry', async () => {
+    let categoriesCalls = 0
+    let budgetCalls = 0
+    installFetchMock((url: string) => {
+      if (url === '/api/auth/me/') {
+        return jsonResponse({ id: 1, email: 'student@example.com' })
+      }
+      if (url === '/api/categories/') {
+        categoriesCalls += 1
+        if (categoriesCalls === 1) return new Response(null, { status: 500 })
+        return jsonResponse(defaultCategories())
+      }
+      if (url.startsWith('/api/budgets/')) {
+        budgetCalls += 1
+        if (budgetCalls === 1) return new Response(null, { status: 500 })
+        return jsonResponse([])
+      }
+      return jsonResponse({}, 404)
+    })
+    renderApp('/budgets')
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Something went wrong. Please try again.',
+    )
+    expect(
+      screen.queryByText(
+        'Create an active expense category before adding budgets.',
+      ),
+    ).not.toBeInTheDocument()
+
+    const user = userEvent.setup()
+    fireEvent.change(screen.getByLabelText('Month'), {
+      target: { value: '2026-09' },
+    })
+    await user.type(screen.getByLabelText('Budgeted amount'), '300.00')
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+
+    expect(await screen.findByText(/no budgets exist yet/i)).toBeInTheDocument()
+    expect(screen.getByLabelText('Month')).toHaveValue('2026-09')
+    expect(screen.getByLabelText('Budgeted amount')).toHaveValue('300.00')
+    expect(
+      screen.queryByText(
+        'Create an active expense category before adding budgets.',
+      ),
+    ).not.toBeInTheDocument()
+  })
+
   it('shows a retryable error with a working Retry control', async () => {
     let budgetCalls = 0
     const mock = installFetchMock(
