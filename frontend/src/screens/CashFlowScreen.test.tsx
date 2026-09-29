@@ -108,6 +108,7 @@ describe('cash flow navigation', () => {
       'Categories',
       'Transactions',
       'Budgets',
+      'Download data',
     ])
     expect(within(nav).getByRole('link', { name: 'Cash Flow' })).toHaveAttribute(
       'aria-current',

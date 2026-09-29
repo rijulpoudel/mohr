@@ -94,6 +94,9 @@ export function AppShell() {
               {item.label}
             </NavLink>
           ))}
+          <a href="/api/auth/export/" onClick={() => setMenuOpen(false)}>
+            Download data
+          </a>
         </nav>
       )}
       <main
