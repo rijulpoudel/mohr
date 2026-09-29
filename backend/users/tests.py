@@ -882,6 +882,36 @@ class DataExportAPITests(APITestCase):
         self.assertNotIn(self.other_account.name, exported_text)
         self.assertNotIn(self.other_category.name, exported_text)
 
+    def test_export_sanitizes_cross_user_superseded_by_relation(self):
+        superseding = self.create_transaction(
+            account=self.create_account(),
+            category=self.create_category(
+                name="Salary",
+                category_type=CategoryType.INCOME,
+            ),
+            transaction_type=TransactionType.INCOME,
+            source=TransactionSource.PLAID,
+            connection=self.create_connection(),
+            plaid_transaction_id="plaid-export-cross-user-superseded",
+            is_superseded=True,
+            superseded_by=self.other_transaction,
+        )
+
+        response, body = self.fetch_export()
+
+        transactions = {item["id"]: item for item in body["transactions"]}
+        self.assertIn(superseding.id, transactions)
+        self.assertIsNone(transactions[superseding.id]["superseded_by_id"])
+        self.assertNotIn(
+            self.other_transaction.id,
+            [item["id"] for item in body["transactions"]],
+        )
+        self.assertNotIn(
+            self.other_transaction.id,
+            {item["superseded_by_id"] for item in body["transactions"]},
+        )
+        self.assertNotIn(self.other_transaction.note, response.content.decode())
+
     def test_export_exposes_no_provider_or_authentication_material(self):
         connection = self.create_connection(
             item_id="item-sandbox-secret-sentinel",
