@@ -370,6 +370,86 @@ describe('transactions list', () => {
     expect(screen.queryByRole('status')).not.toBeInTheDocument()
   })
 
+  it('does not claim accounts or categories are missing while the initial load is pending', async () => {
+    const pending = deferred<Response>()
+    installFetchMock(
+      authenticatedTransactionsHandler(() => pending.promise, {
+        accounts: [],
+        categories: [],
+      }),
+    )
+    renderApp('/transactions')
+
+    expect(
+      await screen.findByText('Loading your transactions…'),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByText(
+        'Create an active account before adding transactions.',
+      ),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByText(
+        'Create an active category for this type before adding transactions.',
+      ),
+    ).not.toBeInTheDocument()
+
+    await act(async () => {
+      pending.resolve(jsonResponse([]))
+    })
+    expect(
+      await screen.findByText(
+        'Create an active account before adding transactions.',
+      ),
+    ).toBeInTheDocument()
+  })
+
+  it('does not claim accounts are missing on a failed load, then retry with usable data keeps the draft', async () => {
+    let accountsCalls = 0
+    let transactionCalls = 0
+    installFetchMock((url: string) => {
+      if (url === '/api/auth/me/') {
+        return jsonResponse({ id: 1, email: 'student@example.com' })
+      }
+      if (url === '/api/accounts/') {
+        accountsCalls += 1
+        if (accountsCalls === 1) return new Response(null, { status: 500 })
+        return jsonResponse(defaultAccounts())
+      }
+      if (url === '/api/categories/') {
+        return jsonResponse(defaultCategories())
+      }
+      if (url.startsWith('/api/transactions/')) {
+        transactionCalls += 1
+        if (transactionCalls === 1) return new Response(null, { status: 500 })
+        return jsonResponse([])
+      }
+      return jsonResponse({}, 404)
+    })
+    renderApp('/transactions')
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Something went wrong. Please try again.',
+    )
+    expect(
+      screen.queryByText(
+        'Create an active account before adding transactions.',
+      ),
+    ).not.toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.type(screen.getByLabelText('Note'), 'Draft note')
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+
+    expect(await screen.findByText(/No transactions yet/)).toBeInTheDocument()
+    expect(screen.getByLabelText('Note')).toHaveValue('Draft note')
+    expect(
+      screen.queryByText(
+        'Create an active account before adding transactions.',
+      ),
+    ).not.toBeInTheDocument()
+  })
+
   it('shows meaningful empty text before any data', async () => {
     installFetchMock(authenticatedTransactionsHandler(() => jsonResponse([])))
     renderApp('/transactions')

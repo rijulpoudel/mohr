@@ -597,6 +597,7 @@ function EditBudgetForm({
 
 function CreateBudgetForm({
   categories,
+  setupLoaded,
   created,
   submitLocked,
   deleteLocked,
@@ -605,6 +606,7 @@ function CreateBudgetForm({
   onPendingChange,
 }: {
   categories: Category[]
+  setupLoaded: boolean
   created: boolean
   submitLocked: boolean
   deleteLocked: boolean
@@ -749,7 +751,7 @@ function CreateBudgetForm({
           {summary}
         </div>
       )}
-      {!hasActiveExpenseCategories && (
+      {setupLoaded && !hasActiveExpenseCategories && (
         <p className="notice">{NO_ACTIVE_CATEGORIES_MESSAGE}</p>
       )}
       <form className="form" onSubmit={handleSubmit} noValidate>
@@ -1164,6 +1166,7 @@ export function BudgetsScreen() {
         </section>
         <CreateBudgetForm
           categories={categories}
+          setupLoaded={state.status === 'ready'}
           created={createdNotice}
           submitLocked={
             editingId !== null ||
