@@ -156,14 +156,14 @@ function BudgetItem({
 }) {
   const overspent = isOverspent(budget.remaining)
   return (
-    <li className="budget-item">
+    <li className="budget-item budget-row">
       <div className="budget-main">
-        <time dateTime={budget.month} className="budget-month">
-          {formatMonthLabel(budget.month)}
-        </time>
         {categoryName !== undefined && (
           <span className="budget-category">{categoryName}</span>
         )}
+        <time dateTime={budget.month} className="budget-month">
+          {formatMonthLabel(budget.month)}
+        </time>
       </div>
       <dl className="budget-amounts">
         <div className="budget-amount">

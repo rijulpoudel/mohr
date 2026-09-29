@@ -226,6 +226,44 @@ describe('budgets list', () => {
     expect(screen.queryByText('20')).not.toBeInTheDocument()
   })
 
+  it('gives every budget row a compact row hook with category-first identity while keeping exact values and actions', async () => {
+    installFetchMock(
+      authenticatedBudgetsHandler(() => jsonResponse(serverOrderedBudgets()), {
+        categories: categoriesWithArchived(),
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByRole('heading', { name: 'Budgets' })
+
+    const items = await screen.findAllByRole('listitem')
+    expect(items).toHaveLength(3)
+
+    for (const item of items) {
+      expect(item).toHaveClass('budget-row')
+      const identity = item.querySelector('.budget-main')
+      expect(identity).not.toBeNull()
+      const category = identity?.querySelector('.budget-category')
+      const month = identity?.querySelector('.budget-month')
+      expect(category).not.toBeNull()
+      expect(month).not.toBeNull()
+      expect(
+        category!.compareDocumentPosition(month!) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy()
+    }
+
+    expect(within(items[0]).getByText('Transport')).toBeInTheDocument()
+    expect(within(items[0]).getByText('$150.00')).toBeInTheDocument()
+    expect(within(items[0]).getByText('$20.00')).toBeInTheDocument()
+    expect(within(items[0]).getByText('$130.00')).toBeInTheDocument()
+    expect(
+      within(items[0]).getByRole('button', { name: 'Edit budget 30' }),
+    ).toBeInTheDocument()
+    expect(
+      within(items[0]).getByRole('button', { name: 'Delete budget 30' }),
+    ).toBeInTheDocument()
+  })
+
   it('shows exact budget use as a clamped bar with an overspent cue', async () => {
     installFetchMock(
       authenticatedBudgetsHandler(() =>

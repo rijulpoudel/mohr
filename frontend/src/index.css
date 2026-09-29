@@ -1692,6 +1692,8 @@ a {
 }
 
 .budget-overspent {
+  display: inline-block;
+  margin-inline-start: var(--space-1);
   color: var(--color-muted);
   font-size: 0.8125rem;
   font-weight: 400;
@@ -1721,6 +1723,81 @@ a {
   flex-wrap: wrap;
   gap: var(--space-3);
   margin-block-start: var(--space-2);
+}
+
+.budgets-screen .budget-row .budget-main {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.budgets-screen .budget-row .budget-category {
+  color: var(--color-text);
+  font-size: 1rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.budgets-screen .budget-row .budget-month {
+  color: var(--color-muted);
+  font-size: 0.875rem;
+  font-weight: 400;
+}
+
+.budgets-screen .budget-row .budget-amounts {
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-1) var(--space-3);
+}
+
+.budgets-screen .budget-row .budget-amount {
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--space-3);
+  align-items: baseline;
+}
+
+.budgets-screen .budget-row .budget-amount dd {
+  text-align: end;
+}
+
+@container budgets (min-width: 32rem) {
+  .budgets-screen .budget-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      'identity actions'
+      'amounts amounts'
+      'use use';
+    column-gap: var(--space-4);
+    row-gap: var(--space-2);
+    align-items: start;
+  }
+
+  .budgets-screen .budget-row .budget-main {
+    grid-area: identity;
+  }
+
+  .budgets-screen .budget-row .budget-actions {
+    grid-area: actions;
+    margin-block-start: 0;
+  }
+
+  .budgets-screen .budget-row .budget-amounts {
+    grid-area: amounts;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: var(--space-2) var(--space-4);
+    margin-block-start: 0;
+  }
+
+  .budgets-screen .budget-row .budget-amount {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-1);
+    text-align: end;
+  }
+
+  .budgets-screen .budget-row .budget-use-bar {
+    grid-area: use;
+    margin-block-start: 0;
+  }
 }
 
 .budget-edit .form {
@@ -1770,6 +1847,8 @@ a {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-1);
   background: var(--color-surface);
+  container-type: inline-size;
+  container-name: budgets;
 }
 
 .budgets-collection-heading {
