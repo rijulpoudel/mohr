@@ -51,6 +51,9 @@ function sessionEndHandler(url: string) {
     setCsrfCookie()
     return jsonResponse({ detail: 'CSRF cookie set.' })
   }
+  if (url === '/api/auth/login/') {
+    return jsonResponse({ id: 1, email: 'student@example.com' })
+  }
   if (url === '/api/auth/logout/') return emptyResponse(204)
   return jsonResponse({}, 404)
 }
@@ -196,6 +199,7 @@ describe('application shell navigation', () => {
 
     await user.click(download)
     expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByRole('button', { name: 'Menu' })).toHaveFocus()
   })
 
   it('closes the navigation through the full-viewport scrim', async () => {
@@ -213,6 +217,7 @@ describe('application shell navigation', () => {
     await user.click(scrim)
 
     expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByRole('button', { name: 'Menu' })).toHaveFocus()
     expect(
       screen.queryByRole('button', { name: 'Close navigation' }),
     ).not.toBeInTheDocument()
@@ -292,6 +297,36 @@ describe('application shell navigation', () => {
     expect(
       screen.queryByRole('navigation', { name: 'Primary' }),
     ).not.toBeInTheDocument()
+  })
+
+  it('keeps the drawer closed when a new session starts after signing out', async () => {
+    installFetchMock(sessionEndHandler)
+    const user = userEvent.setup()
+    renderApp('/')
+
+    await screen.findByText('Signed in as student@example.com')
+    const toggle = screen.getByRole('button', { name: 'Menu' })
+    await user.click(toggle)
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(document.body.style.overflow).toBe('hidden')
+
+    await user.click(screen.getByRole('button', { name: 'Sign out' }))
+    await screen.findByLabelText('Email')
+
+    await user.type(screen.getByLabelText('Email'), 'student@example.com')
+    await user.type(screen.getByLabelText('Password'), 'correct-horse')
+    await user.click(screen.getByRole('button', { name: 'Sign in' }))
+    await screen.findByText('Signed in as student@example.com')
+
+    const nav = screen.getByRole('navigation', { name: 'Primary' })
+    const reopenedToggle = screen.getByRole('button', { name: /menu/i })
+    expect(reopenedToggle).toHaveAttribute('aria-expanded', 'false')
+    expect(nav).not.toHaveClass('is-open')
+    expect(screen.getByRole('main')).not.toHaveAttribute('inert')
+    expect(document.body.style.overflow).toBe('')
+    expect(
+      within(nav).getByRole('link', { name: 'Dashboard' }),
+    ).not.toHaveFocus()
   })
 })
 

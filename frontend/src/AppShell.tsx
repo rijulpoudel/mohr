@@ -19,6 +19,16 @@ export function AppShell() {
   const { status } = useAuth()
   const authenticated = status === 'authenticated'
   const [menuOpen, setMenuOpen] = useState(false)
+  const [previousAuthenticated, setPreviousAuthenticated] = useState(
+    authenticated,
+  )
+
+  // The shell outlives the session, so drop session-local drawer state when the
+  // session ends instead of reopening it for the next user on the same page.
+  if (previousAuthenticated !== authenticated) {
+    setPreviousAuthenticated(authenticated)
+    if (!authenticated) setMenuOpen(false)
+  }
   const [isDesktop, setIsDesktop] = useState(
     () =>
       typeof window.matchMedia === 'function' &&
