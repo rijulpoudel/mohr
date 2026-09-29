@@ -1127,6 +1127,36 @@ describe('bank sync notice', () => {
     }
   })
 
+  it('downgrades a once-recent sync when it ages past 24 hours without refetching', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
+    vi.setSystemTime(new Date('2026-09-12T14:00:00Z'))
+    try {
+      const mock = installFetchMock(
+        bankSyncHandler(() =>
+          jsonResponse([
+            connectionFixture({
+              last_synced_at: '2026-09-11T14:01:00Z',
+            }),
+          ]),
+        ),
+      )
+      renderApp('/')
+      const region = await screen.findByRole('region', { name: 'Bank sync status' })
+      expect(
+        await within(region).findByText('Bank sync recorded in the last 24 hours.'),
+      ).toBeInTheDocument()
+
+      await act(async () => {
+        vi.advanceTimersByTime(120_000)
+      })
+      expect(within(region).getByText('Some bank data may be out of date.')).toBeInTheDocument()
+      expect(within(region).queryByText('Bank sync recorded in the last 24 hours.')).not.toBeInTheDocument()
+      expect(calls(mock, '/api/plaid/connections/')).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('retries a failed bank-status request without retrying the dashboard summary', async () => {
     let attempts = 0
     const mock = installFetchMock(bankSyncHandler(() => {

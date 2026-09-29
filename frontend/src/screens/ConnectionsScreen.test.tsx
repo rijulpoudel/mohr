@@ -698,13 +698,15 @@ describe('connection freshness boundary', () => {
     try {
       renderApp('/connections')
       await screen.findByText('Leaving Bank')
+      expect(vi.getTimerCount()).toBe(1)
 
       const user = userEvent.setup()
       const nav = screen.getByRole('navigation', { name: 'Primary' })
       await user.click(within(nav).getByRole('link', { name: 'Dashboard' }))
 
       expect(await screen.findByText('$1,234.56')).toBeInTheDocument()
-      expect(vi.getTimerCount()).toBe(0)
+      await screen.findByText('Bank sync recorded in the last 24 hours.')
+      expect(vi.getTimerCount()).toBe(1)
     } finally {
       vi.useRealTimers()
     }

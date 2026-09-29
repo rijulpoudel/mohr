@@ -88,10 +88,16 @@ export function BankSyncNotice() {
 
   useEffect(() => {
     let cancelled = false
+    let interval: number | undefined
     void fetchPlaidConnections()
       .then((connections) => {
         if (cancelled) return
         setState(classify(connections, Date.now()))
+        if (connections.length > 0) {
+          interval = window.setInterval(() => {
+            setState(classify(connections, Date.now()))
+          }, 60_000)
+        }
       })
       .catch((error: unknown) => {
         if (cancelled) return
@@ -103,6 +109,7 @@ export function BankSyncNotice() {
       })
     return () => {
       cancelled = true
+      window.clearInterval(interval)
     }
   }, [clearSession, attempt])
 
