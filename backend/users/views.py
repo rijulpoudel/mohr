@@ -39,7 +39,7 @@ def login_view(request):
     serializer.is_valid(raise_exception=True)
     user = authenticate(
         request=request,
-        email=serializer.validated_data["email"],
+        username=serializer.validated_data["email"],
         password=serializer.validated_data["password"],
     )
     if user is None:
