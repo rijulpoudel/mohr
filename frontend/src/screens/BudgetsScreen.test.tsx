@@ -226,6 +226,35 @@ describe('budgets list', () => {
     expect(screen.queryByText('20')).not.toBeInTheDocument()
   })
 
+  it('shows exact budget use as a clamped bar with an overspent cue', async () => {
+    installFetchMock(
+      authenticatedBudgetsHandler(() =>
+        jsonResponse([
+          budgetFixture({ id: 1, spent: '0.00', remaining: '300.00' }),
+          budgetFixture({ id: 2 }),
+          budgetFixture({ id: 3, spent: '300.00', remaining: '0.00' }),
+          budgetFixture({ id: 4, spent: '325.00', remaining: '-25.00' }),
+        ]),
+      ),
+    )
+    renderApp('/budgets')
+
+    const items = await screen.findAllByRole('listitem')
+    const bars = items.map((item) => item.querySelector('.budget-use-bar'))
+    expect(bars).not.toContain(null)
+    expect(bars.map((bar) => (bar?.firstElementChild as HTMLElement).style.width)).toEqual([
+      '0%',
+      '42%',
+      '100%',
+      '100%',
+    ])
+    expect(bars.every((bar) => bar?.getAttribute('aria-hidden') === 'true')).toBe(true)
+    expect(bars[2]).not.toHaveClass('budget-use-overspent')
+    expect(bars[3]).toHaveClass('budget-use-overspent')
+    expect(within(items[3]).getByText('Overspent')).toBeInTheDocument()
+    expect(within(items[3]).getByText('-$25.00')).toBeInTheDocument()
+  })
+
   it('marks only a genuinely negative remaining as overspent, not negative zero or positive', async () => {
     installFetchMock(
       authenticatedBudgetsHandler(() =>
