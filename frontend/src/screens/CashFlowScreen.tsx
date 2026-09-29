@@ -7,6 +7,7 @@ import {
 } from '../api/cashFlow'
 import { ApiError, userMessage } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
+import { BankSyncNotice } from '../components/BankSyncNotice'
 import { formatMonthLabel } from '../format/month'
 import {
   clampedPercent,
@@ -434,6 +435,7 @@ export function CashFlowScreen() {
           }}
         />
       </div>
+      <BankSyncNotice />
       {state.status === 'loading' && (
         <div className="cash-flow-status" role="status">
           <p>Loading cash flow…</p>

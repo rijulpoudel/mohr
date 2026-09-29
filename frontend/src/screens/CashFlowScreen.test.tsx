@@ -120,6 +120,35 @@ describe('cash flow navigation', () => {
 })
 
 describe('cash flow screen states', () => {
+  it('flags a broken bank connection beside the saved cash-flow numbers', async () => {
+    const mock = installFetchMock((url) => {
+      if (url === '/api/auth/me/') {
+        return jsonResponse({ id: 1, email: 'student@example.com' })
+      }
+      if (url.startsWith('/api/cash-flow/summary/')) {
+        return jsonResponse(cashFlowFixture())
+      }
+      if (url === '/api/plaid/connections/') {
+        return jsonResponse([{
+          id: 5,
+          institution_name: 'Sample Bank',
+          status: 'error',
+          sync_pending: false,
+          last_synced_at: null,
+          linked_accounts: [],
+        }])
+      }
+      return jsonResponse({}, 404)
+    })
+    renderApp('/cash-flow')
+
+    const notice = await screen.findByRole('region', { name: 'Bank sync status' })
+    expect(await within(notice).findByText('Bank connection needs attention.')).toBeInTheDocument()
+    expect(within(notice).getByRole('link', { name: 'Review connections' })).toHaveAttribute('href', '/connections')
+    expect(metricValue('Money out')).toContain('$500.00')
+    expect(calls(mock, '/api/plaid/connections/')).toHaveLength(1)
+  })
+
   it('initialises the month control to the client month and shows the period caption beneath the screen title', async () => {
     const spy = septemberLocalDate()
     try {
@@ -907,6 +936,7 @@ describe('cash flow month selection', () => {
       calls(mock, '/api/cash-flow/summary/?month=2026-10'),
     ).toHaveLength(1)
     expect(screen.queryByText('Salary')).not.toBeInTheDocument()
+    expect(calls(mock, '/api/plaid/connections/')).toHaveLength(1)
   })
 
   it('does not fetch, blank shown data, or move to the error state when the month is cleared', async () => {
