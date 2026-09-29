@@ -435,6 +435,7 @@ export function CashFlowScreen() {
           }}
         />
       </div>
+      <BankSyncNotice />
       {state.status === 'loading' && (
         <div className="cash-flow-status" role="status">
           <p>Loading cash flow…</p>
@@ -454,10 +455,7 @@ export function CashFlowScreen() {
         </p>
       )}
       {state.status === 'ready' && (
-        <>
-          <BankSyncNotice />
-          <CashFlowSummaryPanel summary={state.summary} />
-        </>
+        <CashFlowSummaryPanel summary={state.summary} />
       )}
       <Link to="/transactions" className="cash-flow-ledger-link">
         Open the full ledger

@@ -936,6 +936,7 @@ describe('cash flow month selection', () => {
       calls(mock, '/api/cash-flow/summary/?month=2026-10'),
     ).toHaveLength(1)
     expect(screen.queryByText('Salary')).not.toBeInTheDocument()
+    expect(calls(mock, '/api/plaid/connections/')).toHaveLength(1)
   })
 
   it('does not fetch, blank shown data, or move to the error state when the month is cleared', async () => {
