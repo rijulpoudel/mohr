@@ -295,6 +295,83 @@ describe('application shell navigation', () => {
   })
 })
 
+describe('mobile drawer keyboard focus', () => {
+  it('focuses the first nav link, contains Tab, and skips the scrim', async () => {
+    installFetchMock(authenticatedHandler)
+    const user = userEvent.setup()
+    renderApp('/accounts')
+
+    const nav = await screen.findByRole('navigation', { name: 'Primary' })
+    const toggle = screen.getByRole('button', { name: 'Menu' })
+    await user.click(toggle)
+
+    const closeToggle = screen.getByRole('button', { name: 'Close menu' })
+    const firstLink = within(nav).getByRole('link', { name: 'Dashboard' })
+    const download = within(nav).getByRole('link', { name: 'Download data' })
+    const scrim = screen.getByRole('button', { name: 'Close navigation' })
+
+    expect(firstLink).toHaveFocus()
+    expect(scrim).toHaveAttribute('tabindex', '-1')
+
+    await user.tab({ shift: true })
+    expect(closeToggle).toHaveFocus()
+
+    await user.tab({ shift: true })
+    expect(download).toHaveFocus()
+
+    await user.tab()
+    expect(closeToggle).toHaveFocus()
+
+    await user.tab()
+    expect(firstLink).toHaveFocus()
+
+    await user.keyboard('{Escape}')
+    expect(screen.getByRole('button', { name: 'Menu' })).toHaveFocus()
+  })
+
+  it('returns focus to the toggle when a nav route closes the drawer', async () => {
+    installFetchMock(authenticatedHandler)
+    const user = userEvent.setup()
+    renderApp('/accounts')
+
+    const nav = await screen.findByRole('navigation', { name: 'Primary' })
+    const toggle = screen.getByRole('button', { name: 'Menu' })
+    await user.click(toggle)
+
+    await user.click(within(nav).getByRole('link', { name: 'Dashboard' }))
+    expect(screen.getByRole('button', { name: 'Menu' })).toHaveFocus()
+  })
+
+  it('does not focus the hidden toggle when the viewport becomes desktop', async () => {
+    const desktop = installDesktopMediaQuery(false)
+    installFetchMock(authenticatedHandler)
+    const user = userEvent.setup()
+    renderApp('/accounts')
+
+    const nav = await screen.findByRole('navigation', { name: 'Primary' })
+    const toggle = await screen.findByRole('button', { name: 'Menu' })
+    await user.click(toggle)
+
+    desktop.fireChange(true)
+
+    await waitFor(() =>
+      expect(toggle).toHaveAttribute('aria-expanded', 'false'),
+    )
+    expect(toggle).not.toHaveFocus()
+    expect(document.activeElement).toBe(
+      within(nav).getByRole('link', { name: 'Dashboard' }),
+    )
+  })
+
+  it('leaves focus on the document body on initial render', async () => {
+    installFetchMock(authenticatedHandler)
+    renderApp('/accounts')
+
+    await screen.findByRole('navigation', { name: 'Primary' })
+    expect(document.body).toHaveFocus()
+  })
+})
+
 describe('application shell accessibility', () => {
   it('keeps the skip link pointing at the main content anchor', async () => {
     installFetchMock(guestHandler)

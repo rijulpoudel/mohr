@@ -177,6 +177,7 @@ a {
 .site-nav.is-open {
   transform: translateX(0);
   visibility: visible;
+  transition: transform 160ms ease;
 }
 
 .scrim {
