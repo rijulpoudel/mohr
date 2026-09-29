@@ -177,6 +177,7 @@ a {
 .site-nav.is-open {
   transform: translateX(0);
   visibility: visible;
+  transition: transform 160ms ease;
 }
 
 .scrim {
@@ -886,7 +887,7 @@ a {
 }
 
 .transactions-summary-money-out {
-  color: var(--color-brand);
+  color: var(--color-accent);
 }
 
 .transactions-summary-caption {
