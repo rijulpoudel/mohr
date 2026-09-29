@@ -161,6 +161,43 @@ describe('application shell navigation', () => {
     expect(toggle).toHaveAttribute('aria-expanded', 'false')
   })
 
+  it('offers an authenticated native download link to the export endpoint', async () => {
+    installFetchMock(authenticatedHandler)
+    renderApp('/accounts')
+
+    const nav = await screen.findByRole('navigation', { name: 'Primary' })
+    const download = within(nav).getByRole('link', { name: 'Download data' })
+    expect(download).toHaveAttribute('href', '/api/auth/export/')
+    expect(download.tagName).toBe('A')
+  })
+
+  it('never shows the download link to guests', async () => {
+    installFetchMock(guestHandler)
+    renderApp('/login')
+
+    await screen.findByRole('link', { name: 'Mohr' })
+    expect(
+      screen.queryByRole('link', { name: 'Download data' }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('closes the mobile drawer when the download link is activated', async () => {
+    installFetchMock(authenticatedHandler)
+    const user = userEvent.setup()
+    renderApp('/accounts')
+
+    const nav = await screen.findByRole('navigation', { name: 'Primary' })
+    const toggle = screen.getByRole('button', { name: 'Menu' })
+    await user.click(toggle)
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+
+    const download = within(nav).getByRole('link', { name: 'Download data' })
+    download.addEventListener('click', (event) => event.preventDefault())
+
+    await user.click(download)
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  })
+
   it('closes the navigation through the full-viewport scrim', async () => {
     installFetchMock(authenticatedHandler)
     const user = userEvent.setup()

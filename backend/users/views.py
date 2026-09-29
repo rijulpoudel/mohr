@@ -3,10 +3,12 @@ from django.contrib.auth import login as django_login
 from django.contrib.auth import logout as django_logout
 from django.views.decorators.csrf import csrf_protect, ensure_csrf_cookie
 from rest_framework import status
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes, renderer_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
 
+from users.export import build_export
 from users.serializers import LoginSerializer, RegistrationSerializer, UserSerializer
 
 
@@ -63,3 +65,14 @@ def current_user(request):
 def logout_view(request):
     django_logout(request)
     return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+@renderer_classes([JSONRenderer])
+def export_data(request):
+    """Download the signed-in user's records as a versioned JSON attachment."""
+    response = Response(build_export(request.user))
+    response["Content-Disposition"] = 'attachment; filename="mohr-export-v1.json"'
+    response["Cache-Control"] = "no-store"
+    return response
