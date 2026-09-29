@@ -1,8 +1,19 @@
+from datetime import date
+from decimal import Decimal
+
 from django.contrib.auth import get_user_model
+from django.db import connection
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
+
+from accounts.models import Account, AccountType
+from budgets.models import MonthlyBudget
+from categories.models import Category, CategoryType
+from plaid_integration.models import PlaidConnection
+from transactions.models import Transaction, TransactionSource, TransactionType
 
 
 class UserManagerTests(TestCase):
@@ -488,3 +499,578 @@ class CurrentUserAPITests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
         self.assertEqual(get_user_model().objects.count(), user_count)
+
+
+class DataExportAPITests(APITestCase):
+    """Contract for the read-only owner-data download at ``/api/auth/export/``."""
+
+    PASSWORD = "TestOnlyPassword123!"
+
+    TOP_LEVEL_KEYS = {
+        "schema_version",
+        "accounts",
+        "categories",
+        "transactions",
+        "monthly_budgets",
+    }
+    ACCOUNT_KEYS = {
+        "id",
+        "name",
+        "account_type",
+        "opening_balance",
+        "is_archived",
+        "created_at",
+        "updated_at",
+    }
+    CATEGORY_KEYS = {
+        "id",
+        "name",
+        "category_type",
+        "is_archived",
+        "created_at",
+        "updated_at",
+    }
+    TRANSACTION_KEYS = {
+        "id",
+        "account_id",
+        "category_id",
+        "transaction_type",
+        "amount",
+        "date",
+        "note",
+        "source",
+        "is_pending",
+        "is_provider_removed",
+        "is_superseded",
+        "superseded_by_id",
+        "category_customized",
+        "note_customized",
+        "is_transfer",
+        "created_at",
+        "updated_at",
+    }
+    BUDGET_KEYS = {
+        "id",
+        "category_id",
+        "month",
+        "amount",
+        "created_at",
+        "updated_at",
+    }
+    FORBIDDEN_KEYS = {
+        "user",
+        "user_id",
+        "connection",
+        "connection_id",
+        "item_id",
+        "plaid_transaction_id",
+        "plaid_pending_transaction_id",
+        "provider_name",
+        "password",
+        "access_token_encrypted",
+        "encryption_key_id",
+        "session",
+    }
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            email="export-owner@example.com",
+            password=self.PASSWORD,
+        )
+        self.other_user = get_user_model().objects.create_user(
+            email="export-other@example.com",
+            password=self.PASSWORD,
+        )
+        self.other_account = Account.objects.create(
+            user=self.other_user,
+            name="Their Private Account",
+            account_type=AccountType.CHECKING,
+            opening_balance=Decimal("42.42"),
+        )
+        self.other_category = Category.objects.create(
+            user=self.other_user,
+            name="Their Private Category",
+            category_type=CategoryType.EXPENSE,
+        )
+        self.other_transaction = Transaction.objects.create(
+            user=self.other_user,
+            account=self.other_account,
+            category=self.other_category,
+            transaction_type=TransactionType.EXPENSE,
+            amount=Decimal("13.13"),
+            date=date(2026, 9, 2),
+            note="their private note",
+        )
+        self.other_budget = MonthlyBudget.objects.create(
+            user=self.other_user,
+            category=self.other_category,
+            month=date(2026, 9, 1),
+            amount=Decimal("900.00"),
+        )
+        self.url = reverse("auth-export")
+        self.client.force_login(self.user)
+
+    def create_account(self, **overrides):
+        values = {
+            "user": self.user,
+            "name": "Everyday Checking",
+            "account_type": AccountType.CHECKING,
+            "opening_balance": Decimal("100.00"),
+        }
+        values.update(overrides)
+        return Account.objects.create(**values)
+
+    def create_category(self, **overrides):
+        values = {
+            "user": self.user,
+            "name": "Groceries",
+            "category_type": CategoryType.EXPENSE,
+        }
+        values.update(overrides)
+        return Category.objects.create(**values)
+
+    def create_transaction(self, **overrides):
+        values = {
+            "user": self.user,
+            "transaction_type": TransactionType.EXPENSE,
+            "amount": Decimal("25.50"),
+            "date": date(2026, 9, 1),
+        }
+        values.update(overrides)
+        return Transaction.objects.create(**values)
+
+    def create_connection(self, **overrides):
+        values = {
+            "user": self.user,
+            "item_id": "item-sandbox-export-00001",
+            "institution_name": "Export Bank",
+        }
+        values.update(overrides)
+        return PlaidConnection.objects.create(**values)
+
+    def fetch_export(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        return response, response.json()
+
+    def assert_only_allowlisted_keys(self, item, allowed_keys):
+        self.assertEqual(set(item.keys()), allowed_keys)
+        self.assertFalse(self.FORBIDDEN_KEYS & set(item.keys()))
+
+    def test_export_for_user_without_records_returns_empty_collections(self):
+        response, body = self.fetch_export()
+
+        self.assertEqual(set(body.keys()), self.TOP_LEVEL_KEYS)
+        self.assertEqual(body["schema_version"], 1)
+        self.assertEqual(body["accounts"], [])
+        self.assertEqual(body["categories"], [])
+        self.assertEqual(body["transactions"], [])
+        self.assertEqual(body["monthly_budgets"], [])
+        self.assertEqual(response["Content-Type"], "application/json")
+
+    def test_export_returns_exact_allowlisted_owned_payload(self):
+        account = self.create_account()
+        category = self.create_category()
+        transaction = self.create_transaction(
+            account=account,
+            category=category,
+            amount=Decimal("19.99"),
+            date=date(2026, 9, 15),
+            note="weekly shop",
+        )
+        budget = MonthlyBudget.objects.create(
+            user=self.user,
+            category=category,
+            month=date(2026, 9, 1),
+            amount=Decimal("300.00"),
+        )
+
+        _, body = self.fetch_export()
+
+        self.assertEqual(
+            body["accounts"],
+            [
+                {
+                    "id": account.id,
+                    "name": "Everyday Checking",
+                    "account_type": "checking",
+                    "opening_balance": "100.00",
+                    "is_archived": False,
+                    "created_at": account.created_at.isoformat(),
+                    "updated_at": account.updated_at.isoformat(),
+                }
+            ],
+        )
+        self.assertEqual(
+            body["categories"],
+            [
+                {
+                    "id": category.id,
+                    "name": "Groceries",
+                    "category_type": "expense",
+                    "is_archived": False,
+                    "created_at": category.created_at.isoformat(),
+                    "updated_at": category.updated_at.isoformat(),
+                }
+            ],
+        )
+        self.assertEqual(
+            body["transactions"],
+            [
+                {
+                    "id": transaction.id,
+                    "account_id": account.id,
+                    "category_id": category.id,
+                    "transaction_type": "expense",
+                    "amount": "19.99",
+                    "date": "2026-09-15",
+                    "note": "weekly shop",
+                    "source": "manual",
+                    "is_pending": False,
+                    "is_provider_removed": False,
+                    "is_superseded": False,
+                    "superseded_by_id": None,
+                    "category_customized": False,
+                    "note_customized": False,
+                    "is_transfer": False,
+                    "created_at": transaction.created_at.isoformat(),
+                    "updated_at": transaction.updated_at.isoformat(),
+                }
+            ],
+        )
+        self.assertEqual(
+            body["monthly_budgets"],
+            [
+                {
+                    "id": budget.id,
+                    "category_id": category.id,
+                    "month": "2026-09-01",
+                    "amount": "300.00",
+                    "created_at": budget.created_at.isoformat(),
+                    "updated_at": budget.updated_at.isoformat(),
+                }
+            ],
+        )
+        self.assert_only_allowlisted_keys(body["accounts"][0], self.ACCOUNT_KEYS)
+        self.assert_only_allowlisted_keys(body["categories"][0], self.CATEGORY_KEYS)
+        self.assert_only_allowlisted_keys(
+            body["transactions"][0], self.TRANSACTION_KEYS
+        )
+        self.assert_only_allowlisted_keys(body["monthly_budgets"][0], self.BUDGET_KEYS)
+
+    def test_export_never_includes_another_users_rows(self):
+        account = self.create_account()
+        category = self.create_category()
+
+        _, body = self.fetch_export()
+
+        self.assertEqual([item["id"] for item in body["accounts"]], [account.id])
+        self.assertEqual([item["id"] for item in body["categories"]], [category.id])
+        self.assertEqual(body["transactions"], [])
+        self.assertEqual(body["monthly_budgets"], [])
+        exported_text = self.client.get(self.url).content.decode()
+        for leaked in (
+            self.other_account.name,
+            self.other_category.name,
+            self.other_transaction.note,
+            self.other_user.email,
+        ):
+            self.assertNotIn(leaked, exported_text)
+
+    def test_export_includes_archived_and_audit_state_rows(self):
+        archived_account = self.create_account(
+            name="Closed Savings",
+            account_type=AccountType.SAVINGS,
+            is_archived=True,
+        )
+        archived_category = self.create_category(
+            name="Old Hobby",
+            is_archived=True,
+        )
+        connection = self.create_connection()
+        target = self.create_transaction(
+            account=archived_account,
+            category=archived_category,
+            source=TransactionSource.PLAID,
+            connection=connection,
+            plaid_transaction_id="plaid-export-target",
+            provider_name="Provider Target",
+        )
+        superseded = self.create_transaction(
+            account=archived_account,
+            category=archived_category,
+            source=TransactionSource.PLAID,
+            connection=connection,
+            plaid_transaction_id="plaid-export-superseded",
+            is_superseded=True,
+            superseded_by=target,
+        )
+        pending = self.create_transaction(
+            account=archived_account,
+            category=archived_category,
+            source=TransactionSource.PLAID,
+            connection=connection,
+            plaid_transaction_id="plaid-export-pending",
+            is_pending=True,
+            is_provider_removed=True,
+            category_customized=True,
+            note_customized=True,
+        )
+
+        _, body = self.fetch_export()
+
+        accounts = {item["id"]: item for item in body["accounts"]}
+        categories = {item["id"]: item for item in body["categories"]}
+        transactions = {item["id"]: item for item in body["transactions"]}
+        self.assertTrue(accounts[archived_account.id]["is_archived"])
+        self.assertTrue(categories[archived_category.id]["is_archived"])
+        self.assertIn(target.id, transactions)
+        self.assertIn(superseded.id, transactions)
+        self.assertEqual(transactions[superseded.id]["superseded_by_id"], target.id)
+        self.assertTrue(transactions[pending.id]["is_pending"])
+        self.assertTrue(transactions[pending.id]["is_provider_removed"])
+        self.assertTrue(transactions[pending.id]["category_customized"])
+        self.assertTrue(transactions[pending.id]["note_customized"])
+
+    def test_export_sanitizes_malformed_cross_user_relations(self):
+        own_account = self.create_account()
+        own_category = self.create_category()
+        foreign_account_transaction = self.create_transaction(
+            account=self.other_account,
+            category=own_category,
+            amount=Decimal("5.00"),
+            date=date(2026, 9, 3),
+        )
+        foreign_category_transaction = self.create_transaction(
+            account=own_account,
+            category=self.other_category,
+            amount=Decimal("6.00"),
+            date=date(2026, 9, 4),
+        )
+        foreign_budget = MonthlyBudget.objects.create(
+            user=self.user,
+            category=self.other_category,
+            month=date(2026, 9, 1),
+            amount=Decimal("400.00"),
+        )
+
+        response, body = self.fetch_export()
+
+        transactions = {item["id"]: item for item in body["transactions"]}
+        self.assertIsNone(transactions[foreign_account_transaction.id]["account_id"])
+        self.assertEqual(
+            transactions[foreign_account_transaction.id]["category_id"],
+            own_category.id,
+        )
+        self.assertEqual(
+            transactions[foreign_category_transaction.id]["account_id"],
+            own_account.id,
+        )
+        self.assertIsNone(transactions[foreign_category_transaction.id]["category_id"])
+        self.assertIsNone(body["monthly_budgets"][0]["category_id"])
+        self.assertEqual(body["monthly_budgets"][0]["id"], foreign_budget.id)
+
+        exported_relationship_ids = (
+            {item["account_id"] for item in body["transactions"]}
+            | {item["category_id"] for item in body["transactions"]}
+            | {item["category_id"] for item in body["monthly_budgets"]}
+        )
+        exported_relationship_ids.discard(None)
+        self.assertNotIn(self.other_account.id, exported_relationship_ids)
+        self.assertNotIn(self.other_category.id, exported_relationship_ids)
+        exported_text = response.content.decode()
+        self.assertNotIn(self.other_account.name, exported_text)
+        self.assertNotIn(self.other_category.name, exported_text)
+
+    def test_export_exposes_no_provider_or_authentication_material(self):
+        connection = self.create_connection(
+            item_id="item-sandbox-secret-sentinel",
+            access_token_encrypted="sentinel-access-token-ciphertext",
+            encryption_key_id="sentinel-key-id",
+        )
+        self.create_transaction(
+            account=self.create_account(),
+            category=self.create_category(
+                name="Salary",
+                category_type=CategoryType.INCOME,
+            ),
+            transaction_type=TransactionType.INCOME,
+            amount=Decimal("1.00"),
+            date=date(2026, 9, 5),
+            source=TransactionSource.PLAID,
+            connection=connection,
+            plaid_transaction_id="sentinel-plaid-transaction-id",
+            plaid_pending_transaction_id="sentinel-plaid-pending-id",
+            provider_name="Sentinel Merchant",
+            is_pending=True,
+        )
+
+        response, body = self.fetch_export()
+
+        exported_text = response.content.decode()
+        for secret in (
+            "sentinel-access-token-ciphertext",
+            "sentinel-key-id",
+            "sentinel-plaid-transaction-id",
+            "sentinel-plaid-pending-id",
+            "Sentinel Merchant",
+            "item-sandbox-secret-sentinel",
+            "export-owner@example.com",
+            self.PASSWORD,
+            self.user.password,
+        ):
+            self.assertNotIn(secret, exported_text)
+        for collection in (
+            body["accounts"],
+            body["categories"],
+            body["transactions"],
+            body["monthly_budgets"],
+        ):
+            for item in collection:
+                self.assertFalse(self.FORBIDDEN_KEYS & set(item.keys()))
+
+    def test_export_orders_collections_stably_by_id(self):
+        first_account = self.create_account(name="First Account")
+        second_account = self.create_account(name="Second Account")
+        first_category = self.create_category(name="First Category")
+        second_category = self.create_category(name="Second Category")
+        first_transaction = self.create_transaction(
+            account=second_account,
+            category=second_category,
+            date=date(2026, 9, 20),
+        )
+        second_transaction = self.create_transaction(
+            account=first_account,
+            category=first_category,
+            date=date(2026, 9, 10),
+        )
+        first_budget = MonthlyBudget.objects.create(
+            user=self.user,
+            category=first_category,
+            month=date(2026, 11, 1),
+            amount=Decimal("100.00"),
+        )
+        second_budget = MonthlyBudget.objects.create(
+            user=self.user,
+            category=second_category,
+            month=date(2026, 10, 1),
+            amount=Decimal("200.00"),
+        )
+
+        _, body = self.fetch_export()
+
+        self.assertEqual(
+            [item["id"] for item in body["accounts"]],
+            [first_account.id, second_account.id],
+        )
+        self.assertEqual(
+            [item["id"] for item in body["categories"]],
+            [first_category.id, second_category.id],
+        )
+        self.assertEqual(
+            [item["id"] for item in body["transactions"]],
+            [first_transaction.id, second_transaction.id],
+        )
+        self.assertEqual(
+            [item["id"] for item in body["monthly_budgets"]],
+            [first_budget.id, second_budget.id],
+        )
+
+    def test_export_sets_download_headers_and_no_store(self):
+        response, _ = self.fetch_export()
+
+        self.assertTrue(response["Content-Disposition"].startswith("attachment;"))
+        self.assertIn("filename=", response["Content-Disposition"])
+        self.assertEqual(response["Content-Type"], "application/json")
+        self.assertEqual(response["Cache-Control"], "no-store")
+
+    def test_export_rejects_unauthenticated_request(self):
+        self.client.logout()
+        counts_before = (
+            Account.objects.count(),
+            Category.objects.count(),
+            Transaction.objects.count(),
+            MonthlyBudget.objects.count(),
+        )
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(
+            response.data,
+            {"detail": "Authentication credentials were not provided."},
+        )
+        self.assertEqual(
+            (
+                Account.objects.count(),
+                Category.objects.count(),
+                Transaction.objects.count(),
+                MonthlyBudget.objects.count(),
+            ),
+            counts_before,
+        )
+
+    def test_export_rejects_unsupported_methods(self):
+        counts_before = (
+            Account.objects.count(),
+            Category.objects.count(),
+            Transaction.objects.count(),
+            MonthlyBudget.objects.count(),
+        )
+
+        for method in ("post", "put", "patch", "delete"):
+            with self.subTest(method=method):
+                response = getattr(self.client, method)(self.url)
+                self.assertEqual(
+                    response.status_code,
+                    status.HTTP_405_METHOD_NOT_ALLOWED,
+                )
+
+        self.assertEqual(
+            (
+                Account.objects.count(),
+                Category.objects.count(),
+                Transaction.objects.count(),
+                MonthlyBudget.objects.count(),
+            ),
+            counts_before,
+        )
+
+    def test_export_performs_no_database_writes(self):
+        account = self.create_account()
+        category = self.create_category()
+        self.create_transaction(account=account, category=category)
+        MonthlyBudget.objects.create(
+            user=self.user,
+            category=category,
+            month=date(2026, 9, 1),
+            amount=Decimal("100.00"),
+        )
+        counts_before = (
+            Account.objects.count(),
+            Category.objects.count(),
+            Transaction.objects.count(),
+            MonthlyBudget.objects.count(),
+        )
+
+        with CaptureQueriesContext(connection) as captured:
+            response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        write_prefixes = {"INSERT", "UPDATE", "DELETE"}
+        writes = [
+            query["sql"]
+            for query in captured.captured_queries
+            if query["sql"].strip()
+            and query["sql"].lstrip().split(None, 1)[0].upper() in write_prefixes
+        ]
+        self.assertEqual(writes, [])
+        self.assertEqual(
+            (
+                Account.objects.count(),
+                Category.objects.count(),
+                Transaction.objects.count(),
+                MonthlyBudget.objects.count(),
+            ),
+            counts_before,
+        )
