@@ -7,6 +7,7 @@ import {
 } from '../api/cashFlow'
 import { ApiError, userMessage } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
+import { BankSyncNotice } from '../components/BankSyncNotice'
 import { formatMonthLabel } from '../format/month'
 import {
   clampedPercent,
@@ -453,7 +454,10 @@ export function CashFlowScreen() {
         </p>
       )}
       {state.status === 'ready' && (
-        <CashFlowSummaryPanel summary={state.summary} />
+        <>
+          <BankSyncNotice />
+          <CashFlowSummaryPanel summary={state.summary} />
+        </>
       )}
       <Link to="/transactions" className="cash-flow-ledger-link">
         Open the full ledger
