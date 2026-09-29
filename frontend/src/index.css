@@ -887,7 +887,7 @@ a {
 }
 
 .transactions-summary-money-out {
-  color: var(--color-brand);
+  color: var(--color-accent);
 }
 
 .transactions-summary-caption {
