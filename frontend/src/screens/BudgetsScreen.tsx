@@ -12,7 +12,7 @@ import { fetchCategories, type Category } from '../api/categories'
 import { ApiError, userMessage, type FieldErrors } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
 import { formatMonthLabel, isValidBudgetMonth } from '../format/month'
-import { formatMoney } from '../format/money'
+import { clampedPercent, formatMoney } from '../format/money'
 
 const GENERIC_ERROR_MESSAGE = 'Something went wrong. Please try again.'
 const FIELD_ERROR_SUMMARY = 'Please check the highlighted fields.'
@@ -182,6 +182,12 @@ function BudgetItem({
           </dd>
         </div>
       </dl>
+      <div
+        className={`budget-use-bar${overspent ? ' budget-use-overspent' : ''}`}
+        aria-hidden="true"
+      >
+        <span style={{ width: `${clampedPercent(budget.spent, budget.budgeted)}%` }} />
+      </div>
       <div className="budget-actions">
         <button
           type="button"
