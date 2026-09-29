@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
+from datetime import timedelta
 from pathlib import Path
 from typing import cast
 
@@ -141,6 +142,7 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "rest_framework",
+    "axes",
     "users.apps.UsersConfig",
     "accounts.apps.AccountsConfig",
     "categories.apps.CategoriesConfig",
@@ -152,6 +154,27 @@ INSTALLED_APPS = [
 
 AUTH_USER_MODEL = "users.User"
 CSRF_FAILURE_VIEW = "config.views.csrf_failure"
+
+# Login abuse protection (issue #79). Five failed credentials in the rolling
+# 15-minute window lock out the username + client IP pair; a different
+# username or source IP is unaffected and a successful login clears the
+# pair's failures. See users/authentication.py for trusted client IP
+# resolution and the DRF JSON lockout response.
+AUTHENTICATION_BACKENDS = [
+    "axes.backends.AxesStandaloneBackend",
+    "django.contrib.auth.backends.ModelBackend",
+]
+
+AXES_FAILURE_LIMIT = 5
+AXES_COOLOFF_TIME = timedelta(minutes=15)
+AXES_USE_ATTEMPT_EXPIRATION = True
+# Both the admin form and API pass the email as Django's `username` credential.
+AXES_USERNAME_FORM_FIELD = "username"
+AXES_LOCKOUT_PARAMETERS = [["username", "ip_address"]]
+AXES_RESET_ON_SUCCESS = True
+AXES_DISABLE_ACCESS_LOG = True
+AXES_CLIENT_IP_CALLABLE = "users.authentication.get_client_ip"
+AXES_HTTP_RESPONSE_CODE = 429
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": ("users.authentication.SessionAuthentication",),
@@ -171,6 +194,8 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    # Handle lockout responses after authentication and session middleware.
+    "axes.middleware.AxesMiddleware",
 ]
 
 ROOT_URLCONF = "config.urls"

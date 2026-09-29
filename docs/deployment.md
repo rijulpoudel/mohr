@@ -178,6 +178,41 @@ Because the frontend and API share one origin, the browser sends cookies
 automatically and the CSRF cookie value is echoed in the `X-CSRFToken`
 header. No cross-origin configuration is involved.
 
+## Login abuse protection
+
+Both `/api/auth/login/` and `/admin/login/` count failed credentials in Neon
+through django-axes. Five failures for the same email and source IP within 15
+minutes return `429` and block even a correct password until the cooldown.
+Successful authentication before lockout resets that pair's failures. API
+lockouts return a fixed JSON detail, without revealing whether the email
+exists; CSRF checks still run first.
+
+The source IP comes from Render's Cloudflare `CF-Connecting-IP` header, which
+[Render says it overwrites](https://render.com/articles/host-pocketbase-on-render)
+on every public request, with `REMOTE_ADDR` as a local/test fallback. This is a
+security boundary: keep Render's edge as the **only** public path to the
+container. If a new proxy or public route is added, validate which hop sets
+that header before relying on IP-based lockouts. Shared-IP users with
+different emails do not block each other, but a malicious party can
+temporarily lock another person's email from the same IP. Distributed
+attempts across many IPs and public registration are not stopped by this
+control.
+
+Wait 15 minutes after the last failed attempt for an ordinary unlock. For an
+urgent, verified account-owner unlock, an operator with approved database
+access can run `python manage.py axes_reset_ip_username <client-ip> <email>`
+from a trusted environment connected to the production database. Do not use
+`axes_reset` for one user: it unlocks everyone. Render Free has no shell or
+one-off job, so do not promise an immediate console unlock from its dashboard.
+
+Attempts store email, IP, user agent, and request path; successful-login and
+per-failure access logs are disabled. Expired attempts are removed on later
+authentication traffic, not by a timed background job, so an idle database can
+retain them past 15 minutes. The deployed single synchronous Gunicorn worker
+serializes requests; before increasing `WEB_CONCURRENCY` or adding instances,
+reassess concurrent-first-attempt races and test the lockout with the new
+architecture.
+
 ## Free tier limitations to expect
 
 - **Cold start**: after about 15 idle minutes the service spins down. The
