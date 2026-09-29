@@ -452,8 +452,49 @@ describe('budgets list', () => {
   })
 })
 
+describe('budgets workspace shell', () => {
+  it('renders a list-first workspace with a labeled collection, scope sentence, and one row per budget', async () => {
+    installFetchMock(
+      authenticatedBudgetsHandler(() => jsonResponse(serverOrderedBudgets()), {
+        categories: categoriesWithArchived(),
+      }),
+    )
+    renderApp('/budgets')
+
+    const items = await screen.findAllByRole('listitem')
+    expect(items).toHaveLength(3)
+
+    const root = document.querySelector('.screen.budgets-screen')
+    expect(root).not.toBeNull()
+
+    const header = root?.querySelector('.budgets-header')
+    expect(header).not.toBeNull()
+    expect(
+      within(header as HTMLElement).getByRole('heading', { name: 'Budgets' }),
+    ).toBeInTheDocument()
+    expect(
+      within(header as HTMLElement).getByText(
+        'Remaining budget is not available cash.',
+      ),
+    ).toBeInTheDocument()
+    expect(
+      screen.getAllByText('Remaining budget is not available cash.'),
+    ).toHaveLength(1)
+
+    const collection = screen.getByRole('region', { name: 'Category budgets' })
+    expect(collection).toHaveClass('budgets-collection')
+    expect(within(collection).getAllByRole('listitem')).toHaveLength(3)
+
+    const addHeading = screen.getByRole('heading', { name: 'Add budget' })
+    expect(
+      collection.compareDocumentPosition(addHeading) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+  })
+})
+
 describe('budget creation form', () => {
-  it('renders an accessible Add budget form above the list offering only active expense categories', async () => {
+  it('renders an accessible Add budget form after the list offering only active expense categories', async () => {
     installFetchMock(
       authenticatedBudgetsHandler(() => jsonResponse([]), {
         categories: categoriesWithArchived(),
@@ -465,7 +506,7 @@ describe('budget creation form', () => {
     expect(await screen.findByText(/no budgets exist yet/i)).toBeInTheDocument()
     const emptyState = screen.getByText(/no budgets exist yet/i)
     expect(
-      heading.compareDocumentPosition(emptyState) &
+      emptyState.compareDocumentPosition(heading) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy()
 

@@ -1080,86 +1080,103 @@ export function BudgetsScreen() {
     deletingId !== null
 
   return (
-    <div className="screen">
-      <h2 ref={headingRef} tabIndex={-1}>
-        Budgets
-      </h2>
-      <CreateBudgetForm
-        categories={categories}
-        created={createdNotice}
-        submitLocked={
-          editingId !== null ||
-          editPending ||
-          deletingId !== null ||
-          deletePending
-        }
-        deleteLocked={deletingId !== null || deletePending}
-        onCreateStart={handleCreateStart}
-        onCreated={handleBudgetCreated}
-        onPendingChange={handleCreatePendingChange}
-      />
-      {updateNotice && state.status !== 'error' && (
-        <p role="status" className="notice">
-          Budget updated.
+    <div className="screen budgets-screen">
+      <header className="budgets-header">
+        <h2 ref={headingRef} tabIndex={-1}>
+          Budgets
+        </h2>
+        <p className="budgets-scope">
+          Remaining budget is not available cash.
         </p>
-      )}
-      {deletedNotice && state.status !== 'error' && (
-        <p role="status" className="notice">
-          Budget deleted.
-        </p>
-      )}
-      {state.status === 'loading' && <p role="status">Loading your budgets…</p>}
-      {refreshing && state.status === 'ready' && (
-        <p role="status">Updating budgets…</p>
-      )}
-      {state.status === 'error' && (
-        <div className="error-summary" role="alert">
-          <p>{state.message}</p>
-          <button type="button" className="btn" onClick={handleRetry}>
-            Retry
-          </button>
-        </div>
-      )}
-      {state.status === 'ready' &&
-        (state.budgets.length === 0 ? (
-          <p className="empty-state">
-            No budgets exist yet. Budgets you create will appear here.
-          </p>
-        ) : (
-          <ul className="budget-list">
-            {state.budgets.map((budget) =>
-              editingId === budget.id ? (
-                <EditBudgetForm
-                  key={budget.id}
-                  budget={budget}
-                  categories={categories}
-                  onCancel={() => handleEditCancel(budget.id)}
-                  onUpdated={handleEditUpdated}
-                  onPendingChange={handleEditPendingChange}
-                />
-              ) : deletingId === budget.id ? (
-                <DeleteBudgetConfirm
-                  key={budget.id}
-                  budget={budget}
-                  categoryName={categoryById.get(budget.category)?.name}
-                  onCancel={() => handleDeleteCancel(budget.id)}
-                  onDeleted={handleDeleteDeleted}
-                  onPendingChange={handleDeletePendingChange}
-                />
-              ) : (
-                <BudgetItem
-                  key={budget.id}
-                  budget={budget}
-                  categoryName={categoryById.get(budget.category)?.name}
-                  editDisabled={rowLocked}
-                  deleteDisabled={rowLocked}
-                  onEdit={() => handleEditOpen(budget.id)}
-                  onDelete={() => handleDeleteOpen(budget.id)}
-                />
-              ),
-            )}
-          </ul>
-        ))}
+      </header>
+      <div className="budgets-layout">
+        <section
+          className="budgets-collection"
+          aria-labelledby="budgets-collection-heading"
+        >
+          <h3 id="budgets-collection-heading" className="budgets-collection-heading">
+            Category budgets
+          </h3>
+          {updateNotice && state.status !== 'error' && (
+            <p role="status" className="notice">
+              Budget updated.
+            </p>
+          )}
+          {deletedNotice && state.status !== 'error' && (
+            <p role="status" className="notice">
+              Budget deleted.
+            </p>
+          )}
+          {state.status === 'loading' && (
+            <p role="status">Loading your budgets…</p>
+          )}
+          {refreshing && state.status === 'ready' && (
+            <p role="status">Updating budgets…</p>
+          )}
+          {state.status === 'error' && (
+            <div className="error-summary" role="alert">
+              <p>{state.message}</p>
+              <button type="button" className="btn" onClick={handleRetry}>
+                Retry
+              </button>
+            </div>
+          )}
+          {state.status === 'ready' &&
+            (state.budgets.length === 0 ? (
+              <p className="empty-state">
+                No budgets exist yet. Budgets you create will appear here.
+              </p>
+            ) : (
+              <ul className="budget-list">
+                {state.budgets.map((budget) =>
+                  editingId === budget.id ? (
+                    <EditBudgetForm
+                      key={budget.id}
+                      budget={budget}
+                      categories={categories}
+                      onCancel={() => handleEditCancel(budget.id)}
+                      onUpdated={handleEditUpdated}
+                      onPendingChange={handleEditPendingChange}
+                    />
+                  ) : deletingId === budget.id ? (
+                    <DeleteBudgetConfirm
+                      key={budget.id}
+                      budget={budget}
+                      categoryName={categoryById.get(budget.category)?.name}
+                      onCancel={() => handleDeleteCancel(budget.id)}
+                      onDeleted={handleDeleteDeleted}
+                      onPendingChange={handleDeletePendingChange}
+                    />
+                  ) : (
+                    <BudgetItem
+                      key={budget.id}
+                      budget={budget}
+                      categoryName={categoryById.get(budget.category)?.name}
+                      editDisabled={rowLocked}
+                      deleteDisabled={rowLocked}
+                      onEdit={() => handleEditOpen(budget.id)}
+                      onDelete={() => handleDeleteOpen(budget.id)}
+                    />
+                  ),
+                )}
+              </ul>
+            ))}
+        </section>
+        <CreateBudgetForm
+          categories={categories}
+          created={createdNotice}
+          submitLocked={
+            editingId !== null ||
+            editPending ||
+            deletingId !== null ||
+            deletePending
+          }
+          deleteLocked={deletingId !== null || deletePending}
+          onCreateStart={handleCreateStart}
+          onCreated={handleBudgetCreated}
+          onPendingChange={handleCreatePendingChange}
+        />
+      </div>
     </div>
   )
 }
