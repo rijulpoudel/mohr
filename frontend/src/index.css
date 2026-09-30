@@ -841,6 +841,7 @@ a {
 
 .transactions-toolbar {
   border-radius: 0.75rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(12.5rem, 100%), 1fr));
 }
 
 .transactions-toolbar .form-field {
