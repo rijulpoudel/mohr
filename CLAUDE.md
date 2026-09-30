@@ -187,13 +187,15 @@ Rijul is learning backend engineering while building Mohr.
 
 `DESIGN.md` is the authoritative visual-system specification.
 
-- Warm, light personal-finance interface with deep navy typography
-- Accessible dark orange for primary actions; bright orange for brand accents
+- Cool, light personal-finance interface with deep navy typography
+- Accessible indigo for primary actions; brighter indigo for brand accents
 - Soft lavender-gray canvas with flat white working surfaces
 - Plus Jakarta Sans typography and tabular financial figures
 - Dense but scannable layouts with meaningful, truthfully calculated charts
 - No gradients, neon effects, rainbow charts, glassmorphism, or generic AI-looking dashboards
-- Prefer the restraint of Linear, Apple, and Stripe while preserving Mohr's distinct warm identity
+- Prefer the restraint of Linear, Apple, and Stripe while preserving Mohr's distinct identity
+- Styling uses Arc-owned component source with CSS modules and Mohr's shared CSS variables; Motion is added only where a component adopts it
+- Do not import a global Arc foundation reset, and do not add a Tailwind layer without a separate, justified migration
 
 ## Non-goals for v0.1
 

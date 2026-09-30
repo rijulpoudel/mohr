@@ -9,6 +9,8 @@
   `docs/deployment.md`.
 - Active work is the bounded v0.2 Plaid Sandbox milestone, defined in the
   v0.2 section below and frozen in `docs/plaid.md`.
+- Current visual rules live in `DESIGN.md`; the older MVP-era styling notes
+  below are historical and no longer describe the app.
 
 ## Product promise
 
