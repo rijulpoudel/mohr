@@ -1,18 +1,18 @@
 :root {
   color-scheme: light;
 
-  --color-bg: #f8f7fc;
+  --color-bg: #f7f8fc;
   --color-surface: #ffffff;
-  --color-surface-muted: #f1f2fb;
-  --color-border: #e8e4e8;
+  --color-surface-muted: #eef0f8;
+  --color-border: #dfe3ed;
   --color-text: #0f172a;
-  --color-muted: #6b5a54;
-  --color-accent: #a33900;
-  --color-brand: #fa580c;
+  --color-muted: #596175;
+  --color-accent: #4338ca;
+  --color-brand: #6366f1;
   --color-positive: #006c49;
   --color-info: #006194;
   --color-error: #ba1a1a;
-  --color-primary-container: #ffe0d2;
+  --color-primary-container: #e9e8ff;
   --color-nav-active: var(--color-primary-container);
 
   --space-1: 0.25rem;
@@ -1245,8 +1245,8 @@ a {
   font-size: 0.875rem;
 }
 
-/* A small, restrained palette of existing tokens with no gradients: rust,
-   blue, emerald, navy, then a warm neutral reserved for the aggregated
+/* A small, restrained palette of existing tokens with no gradients: indigo,
+   blue, emerald, navy, then a neutral reserved for the aggregated
    "Other" slice. Each slice also carries its own legend label and exact
    amount, so color is never the only key. */
 .accounts-seg-0 {

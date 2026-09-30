@@ -1,18 +1,18 @@
 ---
 version: alpha
-name: Mohr Warm Wealth
-description: A warm, precise personal-finance interface that makes monthly money decisions feel calm and understandable.
+name: Mohr Quiet Indigo
+description: A cool, precise personal-finance interface that makes monthly money decisions feel calm and understandable.
 colors:
-  primary: "#A33900"
-  primary-bright: "#FA580C"
+  primary: "#4338CA"
+  primary-bright: "#6366F1"
   secondary: "#006C49"
   tertiary: "#006194"
   neutral: "#0F172A"
-  background: "#F8F7FC"
+  background: "#F7F8FC"
   surface: "#FFFFFF"
-  surface-muted: "#F1F2FB"
-  text-muted: "#6B5A54"
-  border: "#E8E4E8"
+  surface-muted: "#EEF0F8"
+  text-muted: "#596175"
+  border: "#DFE3ED"
   error: "#BA1A1A"
 typography:
   display:
@@ -81,7 +81,7 @@ components:
     rounded: "{rounded.lg}"
     padding: 24px
   nav-active:
-    backgroundColor: "#FFE0D2"
+    backgroundColor: "#E9E8FF"
     textColor: "{colors.neutral}"
     typography: "{typography.label}"
     rounded: "{rounded.md}"
@@ -105,19 +105,19 @@ components:
 
 ## Overview
 
-Mohr should feel warm, calm, trustworthy, and exact. The interface combines the restraint of a professional finance product with a personal visual identity. It is dense enough to answer real questions without turning every value into a card.
+Mohr should feel cool, calm, trustworthy, and exact. The interface combines the restraint of a professional finance product with a personal visual identity. It is dense enough to answer real questions without turning every value into a card.
 
 The product promise controls the hierarchy: help students and young professionals understand where their money went and what they can safely spend this month.
 
 ## Colors
 
-- **Action orange (`#A33900`)** is the accessible high-emphasis interaction color. Use it for one primary action per region, active navigation details, and critical chart emphasis.
-- **Bright orange (`#FA580C`)** is a brand and illustration color. Do not place normal-size white text on it.
+- **Action indigo (`#4338CA`)** is the accessible high-emphasis interaction color. Use it for one primary action per region, active navigation details, and critical chart emphasis.
+- **Brand indigo (`#6366F1`)** is a brand and illustration color. Do not place normal-size white text on it.
 - **Emerald (`#006C49`)** communicates positive financial outcomes such as income, remaining funds, and healthy progress. Never rely on color alone.
 - **Blue (`#006194`)** identifies neutral analytical information. It is not a second call-to-action color.
 - **Deep navy (`#0F172A`)** is the primary text color and anchors the identity.
-- Warm lavender-gray backgrounds separate the application canvas from flat white working surfaces.
-- Error red is reserved for destructive actions, invalid input, and overspending. Do not use orange as an error color.
+- Cool lavender-gray backgrounds separate the application canvas from flat white working surfaces.
+- Error red is reserved for destructive actions, invalid input, and overspending. Do not use indigo as an error color.
 
 Charts use the smallest meaningful palette. Categories must also have labels or direct values so color is never the only key.
 
@@ -151,7 +151,7 @@ The ornamental Mohr seal may appear in full on onboarding or marketing surfaces.
 
 - One filled primary button wins each action group.
 - Secondary actions use white or transparent surfaces with visible borders.
-- Active navigation uses a warm tinted field, dark text, and an additional non-color indicator through weight or icon treatment.
+- Active navigation uses an indigo-tinted field, dark text, and an additional non-color indicator through weight or icon treatment.
 - Metric cards explain period and meaning. They never relabel `total_balance` as historical net worth.
 - Charts require a title phrased as a financial question or a label that clearly states the measure and period.
 - Tables retain visible focus, keyboard operation, aligned amounts, and responsive alternatives rather than hiding required columns without explanation.
