@@ -79,7 +79,7 @@ export default function SegmentedControl({
                 type="button"
                 data-value={option.value}
                 aria-pressed={selected}
-                tabIndex={selected ? 0 : -1}
+                tabIndex={index === selectedIndex ? 0 : -1}
                 disabled={disabled}
                 onClick={() => onValueChange(option.value)}
                 onKeyDown={onKeyDown}
