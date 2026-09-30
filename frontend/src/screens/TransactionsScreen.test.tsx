@@ -153,6 +153,21 @@ function transactionRequests(mock: FetchMock): number {
   ).length
 }
 
+function typeFilterGroup(): HTMLElement {
+  return screen.getByRole('group', { name: 'Transaction type' })
+}
+
+function typeFilterButton(name: 'All' | 'Income' | 'Expense'): HTMLElement {
+  return within(typeFilterGroup()).getByRole('button', { name })
+}
+
+async function chooseTypeFilter(
+  user: ReturnType<typeof userEvent.setup>,
+  name: 'All' | 'Income' | 'Expense',
+) {
+  await user.click(typeFilterButton(name))
+}
+
 afterEach(() => {
   resetTransactionsRequest()
   resetCategoriesRequest()
@@ -359,7 +374,9 @@ describe('transactions list', () => {
     )
     expect(screen.getByLabelText('Account')).toBeEnabled()
     expect(screen.getByLabelText('Category')).toBeEnabled()
-    expect(screen.getByLabelText('Transaction type')).toBeEnabled()
+    for (const button of within(typeFilterGroup()).getAllByRole('button')) {
+      expect(button).toBeEnabled()
+    }
     expect(screen.getByLabelText('Start date')).toBeEnabled()
     expect(screen.getByLabelText('End date')).toBeEnabled()
 
@@ -471,10 +488,7 @@ describe('transactions list', () => {
     expect(await screen.findByText(/No transactions yet/)).toBeInTheDocument()
 
     const user = userEvent.setup()
-    await user.selectOptions(
-      screen.getByLabelText('Transaction type'),
-      'expense',
-    )
+    await chooseTypeFilter(user, 'Expense')
 
     expect(
       await screen.findByText(/No matches for these filters/),
@@ -869,6 +883,9 @@ describe('transactions filters', () => {
         fireEvent.change(screen.getByLabelText(fieldLabel), {
           target: { value },
         })
+      } else if (fieldLabel === 'Transaction type') {
+        const user = userEvent.setup()
+        await chooseTypeFilter(user, value === 'income' ? 'Income' : 'Expense')
       } else {
         const user = userEvent.setup()
         await user.selectOptions(screen.getByLabelText(fieldLabel), value)
@@ -879,6 +896,161 @@ describe('transactions filters', () => {
       )
     },
   )
+
+  it('filters by type through the segmented control, requesting only that type', async () => {
+    const mock = installFetchMock(
+      authenticatedTransactionsHandler(
+        (url) => {
+          if (url === '/api/transactions/?transaction_type=expense') {
+            return jsonResponse([
+              transactionFixture({
+                id: 2,
+                account: 1,
+                category: 2,
+                transaction_type: 'expense',
+                amount: '45.00',
+                date: '2026-09-09',
+                note: 'Dinner',
+              }),
+            ])
+          }
+          return jsonResponse(serverOrderedTransactions())
+        },
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Monthly paycheck')
+
+    const all = typeFilterButton('All')
+    const income = typeFilterButton('Income')
+    const expense = typeFilterButton('Expense')
+    expect(all).toHaveAttribute('aria-pressed', 'true')
+    expect(income).toHaveAttribute('aria-pressed', 'false')
+    expect(expense).toHaveAttribute('aria-pressed', 'false')
+
+    const user = userEvent.setup()
+    await user.click(expense)
+
+    expect(expense).toHaveAttribute('aria-pressed', 'true')
+    expect(all).toHaveAttribute('aria-pressed', 'false')
+    await waitFor(() =>
+      expect(
+        calls(mock, '/api/transactions/?transaction_type=expense'),
+      ).toHaveLength(1),
+    )
+    expect(await screen.findByText('Dinner')).toBeInTheDocument()
+    expect(screen.queryByText('Monthly paycheck')).not.toBeInTheDocument()
+  })
+
+  it('drives the type filter with ArrowRight, End, and Home and the mapped requests', async () => {
+    const mock = installFetchMock(
+      authenticatedTransactionsHandler(
+        (url) => {
+          if (url === '/api/transactions/?transaction_type=income') {
+            return jsonResponse([
+              transactionFixture({
+                id: 3,
+                account: 2,
+                category: 1,
+                transaction_type: 'income',
+                amount: '2500.00',
+                date: '2026-09-11',
+                note: 'Monthly paycheck',
+              }),
+            ])
+          }
+          if (url === '/api/transactions/?transaction_type=expense') {
+            return jsonResponse([
+              transactionFixture({
+                id: 2,
+                account: 1,
+                category: 2,
+                transaction_type: 'expense',
+                amount: '45.00',
+                date: '2026-09-09',
+                note: 'Dinner',
+              }),
+            ])
+          }
+          return jsonResponse(serverOrderedTransactions())
+        },
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Monthly paycheck')
+
+    const all = typeFilterButton('All')
+    const income = typeFilterButton('Income')
+    const expense = typeFilterButton('Expense')
+    all.focus()
+    const user = userEvent.setup()
+
+    await user.keyboard('{ArrowRight}')
+    expect(income).toHaveFocus()
+    expect(income).toHaveAttribute('aria-pressed', 'true')
+    await waitFor(() =>
+      expect(
+        calls(mock, '/api/transactions/?transaction_type=income'),
+      ).toHaveLength(1),
+    )
+
+    await user.keyboard('{End}')
+    expect(expense).toHaveFocus()
+    expect(expense).toHaveAttribute('aria-pressed', 'true')
+    await waitFor(() =>
+      expect(
+        calls(mock, '/api/transactions/?transaction_type=expense'),
+      ).toHaveLength(1),
+    )
+
+    await user.keyboard('{Home}')
+    expect(all).toHaveFocus()
+    expect(all).toHaveAttribute('aria-pressed', 'true')
+    await waitFor(() =>
+      expect(calls(mock, '/api/transactions/')).toHaveLength(2),
+    )
+    expect(
+      mock.mock.calls.some(
+        ([input]) => String(input) === '/api/transactions/?transaction_type=',
+      ),
+    ).toBe(false)
+  })
+
+  it('Clear all filters resets the segmented type filter to All and requests the unfiltered path', async () => {
+    const mock = installFetchMock(
+      authenticatedTransactionsHandler(
+        (url) => {
+          if (url === '/api/transactions/?transaction_type=expense') {
+            return jsonResponse([])
+          }
+          return jsonResponse(serverOrderedTransactions())
+        },
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Monthly paycheck')
+
+    const user = userEvent.setup()
+    await chooseTypeFilter(user, 'Expense')
+    await waitFor(() =>
+      expect(
+        calls(mock, '/api/transactions/?transaction_type=expense'),
+      ).toHaveLength(1),
+    )
+    expect(typeFilterButton('Expense')).toHaveAttribute('aria-pressed', 'true')
+
+    const unfilteredBefore = calls(mock, '/api/transactions/').length
+    await user.click(screen.getByRole('button', { name: 'Clear all filters' }))
+
+    await waitFor(() =>
+      expect(calls(mock, '/api/transactions/')).toHaveLength(unfilteredBefore + 1),
+    )
+    expect(typeFilterButton('All')).toHaveAttribute('aria-pressed', 'true')
+    expect(typeFilterButton('Expense')).toHaveAttribute('aria-pressed', 'false')
+  })
 
   it('combines all filters in the backend deterministic order and never refetches account or category lists', async () => {
     const mock = installFetchMock(
@@ -893,10 +1065,7 @@ describe('transactions filters', () => {
     const user = userEvent.setup()
     await user.selectOptions(screen.getByLabelText('Account'), '2')
     await user.selectOptions(screen.getByLabelText('Category'), '3')
-    await user.selectOptions(
-      screen.getByLabelText('Transaction type'),
-      'income',
-    )
+    await chooseTypeFilter(user, 'Income')
     fireEvent.change(screen.getByLabelText('Start date'), {
       target: { value: '2026-09-01' },
     })
@@ -970,10 +1139,7 @@ describe('transactions filters', () => {
     expect(transactionRequests(mock)).toBe(2)
 
     const user = userEvent.setup()
-    await user.selectOptions(
-      screen.getByLabelText('Transaction type'),
-      'expense',
-    )
+    await chooseTypeFilter(user, 'Expense')
     expect(transactionRequests(mock)).toBe(2)
     expect(screen.getByRole('alert')).toHaveTextContent(
       'Start date must not be after end date.',
@@ -1047,15 +1213,12 @@ describe('transactions filters', () => {
     await screen.findByText('Monthly paycheck')
 
     const user = userEvent.setup()
-    await user.selectOptions(
-      screen.getByLabelText('Transaction type'),
-      'income',
-    )
+    await chooseTypeFilter(user, 'Income')
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'Server exploded.',
     )
-    expect(screen.getByLabelText('Transaction type')).toHaveValue('income')
+    expect(typeFilterButton('Income')).toHaveAttribute('aria-pressed', 'true')
 
     await user.click(screen.getByRole('button', { name: 'Retry' }))
 
@@ -1084,10 +1247,7 @@ describe('transactions filters', () => {
     await screen.findByText('Loading your transactions…')
 
     const user = userEvent.setup()
-    await user.selectOptions(
-      screen.getByLabelText('Transaction type'),
-      'expense',
-    )
+    await chooseTypeFilter(user, 'Expense')
 
     await act(async () => {
       filtered.resolve(
@@ -1135,10 +1295,7 @@ describe('transactions filters', () => {
     })
 
     const user = userEvent.setup()
-    await user.selectOptions(
-      screen.getByLabelText('Transaction type'),
-      'expense',
-    )
+    await chooseTypeFilter(user, 'Expense')
     await waitFor(() =>
       expect(
         calls(mock, '/api/transactions/?transaction_type=expense'),
@@ -1633,7 +1790,7 @@ describe('transaction creation form', () => {
     await screen.findByText('Monthly paycheck')
 
     const user = userEvent.setup()
-    await user.selectOptions(screen.getByLabelText('Transaction type'), 'expense')
+    await chooseTypeFilter(user, 'Expense')
     await waitFor(() =>
       expect(
         calls(mock, '/api/transactions/?transaction_type=expense'),
@@ -1654,7 +1811,7 @@ describe('transaction creation form', () => {
     expect(await screen.findByText('Transaction created.')).toBeInTheDocument()
     expect(await screen.findByText('Dinner')).toBeInTheDocument()
 
-    expect(screen.getByLabelText('Transaction type')).toHaveValue('expense')
+    expect(typeFilterButton('Expense')).toHaveAttribute('aria-pressed', 'true')
     expect(screen.getByLabelText('New transaction account')).toHaveValue('')
     expect(screen.getByLabelText('New transaction category')).toHaveValue('')
     expect(screen.getByLabelText('New transaction type')).toHaveValue('expense')
@@ -2425,7 +2582,7 @@ describe('transaction creation filtered refresh', () => {
     await screen.findByText('Monthly paycheck')
 
     const user = userEvent.setup()
-    await user.selectOptions(screen.getByLabelText('Transaction type'), 'expense')
+    await chooseTypeFilter(user, 'Expense')
     await waitFor(() =>
       expect(
         calls(mock, '/api/transactions/?transaction_type=expense'),
@@ -2452,7 +2609,7 @@ describe('transaction creation filtered refresh', () => {
     expect(
       await screen.findByText(/No matches for these filters/),
     ).toBeInTheDocument()
-    expect(screen.getByLabelText('Transaction type')).toHaveValue('expense')
+    expect(typeFilterButton('Expense')).toHaveAttribute('aria-pressed', 'true')
     expect(calls(mock, '/api/accounts/')).toHaveLength(1)
     expect(calls(mock, '/api/categories/')).toHaveLength(1)
     expect(calls(mock, '/api/transactions/', 'POST')).toHaveLength(1)
@@ -2834,7 +2991,7 @@ describe('transaction creation pre-create race', () => {
     await screen.findByText(/No transactions yet/)
 
     const user = userEvent.setup()
-    await user.selectOptions(screen.getByLabelText('Transaction type'), 'expense')
+    await chooseTypeFilter(user, 'Expense')
     await waitFor(() =>
       expect(
         calls(mock, '/api/transactions/?transaction_type=expense'),
@@ -3698,7 +3855,7 @@ describe('transaction editing', () => {
     await screen.findByText('Monthly paycheck')
 
     const user = userEvent.setup()
-    await user.selectOptions(screen.getByLabelText('Transaction type'), 'expense')
+    await chooseTypeFilter(user, 'Expense')
     await waitFor(() =>
       expect(
         calls(mock, '/api/transactions/?transaction_type=expense'),
@@ -3711,7 +3868,7 @@ describe('transaction editing', () => {
     const edits = await screen.findAllByRole('button', { name: /^Edit/ })
     await user.click(edits[0])
 
-    expect(screen.getByLabelText('Transaction type')).toHaveValue('expense')
+    expect(typeFilterButton('Expense')).toHaveAttribute('aria-pressed', 'true')
     expect(transactionRequests(mock)).toBe(txCalls)
     expect(calls(mock, '/api/accounts/')).toHaveLength(accountCalls)
     expect(calls(mock, '/api/categories/')).toHaveLength(categoryCalls)
@@ -3901,7 +4058,7 @@ describe('transaction editing', () => {
     await screen.findByText('Groceries')
 
     const user = userEvent.setup()
-    await user.selectOptions(screen.getByLabelText('Transaction type'), 'expense')
+    await chooseTypeFilter(user, 'Expense')
     await waitFor(() =>
       expect(
         calls(mock, '/api/transactions/?transaction_type=expense'),
@@ -3926,7 +4083,7 @@ describe('transaction editing', () => {
     expect(
       screen.getByText('No matches for these filters. Try clearing or changing a filter.'),
     ).toBeInTheDocument()
-    expect(screen.getByLabelText('Transaction type')).toHaveValue('expense')
+    expect(typeFilterButton('Expense')).toHaveAttribute('aria-pressed', 'true')
     expect(
       calls(mock, '/api/transactions/?transaction_type=expense'),
     ).toHaveLength(filteredLists)
@@ -4523,12 +4680,20 @@ describe('transaction editing independent review defects', () => {
     )
     expect(screen.getByLabelText('Account')).toBeDisabled()
     expect(screen.getByLabelText('Category')).toBeDisabled()
-    expect(screen.getByLabelText('Transaction type')).toBeDisabled()
+    for (const button of within(typeFilterGroup()).getAllByRole('button')) {
+      expect(button).toBeDisabled()
+    }
     expect(screen.getByLabelText('Start date')).toBeDisabled()
     expect(screen.getByLabelText('End date')).toBeDisabled()
     expect(
       screen.getByRole('button', { name: 'Create transaction' }),
     ).toBeDisabled()
+    const listsBefore = transactionRequests(mock)
+    fireEvent.click(typeFilterButton('Expense'))
+    expect(typeFilterButton('All')).toHaveAttribute('aria-pressed', 'true')
+    expect(typeFilterButton('Income')).toHaveAttribute('aria-pressed', 'false')
+    expect(typeFilterButton('Expense')).toHaveAttribute('aria-pressed', 'false')
+    expect(transactionRequests(mock)).toBe(listsBefore)
 
     await act(async () => {
       patchPending.resolve(
@@ -4584,6 +4749,11 @@ describe('transaction editing independent review defects', () => {
     await user.selectOptions(accountFilter, '1')
 
     expect(accountFilter).toHaveValue('')
+    const listsBefore = transactionRequests(mock)
+    fireEvent.click(typeFilterButton('Expense'))
+    expect(typeFilterButton('All')).toHaveAttribute('aria-pressed', 'true')
+    expect(typeFilterButton('Expense')).toHaveAttribute('aria-pressed', 'false')
+    expect(transactionRequests(mock)).toBe(listsBefore)
     expect(
       screen.getByRole('button', { name: 'Save changes' }),
     ).toBeInTheDocument()
@@ -4924,10 +5094,7 @@ describe('transaction editing independent review defects', () => {
     await screen.findByText('Monthly paycheck')
 
     const user = userEvent.setup()
-    await user.selectOptions(
-      screen.getByLabelText('Transaction type'),
-      'expense',
-    )
+    await chooseTypeFilter(user, 'Expense')
 
     expect(await screen.findByText('Updating results…')).toBeInTheDocument()
     expect(screen.queryByText('Loading your transactions…')).not.toBeInTheDocument()
@@ -4970,10 +5137,7 @@ describe('transaction editing independent review defects', () => {
     }
 
     const user = userEvent.setup()
-    await user.selectOptions(
-      screen.getByLabelText('Transaction type'),
-      'expense',
-    )
+    await chooseTypeFilter(user, 'Expense')
 
     expect(await screen.findByText('Updating results…')).toBeInTheDocument()
     expect(screen.getByText('Monthly paycheck')).toBeInTheDocument()
@@ -5050,7 +5214,7 @@ describe('transaction editing independent review defects', () => {
         note: 'Groceries',
       }),
     ]
-    installFetchMock(editListHandler(rows))
+    const mock = installFetchMock(editListHandler(rows))
     renderApp('/transactions')
     await screen.findByText('Groceries')
 
@@ -5059,9 +5223,21 @@ describe('transaction editing independent review defects', () => {
 
     expect(screen.getByLabelText('Account')).toBeDisabled()
     expect(screen.getByLabelText('Category')).toBeDisabled()
-    expect(screen.getByLabelText('Transaction type')).toBeDisabled()
+    for (const button of within(typeFilterGroup()).getAllByRole('button')) {
+      expect(button).toBeDisabled()
+    }
     expect(screen.getByLabelText('Start date')).toBeDisabled()
     expect(screen.getByLabelText('End date')).toBeDisabled()
+
+    const listsBefore = transactionRequests(mock)
+    fireEvent.click(typeFilterButton('Expense'))
+    expect(typeFilterButton('All')).toHaveAttribute('aria-pressed', 'true')
+    expect(typeFilterButton('Income')).toHaveAttribute('aria-pressed', 'false')
+    expect(typeFilterButton('Expense')).toHaveAttribute('aria-pressed', 'false')
+    expect(transactionRequests(mock)).toBe(listsBefore)
+    expect(
+      screen.getByText('Finish or cancel your edit to change filters.'),
+    ).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Cancel' }))
     expect(
@@ -5070,7 +5246,9 @@ describe('transaction editing independent review defects', () => {
 
     expect(screen.getByLabelText('Account')).toBeEnabled()
     expect(screen.getByLabelText('Category')).toBeEnabled()
-    expect(screen.getByLabelText('Transaction type')).toBeEnabled()
+    for (const button of within(typeFilterGroup()).getAllByRole('button')) {
+      expect(button).toBeEnabled()
+    }
     expect(screen.getByLabelText('Start date')).toBeEnabled()
     expect(screen.getByLabelText('End date')).toBeEnabled()
   })
@@ -5208,7 +5386,9 @@ describe('transaction editing independent review defects', () => {
 
     expect(screen.getByLabelText('Account')).toBeDisabled()
     expect(screen.getByLabelText('Category')).toBeDisabled()
-    expect(screen.getByLabelText('Transaction type')).toBeDisabled()
+    for (const button of within(typeFilterGroup()).getAllByRole('button')) {
+      expect(button).toBeDisabled()
+    }
     expect(screen.getByLabelText('Start date')).toBeDisabled()
     expect(screen.getByLabelText('End date')).toBeDisabled()
     expect(calls(mock, '/api/transactions/')).toHaveLength(1)
@@ -5316,7 +5496,7 @@ describe('transaction editing independent review defects', () => {
     await screen.findByText('Groceries')
 
     const user = userEvent.setup()
-    await user.selectOptions(screen.getByLabelText('Transaction type'), 'expense')
+    await chooseTypeFilter(user, 'Expense')
     await waitFor(() =>
       expect(
         calls(mock, '/api/transactions/?transaction_type=expense'),
@@ -5584,7 +5764,7 @@ describe('transaction deletion', () => {
     await screen.findByText('Monthly paycheck')
 
     const user = userEvent.setup()
-    await user.selectOptions(screen.getByLabelText('Transaction type'), 'income')
+    await chooseTypeFilter(user, 'Income')
     await waitFor(() =>
       expect(calls(mock, '/api/transactions/?transaction_type=income')).toHaveLength(1),
     )
@@ -5604,7 +5784,7 @@ describe('transaction deletion', () => {
     expect(screen.queryByText(/No transactions yet/)).not.toBeInTheDocument()
     expect(screen.queryByRole('listitem')).not.toBeInTheDocument()
     expect(screen.queryByText('Monthly paycheck')).not.toBeInTheDocument()
-    expect(screen.getByLabelText('Transaction type')).toHaveValue('income')
+    expect(typeFilterButton('Income')).toHaveAttribute('aria-pressed', 'true')
     expect(calls(mock, '/api/transactions/?transaction_type=income')).toHaveLength(
       listsBefore,
     )
@@ -5671,7 +5851,9 @@ describe('transaction deletion', () => {
 
     expect(screen.getByLabelText('Account')).toBeDisabled()
     expect(screen.getByLabelText('Category')).toBeDisabled()
-    expect(screen.getByLabelText('Transaction type')).toBeDisabled()
+    for (const button of within(typeFilterGroup()).getAllByRole('button')) {
+      expect(button).toBeDisabled()
+    }
     expect(screen.getByLabelText('Start date')).toBeDisabled()
     expect(screen.getByLabelText('End date')).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Create transaction' })).toBeDisabled()
@@ -5683,6 +5865,9 @@ describe('transaction deletion', () => {
     const listsBefore = transactionRequests(mock)
     await user.selectOptions(screen.getByLabelText('Account'), '1')
     expect(screen.getByLabelText('Account')).toHaveValue('')
+    fireEvent.click(typeFilterButton('Expense'))
+    expect(typeFilterButton('All')).toHaveAttribute('aria-pressed', 'true')
+    expect(typeFilterButton('Expense')).toHaveAttribute('aria-pressed', 'false')
     expect(transactionRequests(mock)).toBe(listsBefore)
 
     await user.click(screen.getByRole('button', { name: 'Keep transaction' }))
@@ -5910,7 +6095,7 @@ describe('transaction deletion', () => {
     await screen.findByText('Groceries')
 
     const user = userEvent.setup()
-    await user.selectOptions(screen.getByLabelText('Transaction type'), 'expense')
+    await chooseTypeFilter(user, 'Expense')
     await waitFor(() =>
       expect(calls(mock, '/api/transactions/?transaction_type=expense')).toHaveLength(1),
     )
@@ -5924,7 +6109,7 @@ describe('transaction deletion', () => {
       screen.getByText('No matches for these filters. Try clearing or changing a filter.'),
     ).toBeInTheDocument()
     expect(screen.queryByText(/No transactions yet/)).not.toBeInTheDocument()
-    expect(screen.getByLabelText('Transaction type')).toHaveValue('expense')
+    expect(typeFilterButton('Expense')).toHaveAttribute('aria-pressed', 'true')
     expect(calls(mock, '/api/transactions/1/', 'DELETE')).toHaveLength(1)
   })
 
@@ -6529,7 +6714,7 @@ describe('transactions filter clearing', () => {
     const user = userEvent.setup()
     await user.selectOptions(screen.getByLabelText('Account'), '2')
     await user.selectOptions(screen.getByLabelText('Category'), '3')
-    await user.selectOptions(screen.getByLabelText('Transaction type'), 'income')
+    await chooseTypeFilter(user, 'Income')
     fireEvent.change(screen.getByLabelText('Start date'), {
       target: { value: '2026-09-01' },
     })
@@ -6553,7 +6738,7 @@ describe('transactions filter clearing', () => {
     )
     expect(screen.getByLabelText('Account')).toHaveValue('')
     expect(screen.getByLabelText('Category')).toHaveValue('')
-    expect(screen.getByLabelText('Transaction type')).toHaveValue('')
+    expect(typeFilterButton('All')).toHaveAttribute('aria-pressed', 'true')
     expect(screen.getByLabelText('Start date')).toHaveValue('')
     expect(screen.getByLabelText('End date')).toHaveValue('')
     expect(
@@ -6601,7 +6786,7 @@ describe('transactions empty state distinction', () => {
     ).not.toBeInTheDocument()
 
     const user = userEvent.setup()
-    await user.selectOptions(screen.getByLabelText('Transaction type'), 'expense')
+    await chooseTypeFilter(user, 'Expense')
 
     expect(
       await screen.findByText(/No matches for these filters/),

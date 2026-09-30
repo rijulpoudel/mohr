@@ -14,6 +14,7 @@ import {
 } from '../api/transactions'
 import { ApiError, userMessage, type FieldErrors } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
+import SegmentedControl from '../components/arc/SegmentedControl'
 import {
   groupByMonth,
   summarizeTransactions,
@@ -134,6 +135,12 @@ const EMPTY_DRAFT: FilterDraft = {
   start: '',
   end: '',
 }
+
+const TYPE_FILTER_OPTIONS = [
+  { value: '', label: 'All' },
+  { value: 'income', label: 'Income' },
+  { value: 'expense', label: 'Expense' },
+] as const
 
 function isStrictDate(value: string): boolean {
   if (!DATE_PATTERN.test(value)) return false
@@ -1743,19 +1750,14 @@ export function TransactionsScreen() {
           </select>
         </div>
         <div className="form-field">
-          <label htmlFor="transactions-type">Transaction type</label>
-          <select
-            id="transactions-type"
-            className="select"
-            name="transaction_type"
+          <label aria-hidden="true">Transaction type</label>
+          <SegmentedControl
+            options={TYPE_FILTER_OPTIONS}
             value={draft.type}
-            onChange={(event) => handleDraftChange({ type: event.target.value })}
+            onValueChange={(value) => handleDraftChange({ type: value })}
+            label="Transaction type"
             disabled={filtersLocked}
-          >
-            <option value="">All</option>
-            <option value="income">Income</option>
-            <option value="expense">Expense</option>
-          </select>
+          />
         </div>
         <div className="form-field">
           <label htmlFor="transactions-start">Start date</label>
