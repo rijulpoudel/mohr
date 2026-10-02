@@ -353,6 +353,23 @@ function transactionMatchesFilters(
   return true
 }
 
+// Accessible action names carry the row's visible facts so screen-reader users
+// can tell similar rows apart. Focus is restored by native id, never by matching
+// this copy, so this wording can change without breaking the focus lookup.
+function transactionContext(
+  transaction: Transaction,
+  categoryName: string | undefined,
+  accountName: string | undefined,
+): string {
+  const parts = [
+    categoryName ?? UNCATEGORIZED_LABEL,
+    formatSignedMoney(transaction.amount, transaction.transaction_type),
+    transaction.date,
+  ]
+  if (accountName !== undefined) parts.push(accountName)
+  return parts.join(', ')
+}
+
 function TransactionItem({
   transaction,
   accountById,
@@ -372,6 +389,7 @@ function TransactionItem({
 }) {
   const accountName = accountById.get(transaction.account)?.name
   const categoryName = categoryById.get(transaction.category)?.name
+  const context = transactionContext(transaction, categoryName, accountName)
   const mark = (categoryName ?? '?').slice(0, 1) || '?'
   return (
     <li className="transaction-item">
@@ -437,8 +455,9 @@ function TransactionItem({
       <div className="transaction-actions">
         <button
           type="button"
+          id={`transaction-edit-${transaction.id}`}
           className="btn-edit"
-          aria-label={`Edit transaction ${transaction.id}`}
+          aria-label={`Edit transaction ${context}`}
           onClick={onEdit}
           disabled={editDisabled}
         >
@@ -447,8 +466,9 @@ function TransactionItem({
         {transaction.source !== 'plaid' && (
           <button
             type="button"
+            id={`transaction-delete-${transaction.id}`}
             className="btn-delete"
-            aria-label={`Delete transaction ${transaction.id}`}
+            aria-label={`Delete transaction ${context}`}
             onClick={onDelete}
             disabled={deleteDisabled}
           >
@@ -524,6 +544,7 @@ function DeleteTransactionConfirm({
   }
 
   const permanenceId = `delete-permanence-${transaction.id}`
+  const context = transactionContext(transaction, categoryName, accountName)
 
   return (
     <li className="transaction-item transaction-delete">
@@ -539,7 +560,7 @@ function DeleteTransactionConfirm({
       )}
       <div
         role="group"
-        aria-label={`Delete transaction ${transaction.id} confirmation`}
+        aria-label={`Delete transaction ${context} confirmation`}
       >
         <div className="transaction-meta">
           <time dateTime={transaction.date}>{transaction.date}</time>
@@ -1456,11 +1477,11 @@ export function TransactionsScreen() {
         headingRef.current?.focus()
         return
       }
-      const label =
-        target.kind === 'edit'
-          ? `Edit transaction ${target.id}`
-          : `Delete transaction ${target.id}`
-      const element = document.querySelector(`[aria-label="${label}"]`)
+      // Native id keeps focus lookup independent of the visible label copy,
+      // which now includes record context and can change freely.
+      const element = document.getElementById(
+        `transaction-${target.kind}-${target.id}`,
+      )
       if (element instanceof HTMLElement) {
         element.focus()
       }
