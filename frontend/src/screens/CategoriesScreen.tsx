@@ -228,9 +228,11 @@ function RenameCategoryForm({
   const [fieldErrors, setFieldErrors] = useState<FieldErrors | null>(null)
   const [submitError, setSubmitError] = useState<string | null>(null)
   const mountedRef = useRef(true)
+  const nameRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     mountedRef.current = true
+    nameRef.current?.focus()
     return () => {
       mountedRef.current = false
     }
@@ -307,6 +309,7 @@ function RenameCategoryForm({
             className="input"
             type="text"
             name="name"
+            ref={nameRef}
             autoComplete="off"
             maxLength={100}
             required
@@ -357,9 +360,11 @@ function ArchiveCategoryConfirm({
   const [pending, setPending] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const mountedRef = useRef(true)
+  const cancelRef = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
     mountedRef.current = true
+    cancelRef.current?.focus()
     return () => {
       mountedRef.current = false
     }
@@ -420,6 +425,7 @@ function ArchiveCategoryConfirm({
         <button
           type="button"
           className="btn btn-secondary"
+          ref={cancelRef}
           onClick={onCancelled}
           disabled={pending}
         >
@@ -484,6 +490,7 @@ function CategoryItem({
       <div className="category-actions">
         <button
           type="button"
+          id={`category-rename-${category.id}`}
           className="btn btn-secondary"
           aria-label={`Rename ${category.name}`}
           onClick={onRename}
@@ -493,6 +500,7 @@ function CategoryItem({
         {!category.is_archived && (
           <button
             type="button"
+            id={`category-archive-${category.id}`}
             className="btn btn-secondary"
             aria-label={`Archive ${category.name}`}
             onClick={onArchiveRequest}
@@ -513,6 +521,27 @@ export function CategoriesScreen() {
   const [archivingId, setArchivingId] = useState<number | null>(null)
   const [updatedNotice, setUpdatedNotice] = useState(false)
   const [archivedNotice, setArchivedNotice] = useState(false)
+  type ReturnFocusTarget = { kind: 'rename' | 'archive'; id: number }
+  const returnFocusRef = useRef<ReturnFocusTarget | null>(null)
+
+  // Restore focus only when a row editor/confirmation closes. List updates and
+  // notices leave the ref untouched so ordinary renders never steal focus.
+  useEffect(() => {
+    if (
+      editingId === null &&
+      archivingId === null &&
+      returnFocusRef.current !== null
+    ) {
+      const target = returnFocusRef.current
+      returnFocusRef.current = null
+      const element = document.getElementById(
+        `category-${target.kind}-${target.id}`,
+      )
+      if (element instanceof HTMLElement) {
+        element.focus()
+      }
+    }
+  }, [editingId, archivingId])
 
   useEffect(() => {
     let cancelled = false
@@ -557,7 +586,8 @@ export function CategoriesScreen() {
     setArchivedNotice(false)
   }, [])
 
-  const handleCancelled = useCallback(() => {
+  const handleCancelled = useCallback((categoryId: number) => {
+    returnFocusRef.current = { kind: 'rename', id: categoryId }
     setEditingId(null)
   }, [])
 
@@ -568,7 +598,8 @@ export function CategoriesScreen() {
     setArchivedNotice(false)
   }, [])
 
-  const handleArchiveCancelled = useCallback(() => {
+  const handleArchiveCancelled = useCallback((categoryId: number) => {
+    returnFocusRef.current = { kind: 'archive', id: categoryId }
     setArchivingId(null)
   }, [])
 
@@ -583,6 +614,7 @@ export function CategoriesScreen() {
       categories[index] = updated
       return { status: 'ready', categories }
     })
+    returnFocusRef.current = { kind: 'rename', id: updated.id }
     setEditingId(null)
     setUpdatedNotice(true)
   }, [])
@@ -598,6 +630,8 @@ export function CategoriesScreen() {
       categories[index] = { ...categories[index], is_archived: true }
       return { status: 'ready', categories }
     })
+    // The row moves to the Archived section, so its remaining action is Rename.
+    returnFocusRef.current = { kind: 'rename', id: categoryId }
     setArchivingId(null)
     setArchivedNotice(true)
   }, [])
@@ -669,9 +703,9 @@ export function CategoriesScreen() {
                     onRename={() => handleRename(category.id)}
                     onArchiveRequest={() => handleArchiveRequest(category.id)}
                     onUpdated={handleUpdated}
-                    onCancelled={handleCancelled}
+                    onCancelled={() => handleCancelled(category.id)}
                     onArchived={handleArchived}
-                    onArchiveCancelled={handleArchiveCancelled}
+                    onArchiveCancelled={() => handleArchiveCancelled(category.id)}
                   />
                 ))}
               </ul>
@@ -693,9 +727,9 @@ export function CategoriesScreen() {
                     onRename={() => handleRename(category.id)}
                     onArchiveRequest={() => handleArchiveRequest(category.id)}
                     onUpdated={handleUpdated}
-                    onCancelled={handleCancelled}
+                    onCancelled={() => handleCancelled(category.id)}
                     onArchived={handleArchived}
-                    onArchiveCancelled={handleArchiveCancelled}
+                    onArchiveCancelled={() => handleArchiveCancelled(category.id)}
                   />
                 ))}
               </ul>

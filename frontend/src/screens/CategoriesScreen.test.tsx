@@ -1364,6 +1364,193 @@ describe('category interaction exclusivity', () => {
   })
 })
 
+describe('category native focus', () => {
+  it('focuses the Name field when the rename editor opens for an active row', async () => {
+    installFetchMock(
+      authenticatedCategoriesHandler((_url, init) => {
+        if ((init?.method ?? 'GET') === 'GET') return jsonResponse(groupedCategories())
+        return jsonResponse({}, 404)
+      }),
+    )
+    renderApp('/categories')
+    await screen.findByRole('heading', { name: 'Active (3)' })
+
+    const user = userEvent.setup()
+    const editor = await openRenameEditor(user, 'Food')
+    expect(within(editor).getByLabelText('Name')).toHaveFocus()
+  })
+
+  it('focuses the Name field when the rename editor opens for an archived row', async () => {
+    installFetchMock(
+      authenticatedCategoriesHandler((_url, init) => {
+        if ((init?.method ?? 'GET') === 'GET') return jsonResponse(groupedCategories())
+        return jsonResponse({}, 404)
+      }),
+    )
+    renderApp('/categories')
+    await screen.findByRole('heading', { name: 'Archived (1)' })
+
+    const user = userEvent.setup()
+    const editor = await openRenameEditor(user, 'Old Hobby')
+    expect(within(editor).getByLabelText('Name')).toHaveFocus()
+  })
+
+  it('focuses the safe Cancel button, not confirm, when the archive confirmation opens', async () => {
+    installFetchMock(
+      authenticatedCategoriesHandler((_url, init) => {
+        if ((init?.method ?? 'GET') === 'GET') return jsonResponse(groupedCategories())
+        return jsonResponse({}, 404)
+      }),
+    )
+    renderApp('/categories')
+    await screen.findByRole('heading', { name: 'Active (3)' })
+
+    const user = userEvent.setup()
+    const confirm = await openArchiveConfirm(user, 'Food')
+    expect(within(confirm).getByRole('button', { name: 'Cancel' })).toHaveFocus()
+    expect(
+      within(confirm).getByRole('button', { name: 'Confirm archive Food' }),
+    ).not.toHaveFocus()
+  })
+
+  it('restores focus to the exact row rename action after cancelling a rename', async () => {
+    installFetchMock(
+      authenticatedCategoriesHandler((_url, init) => {
+        if ((init?.method ?? 'GET') === 'GET') return jsonResponse(groupedCategories())
+        return jsonResponse({}, 404)
+      }),
+    )
+    renderApp('/categories')
+    await screen.findByRole('heading', { name: 'Active (3)' })
+
+    const user = userEvent.setup()
+    const editor = await openRenameEditor(user, 'Food')
+    await user.click(within(editor).getByRole('button', { name: 'Cancel' }))
+
+    expect(
+      within(categoryItem('Food')).getByRole('button', { name: 'Rename Food' }),
+    ).toHaveFocus()
+  })
+
+  it('restores focus to the exact row archive action after cancelling an archive', async () => {
+    installFetchMock(
+      authenticatedCategoriesHandler((_url, init) => {
+        if ((init?.method ?? 'GET') === 'GET') return jsonResponse(groupedCategories())
+        return jsonResponse({}, 404)
+      }),
+    )
+    renderApp('/categories')
+    await screen.findByRole('heading', { name: 'Active (3)' })
+
+    const user = userEvent.setup()
+    const confirm = await openArchiveConfirm(user, 'Food')
+    await user.click(within(confirm).getByRole('button', { name: 'Cancel' }))
+
+    expect(
+      within(categoryItem('Food')).getByRole('button', { name: 'Archive Food' }),
+    ).toHaveFocus()
+  })
+
+  it('restores the renamed row rename action by id despite duplicate names and quoted text', async () => {
+    const categories = [
+      categoryFixture({ id: 1, name: 'Travel', category_type: 'expense' }),
+      categoryFixture({ id: 2, name: 'Travel', category_type: 'income' }),
+      categoryFixture({
+        id: 3,
+        name: 'Old Hobby',
+        category_type: 'expense',
+        is_archived: true,
+      }),
+    ]
+    installFetchMock(
+      authenticatedCategoriesHandler((_url, init) => {
+        if ((init?.method ?? 'GET') === 'GET') return jsonResponse(categories)
+        return jsonResponse(
+          categoryFixture({
+            id: 1,
+            name: 'Travel "quoted"',
+            category_type: 'expense',
+          }),
+          200,
+        )
+      }),
+    )
+    renderApp('/categories')
+    await screen.findByRole('heading', { name: 'Active (2)' })
+
+    const user = userEvent.setup()
+    const active = screen.getByRole('region', { name: 'Active (2)' })
+    const renameButtons = within(active).getAllByRole('button', {
+      name: 'Rename Travel',
+    })
+    await user.click(renameButtons[0])
+    const editor = screen.getByRole('form', { name: 'Rename category' })
+    const nameInput = within(editor).getByLabelText('Name')
+    await user.clear(nameInput)
+    await user.type(nameInput, 'Travel "quoted"')
+    await user.click(within(editor).getByRole('button', { name: 'Save' }))
+
+    await screen.findByText('Category updated.')
+    expect(
+      within(active).getByRole('button', { name: 'Rename Travel "quoted"' }),
+    ).toHaveFocus()
+    expect(
+      within(active).getByRole('button', { name: 'Rename Travel' }),
+    ).toBeInTheDocument()
+  })
+
+  it('moves an archived row and focuses its remaining rename action', async () => {
+    installFetchMock(
+      authenticatedCategoriesHandler((_url, init) => {
+        if ((init?.method ?? 'GET') === 'GET') return jsonResponse(groupedCategories())
+        if (init?.method === 'DELETE') return emptyResponse(204)
+        return jsonResponse({}, 404)
+      }),
+    )
+    renderApp('/categories')
+    await screen.findByRole('heading', { name: 'Active (3)' })
+
+    const user = userEvent.setup()
+    const confirm = await openArchiveConfirm(user, 'Food')
+    await user.click(
+      within(confirm).getByRole('button', { name: 'Confirm archive Food' }),
+    )
+
+    expect(await screen.findByText('Category archived.')).toBeInTheDocument()
+    const archived = screen.getByRole('region', { name: 'Archived (2)' })
+    expect(
+      within(archived).getByRole('button', { name: 'Rename Food' }),
+    ).toHaveFocus()
+  })
+
+  it('does not steal focus to a row action on an ordinary list update', async () => {
+    installFetchMock(
+      authenticatedCategoriesHandler((_url, init) => {
+        if ((init?.method ?? 'GET') === 'GET') {
+          return jsonResponse([categoryFixture({ id: 1, name: 'Food' })])
+        }
+        return jsonResponse(
+          categoryFixture({ id: 9, name: 'Transport', category_type: 'expense' }),
+          201,
+        )
+      }),
+    )
+    renderApp('/categories')
+    await screen.findByText('Food')
+
+    const user = userEvent.setup()
+    await fillCreateForm(user, 'Transport', 'expense')
+    const submitButton = screen.getByRole('button', { name: 'Create category' })
+    await user.click(submitButton)
+
+    expect(await screen.findByText('Category created.')).toBeInTheDocument()
+    expect(submitButton).toHaveFocus()
+    expect(
+      within(categoryItem('Food')).getByRole('button', { name: 'Rename Food' }),
+    ).not.toHaveFocus()
+  })
+})
+
 afterEach(() => {
   resetCategoriesRequest()
 })
