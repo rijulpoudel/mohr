@@ -1,6 +1,6 @@
 import { act, fireEvent, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   calls,
   deferred,
@@ -8,6 +8,15 @@ import {
   jsonResponse,
   renderApp,
 } from '../test/testUtils'
+
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(new Date('2026-09-15T12:00:00Z'))
+})
+
+afterEach(() => {
+  vi.useRealTimers()
+})
 
 function categoryFixture(overrides: Record<string, unknown> = {}) {
   return {
@@ -42,17 +51,6 @@ function cashFlowFixture(overrides: Record<string, unknown> = {}) {
       }),
     ],
     ...overrides,
-  }
-}
-
-function septemberLocalDate() {
-  const yearSpy = vi.spyOn(Date.prototype, 'getFullYear').mockReturnValue(2026)
-  const monthSpy = vi.spyOn(Date.prototype, 'getMonth').mockReturnValue(8)
-  return {
-    restore() {
-      yearSpy.mockRestore()
-      monthSpy.mockRestore()
-    },
   }
 }
 
@@ -151,31 +149,26 @@ describe('cash flow screen states', () => {
   })
 
   it('initialises the month control to the client month and shows the period caption beneath the screen title', async () => {
-    const spy = septemberLocalDate()
-    try {
-      const mock = installFetchMock(
-        authenticatedHandler(() => jsonResponse(cashFlowFixture())),
-      )
-      renderApp('/cash-flow')
+    const mock = installFetchMock(
+      authenticatedHandler(() => jsonResponse(cashFlowFixture())),
+    )
+    renderApp('/cash-flow')
 
-      const monthInput = await screen.findByLabelText('Month')
-      expect(monthInput).toHaveAttribute('type', 'month')
-      expect(monthInput).toHaveValue('2026-09')
+    const monthInput = await screen.findByLabelText('Month')
+    expect(monthInput).toHaveAttribute('type', 'month')
+    expect(monthInput).toHaveValue('2026-09')
 
-      const title = await screen.findByRole('heading', {
-        level: 2,
-        name: 'Cash Flow',
-      })
-      const caption = await screen.findByText('September 2026')
-      expect(
-        title.compareDocumentPosition(caption) & Node.DOCUMENT_POSITION_FOLLOWING,
-      ).toBeTruthy()
-      expect(
-        calls(mock, '/api/cash-flow/summary/?month=2026-09'),
-      ).toHaveLength(1)
-    } finally {
-      spy.restore()
-    }
+    const title = await screen.findByRole('heading', {
+      level: 2,
+      name: 'Cash Flow',
+    })
+    const caption = await screen.findByText('September 2026')
+    expect(
+      title.compareDocumentPosition(caption) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+    expect(
+      calls(mock, '/api/cash-flow/summary/?month=2026-09'),
+    ).toHaveLength(1)
   })
 
   it('renders the three metrics, comparison, categories, note, and ledger link from the payload', async () => {
