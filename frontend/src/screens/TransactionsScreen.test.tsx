@@ -791,11 +791,17 @@ describe('transaction provenance', () => {
     await screen.findByText('Manual entry')
     const items = screen.getAllByRole('listitem')
     expect(
-      within(items[0]).queryByRole('button', { name: 'Delete transaction 4' }),
+      within(items[0]).queryByRole('button', {
+        name: /^Delete transaction /,
+      }),
     ).not.toBeInTheDocument()
-    expect(
-      within(items[1]).getByRole('button', { name: 'Delete transaction 5' }),
-    ).toBeInTheDocument()
+    const manualDelete = within(items[1]).getByRole('button', {
+      name: /^Delete transaction /,
+    })
+    expect(manualDelete).toHaveAttribute('id', 'transaction-delete-5')
+    expect(manualDelete).toHaveAccessibleName(
+      'Delete transaction Food, -$9.99, 2026-09-09, Everyday Checking',
+    )
   })
 
   it('keeps the Edit control and its accessible name on a bank-synced row', async () => {
@@ -808,7 +814,14 @@ describe('transaction provenance', () => {
     renderApp('/transactions')
 
     const item = (await screen.findAllByRole('listitem'))[0]
-    const edit = within(item).getByRole('button', { name: 'Edit transaction 4' })
+    const edit = within(item).getByRole('button', {
+      name: /^Edit transaction /,
+    })
+    expect(edit).toHaveAttribute('id', 'transaction-edit-4')
+    expect(edit).toHaveAttribute(
+      'aria-label',
+      'Edit transaction Salary, -$12.50, 2026-09-10, Everyday Checking',
+    )
     expect(edit).toBeEnabled()
   })
 
@@ -4876,8 +4889,9 @@ describe('transaction editing independent review defects', () => {
     await user.click(screen.getByRole('button', { name: 'Save changes' }))
 
     const editButton = await screen.findByRole('button', {
-      name: 'Edit transaction 1',
+      name: /^Edit transaction /,
     })
+    expect(editButton).toHaveAttribute('id', 'transaction-edit-1')
     expect(editButton).toHaveFocus()
     expect(await screen.findByText('Transaction updated.')).toBeInTheDocument()
   })
@@ -4903,8 +4917,9 @@ describe('transaction editing independent review defects', () => {
     await user.click(screen.getByRole('button', { name: 'Cancel' }))
 
     const editButton = await screen.findByRole('button', {
-      name: 'Edit transaction 1',
+      name: /^Edit transaction /,
     })
+    expect(editButton).toHaveAttribute('id', 'transaction-edit-1')
     expect(editButton).toHaveFocus()
   })
 
@@ -5194,9 +5209,10 @@ describe('transaction editing independent review defects', () => {
     ).toBeDisabled()
 
     await user.click(screen.getByRole('button', { name: 'Cancel' }))
-    expect(
-      await screen.findByRole('button', { name: 'Edit transaction 1' }),
-    ).toBeInTheDocument()
+    const editButton = await screen.findByRole('button', {
+      name: /^Edit transaction /,
+    })
+    expect(editButton).toHaveAttribute('id', 'transaction-edit-1')
     expect(
       screen.getByRole('button', { name: 'Create transaction' }),
     ).toBeEnabled()
@@ -5240,9 +5256,10 @@ describe('transaction editing independent review defects', () => {
     ).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Cancel' }))
-    expect(
-      await screen.findByRole('button', { name: 'Edit transaction 1' }),
-    ).toBeInTheDocument()
+    const editButton = await screen.findByRole('button', {
+      name: /^Edit transaction /,
+    })
+    expect(editButton).toHaveAttribute('id', 'transaction-edit-1')
 
     expect(screen.getByLabelText('Account')).toBeEnabled()
     expect(screen.getByLabelText('Category')).toBeEnabled()
@@ -5340,9 +5357,10 @@ describe('transaction editing independent review defects', () => {
     )
 
     await user.click(screen.getByRole('button', { name: 'Cancel' }))
-    expect(
-      await screen.findByRole('button', { name: 'Edit transaction 1' }),
-    ).toBeInTheDocument()
+    const editButton = await screen.findByRole('button', {
+      name: /^Edit transaction /,
+    })
+    expect(editButton).toHaveAttribute('id', 'transaction-edit-1')
     expect(
       screen.queryByText('Finish or cancel your edit to change filters.'),
     ).not.toBeInTheDocument()
@@ -5404,8 +5422,9 @@ describe('transaction editing independent review defects', () => {
     expect(calls(mock, '/api/transactions/1/', 'PATCH')).toHaveLength(1)
     expect(calls(mock, '/api/transactions/')).toHaveLength(1)
     const editButton = screen.getByRole('button', {
-      name: 'Edit transaction 1',
+      name: /^Edit transaction /,
     })
+    expect(editButton).toHaveAttribute('id', 'transaction-edit-1')
     expect(editButton).toHaveFocus()
     expect(editButton).toBeEnabled()
   })
@@ -5571,7 +5590,9 @@ function deleteListHandler(
 }
 
 async function openDeleteFor(user: ReturnType<typeof userEvent.setup>, index = 0) {
-  const deletes = await screen.findAllByRole('button', { name: /^Delete transaction \d+/ })
+  const deletes = await screen.findAllByRole('button', {
+    name: /^Delete transaction /,
+  })
   await user.click(deletes[index])
   return deletes
 }
@@ -5619,9 +5640,14 @@ describe('transaction deletion', () => {
     renderApp('/transactions')
     await screen.findByText('Vintage purchase')
 
-    const deletes = await screen.findAllByRole('button', { name: /^Delete transaction \d+/ })
+    const deletes = await screen.findAllByRole('button', {
+      name: /^Delete transaction /,
+    })
     expect(deletes).toHaveLength(1)
-    expect(deletes[0]).toHaveAttribute('aria-label', 'Delete transaction 7')
+    expect(deletes[0]).toHaveAttribute('id', 'transaction-delete-7')
+    expect(deletes[0]).toHaveAccessibleName(
+      'Delete transaction Old Hobby, -$88.50, 2026-08-15, Old Card',
+    )
     expect(deletes[0]).toBeEnabled()
   })
 
@@ -5630,11 +5656,22 @@ describe('transaction deletion', () => {
     renderApp('/transactions')
     await screen.findByText('Monthly paycheck')
 
-    const deletes = await screen.findAllByRole('button', { name: /^Delete transaction \d+/ })
+    const deletes = await screen.findAllByRole('button', {
+      name: /^Delete transaction /,
+    })
     expect(deletes).toHaveLength(3)
-    expect(deletes[0]).toHaveAttribute('aria-label', 'Delete transaction 3')
-    expect(deletes[1]).toHaveAttribute('aria-label', 'Delete transaction 1')
-    expect(deletes[2]).toHaveAttribute('aria-label', 'Delete transaction 2')
+    expect(deletes[0]).toHaveAttribute('id', 'transaction-delete-3')
+    expect(deletes[0]).toHaveAccessibleName(
+      'Delete transaction Salary, +$2,500.00, 2026-09-11, Savings',
+    )
+    expect(deletes[1]).toHaveAttribute('id', 'transaction-delete-1')
+    expect(deletes[1]).toHaveAccessibleName(
+      'Delete transaction Food, -$12.50, 2026-09-10, Everyday Checking',
+    )
+    expect(deletes[2]).toHaveAttribute('id', 'transaction-delete-2')
+    expect(deletes[2]).toHaveAccessibleName(
+      'Delete transaction Food, -$45.00, 2026-09-09, Everyday Checking',
+    )
   })
 
   it('opens a two-step confirmation naming date, signed amount, account and category and stating permanence without archiving language', async () => {
@@ -5679,7 +5716,8 @@ describe('transaction deletion', () => {
     expect(calls(mock, '/api/auth/csrf/')).toHaveLength(0)
     expect(localStorage.length).toBe(0)
     expect(sessionStorage.length).toBe(0)
-    const deleteButton = await screen.findByRole('button', { name: 'Delete transaction 1' })
+    const deleteButton = document.getElementById('transaction-delete-1')
+    expect(deleteButton).toBeInstanceOf(HTMLButtonElement)
     expect(deleteButton).toHaveFocus()
   })
 
@@ -5732,7 +5770,7 @@ describe('transaction deletion', () => {
     for (const button of screen.getAllByRole('button', { name: /^Edit transaction / })) {
       expect(button).toBeDisabled()
     }
-    for (const button of screen.getAllByRole('button', { name: /^Delete transaction \d+/ })) {
+    for (const button of screen.getAllByRole('button', { name: /^Delete transaction / })) {
       expect(button).toBeDisabled()
     }
     expect(calls(mock, '/api/transactions/1/', 'DELETE')).toHaveLength(1)
@@ -5818,12 +5856,12 @@ describe('transaction deletion', () => {
 
     const user = userEvent.setup()
     await openEditorFor(user, 0)
-    for (const button of screen.getAllByRole('button', { name: /^Delete transaction \d+/ })) {
+    for (const button of screen.getAllByRole('button', { name: /^Delete transaction / })) {
       expect(button).toBeDisabled()
     }
     await user.click(screen.getByRole('button', { name: 'Cancel' }))
     expect(await screen.findByText('Monthly paycheck')).toBeInTheDocument()
-    for (const button of await screen.findAllByRole('button', { name: /^Delete transaction \d+/ })) {
+    for (const button of await screen.findAllByRole('button', { name: /^Delete transaction / })) {
       expect(button).toBeEnabled()
     }
 
@@ -5831,7 +5869,7 @@ describe('transaction deletion', () => {
     for (const button of screen.getAllByRole('button', { name: /^Edit transaction / })) {
       expect(button).toBeDisabled()
     }
-    const otherDeletes = screen.getAllByRole('button', { name: /^Delete transaction \d+/ })
+    const otherDeletes = screen.getAllByRole('button', { name: /^Delete transaction / })
     for (const button of otherDeletes) {
       expect(button).toBeDisabled()
     }
@@ -5871,7 +5909,8 @@ describe('transaction deletion', () => {
     expect(transactionRequests(mock)).toBe(listsBefore)
 
     await user.click(screen.getByRole('button', { name: 'Keep transaction' }))
-    expect(await screen.findByRole('button', { name: 'Delete transaction 3' })).toBeInTheDocument()
+    expect(await screen.findByText('Monthly paycheck')).toBeInTheDocument()
+    expect(document.getElementById('transaction-delete-3')).not.toBeNull()
     expect(screen.getByLabelText('Account')).toBeEnabled()
   })
 
@@ -6193,7 +6232,9 @@ describe('transaction deletion confirmation safety', () => {
     await openDeleteFor(user, 0)
 
     const confirm = await screen.findByRole('button', { name: 'Delete transaction' })
-    const group = await screen.findByRole('group', { name: /delete transaction 3/i })
+    const group = await screen.findByRole('group', {
+      name: 'Delete transaction Salary, +$2,500.00, 2026-09-11, Savings confirmation',
+    })
     expect(group).toContainElement(confirm)
     expect(within(group).getByText(/permanent/i)).toBeInTheDocument()
     const describedBy = confirm.getAttribute('aria-describedby') ?? ''
@@ -6795,5 +6836,96 @@ describe('transactions empty state distinction', () => {
     expect(
       screen.getByRole('button', { name: 'Clear all filters' }),
     ).toBeInTheDocument()
+  })
+})
+
+describe('transaction action accessible names', () => {
+  it('names each row action with the visible category, exact signed amount, date, and resolved account, falling back honestly when metadata is missing', async () => {
+    installFetchMock(
+      authenticatedTransactionsHandler(
+        () =>
+          jsonResponse([
+            transactionFixture({
+              id: 1,
+              account: 1,
+              category: 2,
+              transaction_type: 'expense',
+              amount: '9999999999.99',
+              date: '2026-09-10',
+              note: 'Large',
+            }),
+            transactionFixture({
+              id: 2,
+              account: 99,
+              category: 98,
+              transaction_type: 'income',
+              amount: '5.00',
+              date: '2026-09-11',
+              note: 'Mystery',
+            }),
+          ]),
+        {
+          accounts: [
+            accountFixture({ id: 1, name: '"Everyday Checking"' }),
+          ],
+          categories: [
+            categoryFixture({ id: 2, name: '"Food"', category_type: 'expense' }),
+          ],
+        },
+      ),
+    )
+    renderApp('/transactions')
+
+    const edit = await screen.findByRole('button', {
+      name: 'Edit transaction "Food", -$9,999,999,999.99, 2026-09-10, "Everyday Checking"',
+    })
+    expect(edit).toHaveAttribute('id', 'transaction-edit-1')
+    const remove = screen.getByRole('button', {
+      name: 'Delete transaction "Food", -$9,999,999,999.99, 2026-09-10, "Everyday Checking"',
+    })
+    expect(remove).toHaveAttribute('id', 'transaction-delete-1')
+
+    const fallback = screen.getByRole('button', {
+      name: 'Edit transaction Uncategorized, +$5.00, 2026-09-11',
+    })
+    expect(fallback).toHaveAttribute('id', 'transaction-edit-2')
+  })
+
+  it('resolves a duplicated-looking record label to the correct second row native action on cancel without mutating', async () => {
+    const rows = [
+      transactionFixture({
+        id: 1,
+        account: 1,
+        category: 2,
+        transaction_type: 'expense',
+        amount: '12.50',
+        date: '2026-09-10',
+        note: 'Same one',
+      }),
+      transactionFixture({
+        id: 2,
+        account: 1,
+        category: 2,
+        transaction_type: 'expense',
+        amount: '12.50',
+        date: '2026-09-10',
+        note: 'Same two',
+      }),
+    ]
+    const mock = installFetchMock(deleteListHandler(rows))
+    renderApp('/transactions')
+    await screen.findByText('Same two')
+
+    const user = userEvent.setup()
+    const secondDelete = document.getElementById('transaction-delete-2')
+    expect(secondDelete).toBeInstanceOf(HTMLButtonElement)
+    await user.click(secondDelete as HTMLButtonElement)
+    expect(
+      await screen.findByRole('button', { name: 'Delete transaction' }),
+    ).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Keep transaction' }))
+
+    expect(calls(mock, '/api/transactions/2/', 'DELETE')).toHaveLength(0)
+    expect(document.getElementById('transaction-delete-2')).toHaveFocus()
   })
 })

@@ -49,6 +49,17 @@ function defaultCategories() {
   ]
 }
 
+function budgetActionButton(
+  kind: 'edit' | 'delete',
+  id: number,
+): HTMLButtonElement {
+  const element = document.getElementById(`budget-${kind}-${id}`)
+  if (!(element instanceof HTMLButtonElement)) {
+    throw new Error(`Missing budget-${kind}-${id} button.`)
+  }
+  return element
+}
+
 function authenticatedBudgetsHandler(
   budgets: (url: string, init?: RequestInit) => Response | Promise<Response>,
   options: { categories?: unknown[] } = {},
@@ -257,10 +268,14 @@ describe('budgets list', () => {
     expect(within(items[0]).getByText('$20.00')).toBeInTheDocument()
     expect(within(items[0]).getByText('$130.00')).toBeInTheDocument()
     expect(
-      within(items[0]).getByRole('button', { name: 'Edit budget 30' }),
+      within(items[0]).getByRole('button', {
+        name: 'Edit budget Transport, October 2026, $150.00',
+      }),
     ).toBeInTheDocument()
     expect(
-      within(items[0]).getByRole('button', { name: 'Delete budget 30' }),
+      within(items[0]).getByRole('button', {
+        name: 'Delete budget Transport, October 2026, $150.00',
+      }),
     ).toBeInTheDocument()
   })
 
@@ -558,6 +573,74 @@ describe('budgets list', () => {
     ).toBe(false)
     expect(localStorage.length).toBe(0)
     expect(sessionStorage.length).toBe(0)
+  })
+})
+
+describe('budget action accessible names', () => {
+  it('names every row action and confirmation with resolved context and omits a missing category', async () => {
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler(
+        () =>
+          jsonResponse([
+            budgetFixture({
+              id: 7,
+              category: 2,
+              month: '2026-09-01',
+              budgeted: '9999999999.99',
+              spent: '0.00',
+              remaining: '9999999999.99',
+            }),
+            budgetFixture({
+              id: 8,
+              category: 99,
+              month: '2026-08-01',
+              budgeted: '50.00',
+              spent: '0.00',
+              remaining: '50.00',
+            }),
+          ]),
+        {
+          categories: [
+            categoryFixture({
+              id: 2,
+              name: 'Food "Dining"',
+              category_type: 'expense',
+            }),
+          ],
+        },
+      ),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+
+    const named = 'Food "Dining", September 2026, $9,999,999,999.99'
+    expect(
+      screen.getByRole('button', { name: `Edit budget ${named}` }),
+    ).toHaveAttribute('id', 'budget-edit-7')
+    expect(
+      screen.getByRole('button', { name: `Delete budget ${named}` }),
+    ).toHaveAttribute('id', 'budget-delete-7')
+
+    const unnamed = 'August 2026, $50.00'
+    expect(
+      screen.getByRole('button', { name: `Edit budget ${unnamed}` }),
+    ).toHaveAttribute('id', 'budget-edit-8')
+    expect(
+      screen.getByRole('button', { name: `Delete budget ${unnamed}` }),
+    ).toHaveAttribute('id', 'budget-delete-8')
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: `Delete budget ${named}` }))
+    expect(
+      await screen.findByRole('group', {
+        name: `Delete budget ${named} confirmation`,
+      }),
+    ).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Keep budget' }))
+    expect(document.getElementById('budget-delete-7')).toHaveFocus()
+    expect(calls(mock, '/api/budgets/7/', 'DELETE')).toHaveLength(0)
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(0)
   })
 })
 
@@ -1350,7 +1433,7 @@ describe('budget inline editing controls', () => {
   }
 
   async function openEdit(user: ReturnType<typeof userEvent.setup>, id: number) {
-    await user.click(screen.getByRole('button', { name: `Edit budget ${id}` }))
+    await user.click(budgetActionButton('edit', id))
   }
 
   it('offers an Edit action on every row including archived-linked rows', async () => {
@@ -1363,10 +1446,10 @@ describe('budget inline editing controls', () => {
     await screen.findByText('September 2026')
 
     expect(
-      screen.getByRole('button', { name: 'Edit budget 10' }),
+      budgetActionButton('edit', 10),
     ).toBeInTheDocument()
     expect(
-      screen.getByRole('button', { name: 'Edit budget 20' }),
+      budgetActionButton('edit', 20),
     ).toBeInTheDocument()
   })
 
@@ -1442,7 +1525,7 @@ describe('budget inline editing controls', () => {
 
     expect(screen.getByLabelText('Edit budget category')).toBeInTheDocument()
     expect(
-      screen.getByRole('button', { name: 'Edit budget 20' }),
+      budgetActionButton('edit', 20),
     ).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Create budget' })).toBeDisabled()
     expect(
@@ -1451,7 +1534,7 @@ describe('budget inline editing controls', () => {
       ),
     ).toBeInTheDocument()
     expect(
-      screen.queryByRole('button', { name: 'Edit budget 10' }),
+      document.getElementById('budget-edit-10'),
     ).not.toBeInTheDocument()
   })
 
@@ -1472,7 +1555,7 @@ describe('budget inline editing controls', () => {
 
     await user.click(screen.getByRole('button', { name: 'Cancel' }))
     expect(
-      screen.getByRole('button', { name: 'Edit budget 10' }),
+      budgetActionButton('edit', 10),
     ).toHaveFocus()
     expect(calls(mock, '/api/budgets/10/', 'PATCH')).toHaveLength(0)
     expect(calls(mock, '/api/auth/csrf/')).toHaveLength(0)
@@ -1498,7 +1581,7 @@ describe('budget edit PATCH bodies', () => {
     renderApp('/budgets')
     await screen.findByText('September 2026')
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    await user.click(budgetActionButton('edit', 10))
     return { mock, user }
   }
 
@@ -1704,7 +1787,7 @@ describe('budget edit PATCH bodies', () => {
     renderApp('/budgets')
     await screen.findByText('August 2026')
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Edit budget 20' }))
+    await user.click(budgetActionButton('edit', 20))
     const input = screen.getByLabelText('Edit budget budgeted amount')
     await user.clear(input)
     await user.type(input, '100.00')
@@ -1728,7 +1811,7 @@ describe('budget edit PATCH bodies', () => {
     renderApp('/budgets')
     await screen.findByText('August 2026')
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Edit budget 20' }))
+    await user.click(budgetActionButton('edit', 20))
     const select = screen.getByLabelText('Edit budget category')
     await user.selectOptions(select, '2')
     await user.selectOptions(select, '4')
@@ -1752,7 +1835,7 @@ describe('budget edit PATCH bodies', () => {
     renderApp('/budgets')
     await screen.findByText('September 2026')
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    await user.click(budgetActionButton('edit', 10))
     await user.click(screen.getByRole('button', { name: 'Save changes' }))
 
     expect(await screen.findByText('Make at least one change before saving.')).toBeInTheDocument()
@@ -1776,7 +1859,7 @@ describe('budget edit validation', () => {
     renderApp('/budgets')
     await screen.findByText('September 2026')
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    await user.click(budgetActionButton('edit', 10))
     fireEvent.change(screen.getByLabelText('Edit budget month'), {
       target: { value: month },
     })
@@ -1808,7 +1891,7 @@ describe('budget edit validation', () => {
     renderApp('/budgets')
     await screen.findByText('September 2026')
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    await user.click(budgetActionButton('edit', 10))
     fireEvent.change(screen.getByLabelText('Edit budget budgeted amount'), {
       target: { value: budgeted },
     })
@@ -1833,7 +1916,7 @@ describe('budget edit validation', () => {
     renderApp('/budgets')
     await screen.findByText('September 2026')
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    await user.click(budgetActionButton('edit', 10))
     fireEvent.change(screen.getByLabelText('Edit budget category'), {
       target: { value: '' },
     })
@@ -1883,7 +1966,7 @@ describe('budget edit backend errors', () => {
     renderApp('/budgets')
     await screen.findByText('September 2026')
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    await user.click(budgetActionButton('edit', 10))
     await openAndSaveInvalid(user)
 
     expect(await screen.findByText('Bad category.')).toBeInTheDocument()
@@ -1912,7 +1995,7 @@ describe('budget edit backend errors', () => {
     renderApp('/budgets')
     await screen.findByText('September 2026')
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    await user.click(budgetActionButton('edit', 10))
     fireEvent.change(screen.getByLabelText('Edit budget month'), {
       target: { value: '2026-10' },
     })
@@ -1937,7 +2020,7 @@ describe('budget edit backend errors', () => {
     renderApp('/budgets')
     await screen.findByText('September 2026')
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    await user.click(budgetActionButton('edit', 10))
     fireEvent.change(screen.getByLabelText('Edit budget month'), {
       target: { value: '2026-10' },
     })
@@ -1967,7 +2050,7 @@ describe('budget edit backend errors', () => {
     renderApp('/budgets')
     await screen.findByText('September 2026')
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    await user.click(budgetActionButton('edit', 10))
     fireEvent.change(screen.getByLabelText('Edit budget month'), {
       target: { value: '2026-10' },
     })
@@ -1991,7 +2074,7 @@ describe('budget edit backend errors', () => {
     renderApp('/budgets')
     await screen.findByText('September 2026')
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    await user.click(budgetActionButton('edit', 10))
     fireEvent.change(screen.getByLabelText('Edit budget month'), {
       target: { value: '2026-10' },
     })
@@ -2023,7 +2106,7 @@ describe('budget edit session and submit guards', () => {
     renderApp('/budgets')
     await screen.findByText('September 2026')
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    await user.click(budgetActionButton('edit', 10))
     fireEvent.change(screen.getByLabelText('Edit budget month'), {
       target: { value: '2026-10' },
     })
@@ -2062,7 +2145,7 @@ describe('budget edit session and submit guards', () => {
     renderApp('/budgets')
     await screen.findByText('September 2026')
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    await user.click(budgetActionButton('edit', 10))
     fireEvent.change(screen.getByLabelText('Edit budget month'), {
       target: { value: '2026-10' },
     })
@@ -2112,7 +2195,7 @@ describe('budget edit session and submit guards', () => {
     )
     renderApp('/budgets')
     await screen.findByText('September 2026')
-    await userEvent.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    await userEvent.click(budgetActionButton('edit', 10))
     fireEvent.change(screen.getByLabelText('Edit budget month'), {
       target: { value: '2026-10' },
     })
@@ -2172,7 +2255,7 @@ describe('budget edit success and refresh', () => {
     renderApp('/budgets')
     await screen.findByText('September 2026')
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    await user.click(budgetActionButton('edit', 10))
     fireEvent.change(screen.getByLabelText('Edit budget month'), {
       target: { value: '2026-11' },
     })
@@ -2226,7 +2309,7 @@ describe('budget edit success and refresh', () => {
     renderApp('/budgets')
     await screen.findByText('September 2026')
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    await user.click(budgetActionButton('edit', 10))
     fireEvent.change(screen.getByLabelText('Edit budget month'), {
       target: { value: '2026-11' },
     })
@@ -2282,7 +2365,7 @@ describe('budget edit success and refresh', () => {
     renderApp('/budgets')
     await screen.findByText('September 2026')
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    await user.click(budgetActionButton('edit', 10))
     fireEvent.change(screen.getByLabelText('Edit budget month'), {
       target: { value: '2026-10' },
     })
@@ -2331,15 +2414,15 @@ describe('budget edit success and refresh', () => {
     renderApp('/budgets')
     expect((await screen.findAllByText('September 2026'))).toHaveLength(2)
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    await user.click(budgetActionButton('edit', 10))
     fireEvent.change(screen.getByLabelText('Edit budget month'), {
       target: { value: '2026-10' },
     })
     await user.click(screen.getByRole('button', { name: 'Save changes' }))
 
     expect(await screen.findByText('Updating budgets…')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Edit budget 10' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Edit budget 11' })).toBeDisabled()
+    expect(budgetActionButton('edit', 10)).toBeDisabled()
+    expect(budgetActionButton('edit', 11)).toBeDisabled()
 
     await act(async () => {
       refreshGate.resolve(
@@ -2350,7 +2433,7 @@ describe('budget edit success and refresh', () => {
       )
     })
     expect(await screen.findByText('October 2026')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Edit budget 10' })).toBeEnabled()
+    expect(budgetActionButton('edit', 10)).toBeEnabled()
   })
 
   it('returns focus to the moved row after a reordered refresh', async () => {
@@ -2378,7 +2461,7 @@ describe('budget edit success and refresh', () => {
     renderApp('/budgets')
     await screen.findByText('September 2026')
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    await user.click(budgetActionButton('edit', 10))
     fireEvent.change(screen.getByLabelText('Edit budget month'), {
       target: { value: '2026-11' },
     })
@@ -2395,8 +2478,13 @@ describe('budget edit success and refresh', () => {
     })
 
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Edit budget 10' })).toHaveFocus(),
+      expect(budgetActionButton('edit', 10)).toHaveFocus(),
     )
+    expect(
+      screen.getByRole('button', {
+        name: 'Edit budget Food, November 2026, $300.00',
+      }),
+    ).toBe(budgetActionButton('edit', 10))
   })
 
   it('focuses the Budgets heading when the refetch omits the updated row', async () => {
@@ -2421,7 +2509,7 @@ describe('budget edit success and refresh', () => {
     renderApp('/budgets')
     await screen.findByText('September 2026')
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    await user.click(budgetActionButton('edit', 10))
     fireEvent.change(screen.getByLabelText('Edit budget month'), {
       target: { value: '2026-10' },
     })
@@ -2470,14 +2558,14 @@ describe('budget permanent deletion', () => {
     await screen.findByText('September 2026')
 
     expect(
-      screen.getByRole('button', { name: 'Delete budget 10' }),
+      budgetActionButton('delete', 10),
     ).toBeInTheDocument()
     expect(
-      screen.getByRole('button', { name: 'Delete budget 20' }),
+      budgetActionButton('delete', 20),
     ).toBeInTheDocument()
 
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await user.click(budgetActionButton('delete', 10))
     expect(
       await screen.findByRole('button', { name: 'Keep budget' }),
     ).toBeInTheDocument()
@@ -2495,14 +2583,14 @@ describe('budget permanent deletion', () => {
     await screen.findByText('September 2026')
 
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await user.click(budgetActionButton('delete', 10))
 
     const confirm = await screen.findByRole('button', {
       name: 'Delete budget',
     })
     expect(confirm).toBeInTheDocument()
     const group = await screen.findByRole('group', {
-      name: 'Delete budget 10 confirmation',
+      name: 'Delete budget Food, September 2026, $300.00 confirmation',
     })
     expect(group).toContainElement(confirm)
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
@@ -2526,10 +2614,10 @@ describe('budget permanent deletion', () => {
     await screen.findByText('August 2026')
 
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Delete budget 20' }))
+    await user.click(budgetActionButton('delete', 20))
 
     const group = await screen.findByRole('group', {
-      name: 'Delete budget 20 confirmation',
+      name: 'Delete budget Old Hobby, August 2026, $9,999,999,999.99 confirmation',
     })
     expect(within(group).getByText('August 2026')).toBeInTheDocument()
     expect(within(group).getByText('Old Hobby')).toBeInTheDocument()
@@ -2546,7 +2634,7 @@ describe('budget permanent deletion', () => {
     await screen.findByText('September 2026')
 
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await user.click(budgetActionButton('delete', 10))
 
     const keep = await screen.findByRole('button', { name: 'Keep budget' })
     const confirm = screen.getByRole('button', { name: 'Delete budget' })
@@ -2567,7 +2655,7 @@ describe('budget permanent deletion', () => {
     await screen.findByText('September 2026')
 
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await user.click(budgetActionButton('delete', 10))
 
     const keep = await screen.findByRole('button', { name: 'Keep budget' })
     const confirm = screen.getByRole('button', { name: 'Delete budget' })
@@ -2592,7 +2680,7 @@ describe('budget permanent deletion', () => {
     await screen.findByText('September 2026')
 
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await user.click(budgetActionButton('delete', 10))
     expect(
       await screen.findByRole('button', { name: 'Keep budget' }),
     ).toBeInTheDocument()
@@ -2607,7 +2695,7 @@ describe('budget permanent deletion', () => {
     expect(localStorage.length).toBe(0)
     expect(sessionStorage.length).toBe(0)
     expect(
-      screen.getByRole('button', { name: 'Delete budget 10' }),
+      budgetActionButton('delete', 10),
     ).toHaveFocus()
   })
 
@@ -2624,7 +2712,7 @@ describe('budget permanent deletion', () => {
     await screen.findByText('September 2026')
 
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await user.click(budgetActionButton('delete', 10))
     await user.click(await screen.findByRole('button', { name: 'Delete budget' }))
 
     await waitFor(() =>
@@ -2657,7 +2745,7 @@ describe('budget permanent deletion', () => {
     await screen.findByText('September 2026')
 
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await user.click(budgetActionButton('delete', 10))
     const confirm = await screen.findByRole('button', { name: 'Delete budget' })
     await act(async () => {
       fireEvent.click(confirm)
@@ -2689,14 +2777,14 @@ describe('budget permanent deletion', () => {
     await screen.findByText('September 2026')
 
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await user.click(budgetActionButton('delete', 10))
     await screen.findByRole('button', { name: 'Keep budget' })
 
-    expect(screen.getByRole('button', { name: 'Edit budget 20' })).toBeDisabled()
+    expect(budgetActionButton('edit', 20)).toBeDisabled()
     expect(
-      screen.queryByRole('button', { name: 'Edit budget 10' }),
+      document.getElementById('budget-edit-10'),
     ).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Delete budget 20' })).toBeDisabled()
+    expect(budgetActionButton('delete', 20)).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Create budget' })).toBeDisabled()
     expect(
       screen.getByText(/finish or cancel your deletion/i),
@@ -2724,11 +2812,11 @@ describe('budget permanent deletion', () => {
     await screen.findByText('September 2026')
 
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    await user.click(budgetActionButton('edit', 10))
 
-    expect(screen.getByRole('button', { name: 'Delete budget 20' })).toBeDisabled()
+    expect(budgetActionButton('delete', 20)).toBeDisabled()
     expect(
-      screen.queryByRole('button', { name: 'Delete budget 10' }),
+      document.getElementById('budget-delete-10'),
     ).not.toBeInTheDocument()
   })
 
@@ -2751,17 +2839,17 @@ describe('budget permanent deletion', () => {
     renderApp('/budgets')
     await screen.findByText('September 2026')
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    await user.click(budgetActionButton('edit', 10))
     fireEvent.change(screen.getByLabelText('Edit budget month'), {
       target: { value: '2026-10' },
     })
     await user.click(screen.getByRole('button', { name: 'Save changes' }))
 
     expect(await screen.findByText('Updating budgets…')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Delete budget 10' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Delete budget 20' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Edit budget 10' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Edit budget 20' })).toBeDisabled()
+    expect(budgetActionButton('delete', 10)).toBeDisabled()
+    expect(budgetActionButton('delete', 20)).toBeDisabled()
+    expect(budgetActionButton('edit', 10)).toBeDisabled()
+    expect(budgetActionButton('edit', 20)).toBeDisabled()
 
     await act(async () => {
       refreshGate.resolve(jsonResponse(deleteList()))
@@ -2809,7 +2897,7 @@ describe('budget permanent deletion', () => {
     const categoriesBefore = calls(mock, '/api/categories/').length
 
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await user.click(budgetActionButton('delete', 10))
     await user.click(await screen.findByRole('button', { name: 'Delete budget' }))
 
     expect(await screen.findByText('Budget deleted.')).toBeInTheDocument()
@@ -2844,7 +2932,7 @@ describe('budget permanent deletion', () => {
     await screen.findByText('September 2026')
 
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await user.click(budgetActionButton('delete', 10))
     await user.click(await screen.findByRole('button', { name: 'Delete budget' }))
 
     expect(await screen.findByText('Budget deleted.')).toBeInTheDocument()
@@ -2876,7 +2964,7 @@ describe('budget permanent deletion', () => {
     renderApp('/budgets')
     await screen.findByText('September 2026')
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
+    await user.click(budgetActionButton('edit', 10))
     fireEvent.change(screen.getByLabelText('Edit budget month'), {
       target: { value: '2026-10' },
     })
@@ -2886,10 +2974,10 @@ describe('budget permanent deletion', () => {
       resolveRefresh(jsonResponse(deleteList()))
     })
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Delete budget 10' })).toBeEnabled(),
+      expect(budgetActionButton('delete', 10)).toBeEnabled(),
     )
 
-    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await user.click(budgetActionButton('delete', 10))
     expect(await screen.findByRole('button', { name: 'Keep budget' })).toBeInTheDocument()
     expect(screen.queryByText('Budget updated.')).not.toBeInTheDocument()
   })
@@ -2911,7 +2999,7 @@ describe('budget permanent deletion', () => {
     await screen.findByText('September 2026')
 
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await user.click(budgetActionButton('delete', 10))
     await user.click(await screen.findByRole('button', { name: 'Delete budget' }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent(message)
@@ -2936,7 +3024,7 @@ describe('budget permanent deletion', () => {
     await screen.findByText('September 2026')
 
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await user.click(budgetActionButton('delete', 10))
     await user.click(await screen.findByRole('button', { name: 'Delete budget' }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
@@ -2963,7 +3051,7 @@ describe('budget permanent deletion', () => {
     await screen.findByText('September 2026')
 
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await user.click(budgetActionButton('delete', 10))
     await user.click(await screen.findByRole('button', { name: 'Delete budget' }))
 
     expect(await screen.findByLabelText('Email')).toBeInTheDocument()
@@ -2994,7 +3082,7 @@ describe('budget permanent deletion', () => {
     await screen.findByText('September 2026')
 
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await user.click(budgetActionButton('delete', 10))
     await user.click(await screen.findByRole('button', { name: 'Delete budget' }))
     expect(await screen.findByRole('status')).toHaveTextContent(
       'Deleting budget…',
@@ -3035,7 +3123,7 @@ describe('budget permanent deletion', () => {
     await screen.findByText('September 2026')
 
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await user.click(budgetActionButton('delete', 10))
     await user.click(await screen.findByRole('button', { name: 'Delete budget' }))
     expect(await screen.findByRole('status')).toHaveTextContent(
       'Deleting budget…',
@@ -3070,7 +3158,7 @@ describe('budget permanent deletion', () => {
     await screen.findByText('September 2026')
 
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await user.click(budgetActionButton('delete', 10))
     await user.click(await screen.findByRole('button', { name: 'Delete budget' }))
     expect(await screen.findByRole('status')).toHaveTextContent(
       'Deleting budget…',
@@ -3141,17 +3229,17 @@ describe('budget permanent deletion', () => {
     expect(await screen.findByRole('status')).toHaveTextContent(
       'Creating budget…',
     )
-    expect(screen.getByRole('button', { name: 'Edit budget 10' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Edit budget 20' })).toBeDisabled()
+    expect(budgetActionButton('edit', 10)).toBeDisabled()
+    expect(budgetActionButton('edit', 20)).toBeDisabled()
     expect(
-      screen.getByRole('button', { name: 'Delete budget 10' }),
+      budgetActionButton('delete', 10),
     ).toBeDisabled()
     expect(
-      screen.getByRole('button', { name: 'Delete budget 20' }),
+      budgetActionButton('delete', 20),
     ).toBeDisabled()
 
-    await user.click(screen.getByRole('button', { name: 'Edit budget 10' }))
-    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await user.click(budgetActionButton('edit', 10))
+    await user.click(budgetActionButton('delete', 10))
     expect(screen.queryByLabelText('Edit budget category')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Keep budget' })).not.toBeInTheDocument()
     expect(calls(mock, '/api/budgets/10/', 'DELETE')).toHaveLength(0)
@@ -3164,9 +3252,9 @@ describe('budget permanent deletion', () => {
     })
     expect(await screen.findByText('Budget created.')).toBeInTheDocument()
     expect(await screen.findByText('Updating budgets…')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Edit budget 10' })).toBeDisabled()
+    expect(budgetActionButton('edit', 10)).toBeDisabled()
     expect(
-      screen.getByRole('button', { name: 'Delete budget 20' }),
+      budgetActionButton('delete', 20),
     ).toBeDisabled()
 
     await act(async () => {
@@ -3174,10 +3262,10 @@ describe('budget permanent deletion', () => {
     })
 
     expect(await screen.findByText('November 2026')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Edit budget 10' })).toBeEnabled()
-    expect(screen.getByRole('button', { name: 'Edit budget 20' })).toBeEnabled()
-    expect(screen.getByRole('button', { name: 'Delete budget 10' })).toBeEnabled()
-    expect(screen.getByRole('button', { name: 'Delete budget 20' })).toBeEnabled()
+    expect(budgetActionButton('edit', 10)).toBeEnabled()
+    expect(budgetActionButton('edit', 20)).toBeEnabled()
+    expect(budgetActionButton('delete', 10)).toBeEnabled()
+    expect(budgetActionButton('delete', 20)).toBeEnabled()
     expect(calls(mock, '/api/budgets/', 'POST')).toHaveLength(1)
     expect(calls(mock, '/api/budgets/10/', 'DELETE')).toHaveLength(0)
     expect(calls(mock, '/api/budgets/10/', 'PATCH')).toHaveLength(0)
@@ -3197,17 +3285,17 @@ describe('budget permanent deletion', () => {
     await screen.findByText('September 2026')
 
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await user.click(budgetActionButton('delete', 10))
     await user.click(await screen.findByRole('button', { name: 'Delete budget' }))
     expect(await screen.findByRole('status')).toHaveTextContent(
       'Deleting budget…',
     )
 
     expect(screen.getByRole('button', { name: 'Create budget' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Edit budget 20' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Delete budget 20' })).toBeDisabled()
+    expect(budgetActionButton('edit', 20)).toBeDisabled()
+    expect(budgetActionButton('delete', 20)).toBeDisabled()
     expect(
-      screen.queryByRole('button', { name: 'Edit budget 10' }),
+      document.getElementById('budget-edit-10'),
     ).not.toBeInTheDocument()
 
     const listsBefore = calls(mock, '/api/budgets/').length
@@ -3266,7 +3354,7 @@ describe('budget permanent deletion', () => {
     await screen.findByText('September 2026')
 
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Delete budget 10' }))
+    await user.click(budgetActionButton('delete', 10))
     await user.click(await screen.findByRole('button', { name: 'Delete budget' }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
