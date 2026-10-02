@@ -131,6 +131,19 @@ function isOverspent(remaining: string): boolean {
     remaining.startsWith('-') && !SIGNED_ZERO_AMOUNT_PATTERN.test(remaining)
   )
 }
+
+function describeBudget(
+  budget: Budget,
+  categoryName: string | undefined,
+): string {
+  return [
+    categoryName,
+    formatMonthLabel(budget.month),
+    formatMoney(budget.budgeted),
+  ]
+    .filter((part) => part !== undefined)
+    .join(', ')
+}
 function firstCreateError(
   fieldErrors: FieldErrors | null,
   field: string,
@@ -155,6 +168,7 @@ function BudgetItem({
   onDelete: () => void
 }) {
   const overspent = isOverspent(budget.remaining)
+  const description = describeBudget(budget, categoryName)
   return (
     <li className="budget-item budget-row">
       <div className="budget-main">
@@ -191,8 +205,9 @@ function BudgetItem({
       <div className="budget-actions">
         <button
           type="button"
+          id={`budget-edit-${budget.id}`}
           className="btn-edit"
-          aria-label={`Edit budget ${budget.id}`}
+          aria-label={`Edit budget ${description}`}
           onClick={onEdit}
           disabled={editDisabled}
         >
@@ -200,8 +215,9 @@ function BudgetItem({
         </button>
         <button
           type="button"
+          id={`budget-delete-${budget.id}`}
           className="btn-delete"
-          aria-label={`Delete budget ${budget.id}`}
+          aria-label={`Delete budget ${description}`}
           onClick={onDelete}
           disabled={deleteDisabled}
         >
@@ -274,6 +290,7 @@ function DeleteBudgetConfirm({
   }
 
   const permanenceId = `delete-budget-permanence-${budget.id}`
+  const description = describeBudget(budget, categoryName)
 
   return (
     <li className="budget-item budget-delete">
@@ -287,7 +304,10 @@ function DeleteBudgetConfirm({
           {submitError}
         </div>
       )}
-      <div role="group" aria-label={`Delete budget ${budget.id} confirmation`}>
+      <div
+        role="group"
+        aria-label={`Delete budget ${description} confirmation`}
+      >
         <div className="budget-main">
           <time dateTime={budget.month} className="budget-month">
             {formatMonthLabel(budget.month)}
@@ -895,11 +915,11 @@ export function BudgetsScreen() {
       headingRef.current?.focus()
       return
     }
-    const label =
-      target.kind === 'edit'
-        ? `Edit budget ${target.id}`
-        : `Delete budget ${target.id}`
-    const element = document.querySelector(`[aria-label="${label}"]`)
+    // Accessible copy is user-facing and may change; focus lookup must use the
+    // stable native id instead of the aria-label text.
+    const element = document.getElementById(
+      `budget-${target.kind}-${target.id}`,
+    )
     if (element instanceof HTMLElement) {
       element.focus()
     } else {
