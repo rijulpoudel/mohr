@@ -1,0 +1,24 @@
+.card {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-4) var(--space-6);
+  background: var(--color-surface);
+}
+
+.card dt {
+  color: var(--color-muted);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.card dd {
+  min-width: 0;
+  margin: 0;
+  font-size: 1.375rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}

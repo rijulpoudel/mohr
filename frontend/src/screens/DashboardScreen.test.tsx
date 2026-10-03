@@ -378,11 +378,23 @@ describe('dashboard ready state', () => {
     expect(signOut).toHaveClass('btn-secondary')
   })
 
-  it('renders four metric cards with exact money strings', async () => {
+  it('renders a labeled Financial summary with four exact money values', async () => {
     installFetchMock(authenticatedHandler(() => jsonResponse(summaryFixture())))
     renderApp('/')
 
     expect(await screen.findByText('$1,234.56')).toBeInTheDocument()
+
+    const summary = screen.getByLabelText('Financial summary')
+    expect(summary.tagName).toBe('DL')
+    expect(within(summary).getByText('Total balance')).toBeInTheDocument()
+    expect(within(summary).getByText('$1,234.56')).toBeInTheDocument()
+    expect(within(summary).getByText('Income this month')).toBeInTheDocument()
+    expect(within(summary).getByText('$2,000.00')).toBeInTheDocument()
+    expect(within(summary).getByText('Spending this month')).toBeInTheDocument()
+    expect(within(summary).getByText('$765.44')).toBeInTheDocument()
+    expect(within(summary).getByText('Budget remaining')).toBeInTheDocument()
+    expect(within(summary).getByText('-$100.10')).toBeInTheDocument()
+
     expect(summaryValue('Total balance')).toContain('$1,234.56')
     expect(summaryValue('Income this month')).toContain('$2,000.00')
     expect(summaryValue('Spending this month')).toContain('$765.44')

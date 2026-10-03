@@ -97,6 +97,8 @@ describe('application shell navigation', () => {
     renderApp('/accounts')
 
     const nav = await screen.findByRole('navigation', { name: 'Primary' })
+
+    expect(document.querySelector('.app-shell')).toHaveClass('is-authenticated')
     for (const name of [
       'Dashboard',
       'Cash Flow',
@@ -106,7 +108,12 @@ describe('application shell navigation', () => {
       'Transactions',
       'Budgets',
     ]) {
-      expect(within(nav).getByRole('link', { name })).toBeInTheDocument()
+      const link = within(nav).getByRole('link', { name })
+      expect(link).toBeInTheDocument()
+      const icon = link.querySelector('svg')
+      expect(icon).not.toBeNull()
+      expect(icon).toHaveAttribute('aria-hidden', 'true')
+      expect(icon).toHaveAttribute('focusable', 'false')
     }
     expect(within(nav).getByRole('link', { name: 'Accounts' })).toHaveAttribute(
       'aria-current',
