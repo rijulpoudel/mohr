@@ -96,6 +96,53 @@ describe('login', () => {
     expect(screen.getByLabelText('Email')).toHaveValue('wrong@example.com')
   })
 
+  it('marks only the field with a field error and clears invalid state on retry', async () => {
+    const pending = deferred<Response>()
+    let attempt = 0
+    const { user } = await openLogin((url) => {
+      if (url === '/api/auth/me/') return jsonResponse({}, 401)
+      if (url === '/api/auth/csrf/') {
+        setCsrfCookie()
+        return jsonResponse({ detail: 'CSRF cookie set.' })
+      }
+      if (url === '/api/auth/login/') {
+        attempt += 1
+        if (attempt === 1) {
+          // Matches LoginSerializer.email (backend/users/serializers.py): DRF
+          // EmailField reports blank for an empty email when a password is given.
+          return jsonResponse({ email: ['This field may not be blank.'] }, 400)
+        }
+        return pending.promise
+      }
+      return jsonResponse({}, 404)
+    })
+    const email = screen.getByLabelText('Email')
+    const password = screen.getByLabelText('Password')
+    expect(email).toHaveAttribute('aria-invalid', 'false')
+    expect(password).toHaveAttribute('aria-invalid', 'false')
+
+    await user.type(password, 'test-only-password')
+    await user.click(screen.getByRole('button', { name: 'Sign in' }))
+    expect(
+      await screen.findByText('This field may not be blank.'),
+    ).toBeInTheDocument()
+    expect(email).toHaveAttribute('aria-invalid', 'true')
+    expect(email).toHaveAttribute('aria-describedby', 'login-email-error')
+    expect(password).toHaveAttribute('aria-invalid', 'false')
+
+    await user.click(screen.getByRole('button', { name: 'Sign in' }))
+    await screen.findByRole('button', { name: 'Signing in…' })
+    expect(email).toHaveAttribute('aria-invalid', 'false')
+    expect(password).toHaveAttribute('aria-invalid', 'false')
+
+    pending.resolve(jsonResponse({ detail: 'Invalid email or password.' }, 401))
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Invalid email or password.',
+    )
+    expect(email).toHaveAttribute('aria-invalid', 'false')
+    expect(password).toHaveAttribute('aria-invalid', 'false')
+  })
+
   it('refuses to post credentials when the csrf cookie is missing', async () => {
     const { user, mock } = await openLogin((url) => {
       if (url === '/api/auth/me/') return jsonResponse({}, 401)

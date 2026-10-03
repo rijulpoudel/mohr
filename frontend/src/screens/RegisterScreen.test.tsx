@@ -37,6 +37,10 @@ describe('registration', () => {
       }
       return jsonResponse({}, 404)
     })
+    const emailInput = screen.getByLabelText('Email')
+    const passwordInput = screen.getByLabelText('Password')
+    expect(emailInput).toHaveAttribute('aria-invalid', 'false')
+    expect(passwordInput).toHaveAttribute('aria-invalid', 'false')
     await user.type(screen.getByLabelText('Email'), 'not-an-email')
     await user.type(screen.getByLabelText('Password'), 'short')
     await user.click(screen.getByRole('button', { name: 'Create account' }))
@@ -50,6 +54,13 @@ describe('registration', () => {
     ).toBeInTheDocument()
     expect(window.location.pathname).toBe('/register')
     expect(screen.queryByText(/Signed in as/)).not.toBeInTheDocument()
+    expect(emailInput).toHaveAttribute('aria-invalid', 'true')
+    expect(emailInput).toHaveAttribute('aria-describedby', 'register-email-error')
+    expect(passwordInput).toHaveAttribute('aria-invalid', 'true')
+    expect(passwordInput).toHaveAttribute(
+      'aria-describedby',
+      'register-password-error',
+    )
 
     const registerCalls = calls(mock, '/api/auth/register/', 'POST')
     expect(registerCalls).toHaveLength(1)
