@@ -2404,6 +2404,7 @@ describe('account editing', () => {
     const user = userEvent.setup()
     const editor = await openEditForm(user, 'Everyday Checking')
 
+    expect(within(editor).getByLabelText('Name')).toHaveFocus()
     const nameInput = within(editor).getByLabelText('Name')
     expect(nameInput).toHaveValue('Everyday Checking')
     expect(nameInput).toHaveAttribute('type', 'text')
@@ -2446,6 +2447,9 @@ describe('account editing', () => {
     expect(within(restored).getByText('Everyday Checking')).toBeInTheDocument()
     expect(within(restored).getAllByText('$100.00')).toHaveLength(2)
     expect(within(restored).getByText('Active')).toBeInTheDocument()
+    expect(
+      within(restored).getByRole('button', { name: 'Edit Everyday Checking' }),
+    ).toHaveFocus()
     expect(screen.queryByText('Account updated.')).not.toBeInTheDocument()
     expect(calls(mock, '/api/auth/csrf/')).toHaveLength(0)
     expect(calls(mock, '/api/accounts/7/', 'PATCH')).toHaveLength(0)
@@ -2464,6 +2468,7 @@ describe('account editing', () => {
     await user.type(within(editor).getByLabelText('Name'), 'Discarded Change')
 
     const switched = await openEditForm(user, 'Old Card')
+    expect(within(switched).getByLabelText('Name')).toHaveFocus()
     expect(within(switched).getByLabelText('Name')).toHaveValue('Old Card')
     expect(within(switched).getByLabelText('Account type')).toHaveValue(
       'credit_card',
@@ -2528,6 +2533,9 @@ describe('account editing', () => {
     expect(within(items[0]).getByText('Renamed')).toBeInTheDocument()
     expect(within(items[0]).getByText('-$1,234.56')).toBeInTheDocument()
     expect(within(items[0]).getByText('$1,250.00')).toBeInTheDocument()
+    expect(
+      within(items[0]).getByRole('button', { name: 'Edit Renamed' }),
+    ).toHaveFocus()
     expect(screen.queryByText('7')).not.toBeInTheDocument()
     expect(calls(mock, '/api/accounts/', 'GET')).toHaveLength(1)
     expect(localStorage.length).toBe(0)
@@ -3049,6 +3057,8 @@ describe('account archiving', () => {
     expect(
       within(confirm).getByRole('button', { name: 'Cancel' }),
     ).toBeInTheDocument()
+    expect(within(confirm).getByRole('button', { name: 'Cancel' })).toHaveFocus()
+    expect(confirmButton).not.toHaveFocus()
     expect(
       within(accountItem('Everyday Checking')).queryByRole('button', {
         name: 'Edit Everyday Checking',
@@ -3080,6 +3090,11 @@ describe('account archiving', () => {
         name: 'Archive Everyday Checking',
       }),
     ).toBeInTheDocument()
+    expect(
+      within(restored).getByRole('button', {
+        name: 'Archive Everyday Checking',
+      }),
+    ).toHaveFocus()
     expect(
       within(restored).getByRole('button', { name: 'Edit Everyday Checking' }),
     ).toBeInTheDocument()
@@ -3258,6 +3273,84 @@ describe('account archiving', () => {
     ).toHaveFocus()
     expect(calls(mock, '/api/accounts/', 'GET')).toHaveLength(1)
     expect(calls(mock, '/api/accounts/7/', 'DELETE')).toHaveLength(1)
+  })
+
+  it('focuses the remounted pending row when its disabled Edit cannot take focus', async () => {
+    const mock = installFetchMock(
+      authenticatedMutationHandler((url, init) => {
+        const method = init?.method ?? 'GET'
+        if (method === 'GET') {
+          return jsonResponse([
+            accountFixture({
+              id: 1,
+              name: 'Checking One',
+              sync_pending: true,
+              opening_balance: '0.00',
+              current_balance: '0.00',
+            }),
+          ])
+        }
+        if (method === 'DELETE' && url === '/api/accounts/1/') {
+          return emptyResponse(204)
+        }
+        return jsonResponse({}, 404)
+      }),
+    )
+    renderApp('/accounts')
+    await screen.findAllByText('Checking One')
+
+    const user = userEvent.setup()
+    const confirm = await openArchiveConfirm(user, 'Checking One')
+    await user.click(
+      within(confirm).getByRole('button', {
+        name: 'Confirm archive Checking One',
+      }),
+    )
+    await screen.findByText('Account archived.')
+
+    const archived = screen.getByRole('region', { name: 'Archived accounts' })
+    const archivedItem = within(archived).getAllByRole('listitem')[0]
+    expect(
+      within(archivedItem).getByRole('button', { name: 'Edit Checking One' }),
+    ).toBeDisabled()
+    expect(archivedItem).toHaveFocus()
+    expect(calls(mock, '/api/accounts/1/', 'DELETE')).toHaveLength(1)
+  })
+
+  it('does not steal focus to a row action on an ordinary create rerender', async () => {
+    installFetchMock(
+      authenticatedCreateHandler((_url, init) => {
+        if ((init?.method ?? 'GET') === 'GET') {
+          return jsonResponse([
+            accountFixture({ id: 1, name: 'Everyday Checking' }),
+          ])
+        }
+        return jsonResponse(accountFixture({ id: 9, name: 'Travel Fund' }), 201)
+      }),
+    )
+    renderApp('/accounts')
+    await screen.findAllByText('Everyday Checking')
+
+    const user = userEvent.setup()
+    const editor = await openEditForm(user, 'Everyday Checking')
+    await user.click(within(editor).getByRole('button', { name: 'Cancel' }))
+    expect(
+      within(accountItem('Everyday Checking')).getByRole('button', {
+        name: 'Edit Everyday Checking',
+      }),
+    ).toHaveFocus()
+
+    await fillCreateForm(user)
+    const submitButton = screen.getByRole('button', { name: 'Create account' })
+    await user.click(submitButton)
+
+    expect(await screen.findByText('Account created.')).toBeInTheDocument()
+    expect(submitButton).toHaveFocus()
+    expect(
+      within(accountItem('Everyday Checking')).getByRole('button', {
+        name: 'Edit Everyday Checking',
+      }),
+    ).not.toHaveFocus()
   })
 
   it('keeps archived rows editable after archiving', async () => {
