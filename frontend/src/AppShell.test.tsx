@@ -408,13 +408,25 @@ describe('mobile drawer keyboard focus', () => {
 })
 
 describe('application shell accessibility', () => {
-  it('keeps the skip link pointing at the main content anchor', async () => {
+  it('keeps the skip link pointing at a programmatically focusable main target', async () => {
     installFetchMock(guestHandler)
+    const user = userEvent.setup()
     renderApp('/login')
 
     const skip = await screen.findByRole('link', { name: 'Skip to content' })
     expect(skip).toHaveAttribute('href', '#main')
-    expect(screen.getByRole('main')).toHaveAttribute('id', 'main')
+    const main = screen.getByRole('main')
+    expect(main).toHaveAttribute('id', 'main')
+
+    // jsdom does not implement native fragment activation of a skip link, so
+    // this checks the target's focusability rather than in-browser activation.
+    expect(main).toHaveAttribute('tabindex', '-1')
+    main.focus()
+    expect(main).toHaveFocus()
+
+    const email = await screen.findByLabelText('Email')
+    await user.tab()
+    expect(email).toHaveFocus()
   })
 })
 
