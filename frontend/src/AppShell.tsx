@@ -3,14 +3,89 @@ import { Link, NavLink, Outlet } from 'react-router-dom'
 import { useAuth } from './auth/AuthContext'
 import { MohrMark } from './components/MohrMark'
 
+const DOWNLOAD_ICON = (
+  <>
+    <path d="M12 3v12" />
+    <path d="m7 10 5 5 5-5" />
+    <path d="M5 21h14" />
+  </>
+)
+
 const NAV_ITEMS = [
-  { to: '/', label: 'Dashboard', end: true },
-  { to: '/cash-flow', label: 'Cash Flow' },
-  { to: '/accounts', label: 'Accounts' },
-  { to: '/connections', label: 'Connections' },
-  { to: '/categories', label: 'Categories' },
-  { to: '/transactions', label: 'Transactions' },
-  { to: '/budgets', label: 'Budgets' },
+  {
+    to: '/',
+    label: 'Dashboard',
+    end: true,
+    icon: (
+      <>
+        <rect x="3" y="3" width="8" height="8" rx="1.5" />
+        <rect x="13" y="3" width="8" height="8" rx="1.5" />
+        <rect x="3" y="13" width="8" height="8" rx="1.5" />
+        <rect x="13" y="13" width="8" height="8" rx="1.5" />
+      </>
+    ),
+  },
+  {
+    to: '/cash-flow',
+    label: 'Cash Flow',
+    icon: (
+      <>
+        <path d="M3 3v18h18" />
+        <path d="m7 14 4-4 3 3 5-6" />
+      </>
+    ),
+  },
+  {
+    to: '/accounts',
+    label: 'Accounts',
+    icon: (
+      <>
+        <rect x="3" y="6" width="18" height="13" rx="2" />
+        <path d="M3 10h18" />
+        <path d="M7 15h4" />
+      </>
+    ),
+  },
+  {
+    to: '/connections',
+    label: 'Connections',
+    icon: (
+      <>
+        <path d="M10.5 13.5a4 4 0 0 0 5.7 0l2.3-2.3a4 4 0 0 0-5.7-5.7l-1.1 1.1" />
+        <path d="M13.5 10.5a4 4 0 0 0-5.7 0l-2.3 2.3a4 4 0 0 0 5.7 5.7l1.1-1.1" />
+      </>
+    ),
+  },
+  {
+    to: '/categories',
+    label: 'Categories',
+    icon: (
+      <>
+        <path d="M3 3h8l10 10-8 8L3 11V3Z" />
+        <circle cx="7.5" cy="7.5" r="1.5" />
+      </>
+    ),
+  },
+  {
+    to: '/transactions',
+    label: 'Transactions',
+    icon: (
+      <>
+        <path d="M4 7h13l-3-3" />
+        <path d="M20 17H7l3 3" />
+      </>
+    ),
+  },
+  {
+    to: '/budgets',
+    label: 'Budgets',
+    icon: (
+      <>
+        <circle cx="12" cy="12" r="9" />
+        <path d="M12 3v9h9" />
+      </>
+    ),
+  },
 ]
 
 const DESKTOP_MEDIA_QUERY = '(min-width: 48rem)'
@@ -104,63 +179,99 @@ export function AppShell() {
   }, [authenticated, menuOpen, isDesktop])
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell${authenticated ? ' is-authenticated' : ''}`}>
       <a className="skip-link" href="#main">
         Skip to content
       </a>
-      <header className="site-header">
-        <div className="site-header-inner">
-          <h1 className="brand">
-            <Link to="/">
-              <MohrMark />
-              <span>Mohr</span>
-            </Link>
-          </h1>
-          {authenticated && (
-            <button
-              ref={toggleRef}
-              type="button"
-              className="menu-toggle"
-              aria-expanded={menuOpen}
-              aria-controls="primary-nav"
-              onClick={() => setMenuOpen((open) => !open)}
-            >
-              {menuOpen ? 'Close menu' : 'Menu'}
-            </button>
-          )}
-        </div>
-      </header>
-      {authenticated && menuOpen && (
-        <button
-          type="button"
-          className="scrim"
-          aria-label="Close navigation"
-          tabIndex={-1}
-          onClick={() => setMenuOpen(false)}
-        />
-      )}
-      {authenticated && (
-        <nav
-          id="primary-nav"
-          ref={navRef}
-          aria-label="Primary"
-          className={`site-nav${menuOpen ? ' is-open' : ''}`}
-        >
-          {NAV_ITEMS.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              end={item.end}
+      <div className="site-rail">
+        <header className="site-header">
+          <div className="site-header-inner">
+            <h1 className="brand">
+              <Link to="/">
+                <MohrMark />
+                <span>Mohr</span>
+              </Link>
+            </h1>
+            {authenticated && (
+              <button
+                ref={toggleRef}
+                type="button"
+                className="menu-toggle"
+                aria-expanded={menuOpen}
+                aria-controls="primary-nav"
+                onClick={() => setMenuOpen((open) => !open)}
+              >
+                {menuOpen ? 'Close menu' : 'Menu'}
+              </button>
+            )}
+          </div>
+        </header>
+        {authenticated && menuOpen && (
+          <button
+            type="button"
+            className="scrim"
+            aria-label="Close navigation"
+            tabIndex={-1}
+            onClick={() => setMenuOpen(false)}
+          />
+        )}
+        {authenticated && (
+          <nav
+            id="primary-nav"
+            ref={navRef}
+            aria-label="Primary"
+            className={`site-nav${menuOpen ? ' is-open' : ''}`}
+          >
+            {NAV_ITEMS.map((item) => (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                end={item.end}
+                onClick={() => setMenuOpen(false)}
+              >
+                <svg
+                  className="nav-icon"
+                  viewBox="0 0 24 24"
+                  width="20"
+                  height="20"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.75"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                  focusable="false"
+                >
+                  {item.icon}
+                </svg>
+                <span>{item.label}</span>
+              </NavLink>
+            ))}
+            <a
+              className="site-nav-export"
+              href="/api/auth/export/"
               onClick={() => setMenuOpen(false)}
             >
-              {item.label}
-            </NavLink>
-          ))}
-          <a href="/api/auth/export/" onClick={() => setMenuOpen(false)}>
-            Download data
-          </a>
-        </nav>
-      )}
+              <svg
+                className="nav-icon"
+                viewBox="0 0 24 24"
+                width="20"
+                height="20"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.75"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+                focusable="false"
+              >
+                {DOWNLOAD_ICON}
+              </svg>
+              <span>Download data</span>
+            </a>
+          </nav>
+        )}
+      </div>
       <main
         id="main"
         className={`site-main${authenticated ? '' : ' site-main-guest'}`}
