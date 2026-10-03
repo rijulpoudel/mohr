@@ -145,6 +145,8 @@ export function BankSyncNotice() {
               type="button"
               className="btn btn-secondary"
               onClick={() => {
+                // Move focus before this button unmounts; the async load has no element to catch it.
+                document.getElementById('main')?.focus()
                 setState({ status: 'loading' })
                 setAttempt((current) => current + 1)
               }}
