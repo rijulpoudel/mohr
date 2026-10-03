@@ -164,6 +164,7 @@ export function AppShell() {
       <main
         id="main"
         className={`site-main${authenticated ? '' : ' site-main-guest'}`}
+        tabIndex={-1}
         inert={(authenticated && menuOpen) || undefined}
       >
         <Outlet />
