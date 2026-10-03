@@ -126,6 +126,8 @@ const UPDATE_TOKEN_URL = '/api/plaid/connections/5/link-token/'
 const UPDATE_COMPLETE_URL = '/api/plaid/connections/5/update-complete/'
 const EXCHANGE_URL = '/api/plaid/exchange/'
 const DISCONNECT_URL = '/api/plaid/connections/5/disconnect/'
+const RECONNECT_LINK_TOKEN_URL = '/api/plaid/connections/6/link-token/'
+const CONNECT_LINK_TOKEN_URL = '/api/plaid/link-token/'
 
 function updateLinkTokenFixture(overrides: Record<string, unknown> = {}) {
   return {
@@ -148,6 +150,10 @@ function lifecycleHandler(
   overrides: Partial<{
     connections: (url: string, init?: RequestInit) => Response | Promise<Response>
     linkToken: (url: string, init?: RequestInit) => Response | Promise<Response>
+    connectLinkToken: (
+      url: string,
+      init?: RequestInit,
+    ) => Response | Promise<Response>
     disconnect: (url: string, init?: RequestInit) => Response | Promise<Response>
     exchange: (url: string, init?: RequestInit) => Response | Promise<Response>
     sync: (url: string, init?: RequestInit) => Response | Promise<Response>
@@ -182,6 +188,11 @@ function lifecycleHandler(
       return overrides.linkToken
         ? overrides.linkToken(url, init)
         : jsonResponse(updateLinkTokenFixture())
+    }
+    if (url === CONNECT_LINK_TOKEN_URL && init?.method === 'POST') {
+      return overrides.connectLinkToken
+        ? overrides.connectLinkToken(url, init)
+        : jsonResponse({}, 404)
     }
     if (url === UPDATE_COMPLETE_URL && init?.method === 'POST') {
       return overrides.updateComplete
@@ -2250,6 +2261,7 @@ describe('connections disconnect', () => {
   })
 
   it('confirms with exactly one disconnect POST, refetches, and renders the disconnected row without controls', async () => {
+    const refetch = deferred<Response>()
     let connectionsCalls = 0
     const mock = installFetchMock(
       lifecycleHandler({
@@ -2264,13 +2276,7 @@ describe('connections disconnect', () => {
               }),
             ])
           }
-          return jsonResponse([
-            connectionFixture({
-              id: 5,
-              institution_name: 'First Plaid Bank',
-              status: 'disconnected',
-            }),
-          ])
+          return refetch.promise
         },
       }),
     )
@@ -2287,6 +2293,23 @@ describe('connections disconnect', () => {
       expect(calls(mock, DISCONNECT_URL, 'POST')).toHaveLength(1),
     )
     await waitFor(() => expect(connectionsCalls).toBe(2))
+    // The refetch is deliberately still pending, so the old row is the only one
+    // on screen and the heading focus assertion below cannot pass by accident.
+    expect(
+      screen.getByRole('button', { name: 'Disconnect First Plaid Bank' }),
+    ).toBeInTheDocument()
+
+    await act(async () => {
+      refetch.resolve(
+        jsonResponse([
+          connectionFixture({
+            id: 5,
+            institution_name: 'First Plaid Bank',
+            status: 'disconnected',
+          }),
+        ]),
+      )
+    })
 
     const item = connectionItem('First Plaid Bank')
     expect(within(item).getByText('Disconnected')).toBeInTheDocument()
@@ -2302,6 +2325,567 @@ describe('connections disconnect', () => {
     expect(
       within(item).queryByRole('button', { name: /^Disconnect/ }),
     ).not.toBeInTheDocument()
+    const heading = within(item).getByRole('heading', { name: 'First Plaid Bank' })
+    expect(heading).toHaveFocus()
+    expect(heading).toHaveAttribute('tabindex', '-1')
+  })
+
+  it('keeps focus on the action of another bank after a later unrelated refetch', async () => {
+    const syncResponse = deferred<Response>()
+    let connectionsCalls = 0
+    const mock = installFetchMock(
+      lifecycleHandler({
+        connections: () => {
+          connectionsCalls += 1
+          return jsonResponse([
+            connectionFixture({
+              id: 5,
+              institution_name: 'First Plaid Bank',
+              status: connectionsCalls === 1 ? 'updating' : 'disconnected',
+            }),
+            connectionFixture({
+              id: 6,
+              institution_name: 'Second Bank',
+              status: 'active',
+              ...(connectionsCalls === 3
+                ? { last_synced_at: '2026-09-12T09:00:00.000000Z' }
+                : {}),
+            }),
+          ])
+        },
+        sync: () => syncResponse.promise,
+      }),
+    )
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole('button', { name: 'Disconnect First Plaid Bank' }),
+    )
+    await user.click(await screen.findByRole('button', { name: 'Disconnect' }))
+    // Await the rendered disconnected row and its restored focus; the request
+    // count alone can be observed before the new ready state commits.
+    await waitFor(() => {
+      expect(
+        within(connectionItem('First Plaid Bank')).getByText('Disconnected'),
+      ).toBeInTheDocument()
+      expect(
+        within(connectionItem('First Plaid Bank')).getByRole('heading', {
+          name: 'First Plaid Bank',
+        }),
+      ).toHaveFocus()
+    })
+
+    const syncButton = screen.getByRole('button', {
+      name: 'Sync now for Second Bank',
+    })
+    await user.click(syncButton)
+    expect(syncButton).toHaveFocus()
+    expect(calls(mock, '/api/plaid/connections/6/sync/', 'POST')).toHaveLength(1)
+
+    await act(async () => {
+      syncResponse.resolve(
+        jsonResponse({
+          connection_id: 6,
+          status: 'active',
+          added: 1,
+          modified: 0,
+          removed: 0,
+        }),
+      )
+    })
+    // Wait for the refetched Second Bank row to commit before checking focus;
+    // the request count alone is not proof the new ready state has rendered.
+    await waitFor(() =>
+      expect(
+        within(connectionItem('Second Bank')).getByRole('time'),
+      ).toHaveAttribute('datetime', '2026-09-12T09:00:00.000000Z'),
+    )
+
+    // The disconnected bank's intent was consumed, so this unrelated refetch
+    // leaves focus on the action the user moved to instead of re-focusing the
+    // old heading.
+    expect(
+      screen.getByRole('button', { name: 'Sync now for Second Bank' }),
+    ).toHaveFocus()
+    expect(
+      within(connectionItem('First Plaid Bank')).getByRole('heading', {
+        name: 'First Plaid Bank',
+      }),
+    ).not.toHaveFocus()
+  })
+
+  it('leaves focus on another bank action when the held disconnect refetch lands', async () => {
+    const refetch = deferred<Response>()
+    let connectionsCalls = 0
+    installFetchMock(
+      lifecycleHandler({
+        connections: () => {
+          connectionsCalls += 1
+          if (connectionsCalls === 1) {
+            return jsonResponse([
+              connectionFixture({
+                id: 5,
+                institution_name: 'First Plaid Bank',
+                status: 'updating',
+              }),
+              connectionFixture({
+                id: 6,
+                institution_name: 'Second Bank',
+                status: 'active',
+              }),
+            ])
+          }
+          return refetch.promise
+        },
+      }),
+    )
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole('button', { name: 'Disconnect First Plaid Bank' }),
+    )
+    await user.click(await screen.findByRole('button', { name: 'Disconnect' }))
+    await waitFor(() => expect(connectionsCalls).toBe(2))
+
+    // The refetch is held while the user moves focus to the other bank's
+    // still-mounted action.
+    const syncButton = screen.getByRole('button', {
+      name: 'Sync now for Second Bank',
+    })
+    expect(syncButton).toBeEnabled()
+    syncButton.focus()
+    expect(syncButton).toHaveFocus()
+
+    await act(async () => {
+      refetch.resolve(
+        jsonResponse([
+          connectionFixture({
+            id: 5,
+            institution_name: 'First Plaid Bank',
+            status: 'disconnected',
+          }),
+          connectionFixture({
+            id: 6,
+            institution_name: 'Second Bank',
+            status: 'active',
+          }),
+        ]),
+      )
+    })
+
+    await waitFor(() =>
+      expect(
+        within(connectionItem('First Plaid Bank')).getByText('Disconnected'),
+      ).toBeInTheDocument(),
+    )
+    // The user already moved, so the ready render must not reclaim focus for the
+    // disconnected bank's heading.
+    expect(
+      screen.getByRole('button', { name: 'Sync now for Second Bank' }),
+    ).toHaveFocus()
+  })
+
+  it.each([
+    { entry: 'sync', secondStatus: 'active' },
+    { entry: 'reconnect', secondStatus: 'updating' },
+    { entry: 'disconnect', secondStatus: 'updating' },
+    { entry: 'connect', secondStatus: 'active' },
+  ] as const)(
+    'does not refocus the previous bank when a new $entry action starts',
+    async ({ entry, secondStatus }) => {
+      const refetch = deferred<Response>()
+      const heldMutation = deferred<Response>()
+      let connectionsCalls = 0
+      installFetchMock(
+        lifecycleHandler({
+          connections: () => {
+            connectionsCalls += 1
+            if (connectionsCalls === 1) {
+              return jsonResponse([
+                connectionFixture({
+                  id: 5,
+                  institution_name: 'First Plaid Bank',
+                  status: 'updating',
+                }),
+                connectionFixture({
+                  id: 6,
+                  institution_name: 'Second Bank',
+                  status: secondStatus,
+                }),
+              ])
+            }
+            return refetch.promise
+          },
+          sync: () => heldMutation.promise,
+          linkToken: (url) =>
+            url === RECONNECT_LINK_TOKEN_URL
+              ? heldMutation.promise
+              : jsonResponse(updateLinkTokenFixture()),
+          connectLinkToken: () => heldMutation.promise,
+          disconnect: (url) =>
+            url === DISCONNECT_URL
+              ? jsonResponse({ connection_id: 5, status: 'disconnected' })
+              : heldMutation.promise,
+        }),
+      )
+      renderApp('/connections')
+      expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+      const user = userEvent.setup()
+      await user.click(
+        screen.getByRole('button', { name: 'Disconnect First Plaid Bank' }),
+      )
+      await user.click(await screen.findByRole('button', { name: 'Disconnect' }))
+      await waitFor(() => expect(connectionsCalls).toBe(2))
+
+      if (entry === 'sync') {
+        await user.click(
+          screen.getByRole('button', { name: 'Sync now for Second Bank' }),
+        )
+      } else if (entry === 'reconnect') {
+        await user.click(
+          screen.getByRole('button', { name: 'Reconnect Second Bank' }),
+        )
+      } else if (entry === 'connect') {
+        await user.click(screen.getByRole('button', { name: 'Connect a bank' }))
+      } else {
+        await user.click(
+          screen.getByRole('button', { name: 'Disconnect Second Bank' }),
+        )
+        const group = await screen.findByRole('group', {
+          name: 'Disconnect Second Bank confirmation',
+        })
+        await user.click(within(group).getByRole('button', { name: 'Disconnect' }))
+      }
+
+      // Chrome can drop focus from a newly disabled button to the body, so the
+      // body guard alone cannot tell that the user moved to another bank. jsdom
+      // will not blur a disabled control, so hand focus to a disposable node and
+      // remove it to land on the body, matching Chrome's end state.
+      const dropFocus = document.createElement('button')
+      document.body.appendChild(dropFocus)
+      dropFocus.focus()
+      dropFocus.remove()
+      expect(document.activeElement).toBe(document.body)
+
+      await act(async () => {
+        refetch.resolve(
+          jsonResponse([
+            connectionFixture({
+              id: 5,
+              institution_name: 'First Plaid Bank',
+              status: 'disconnected',
+            }),
+            connectionFixture({
+              id: 6,
+              institution_name: 'Second Bank',
+              status: secondStatus,
+            }),
+          ]),
+        )
+      })
+
+      await waitFor(() =>
+        expect(
+          within(connectionItem('First Plaid Bank')).getByText('Disconnected'),
+        ).toBeInTheDocument(),
+      )
+      expect(
+        within(connectionItem('First Plaid Bank')).getByRole('heading', {
+          name: 'First Plaid Bank',
+        }),
+      ).not.toHaveFocus()
+    },
+  )
+
+  it('discards the disconnect focus intent on a Connect click before the POST response so the old Disconnect control and heading stay unfocused', async () => {
+    const refetch = deferred<Response>()
+    const disconnectResponse = deferred<Response>()
+    let connectionsCalls = 0
+    const mock = installFetchMock(
+      lifecycleHandler({
+        connections: () => {
+          connectionsCalls += 1
+          if (connectionsCalls === 1) {
+            return jsonResponse([
+              connectionFixture({
+                id: 5,
+                institution_name: 'First Plaid Bank',
+                status: 'updating',
+              }),
+            ])
+          }
+          return refetch.promise
+        },
+        disconnect: () => disconnectResponse.promise,
+        // The Connect click starts a link-token request that is deliberately
+        // held for the rest of the test. The click itself, not the response,
+        // is what must discard the disconnect focus intent.
+        connectLinkToken: () => new Promise<Response>(() => {}),
+      }),
+    )
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole('button', { name: 'Disconnect First Plaid Bank' }),
+    )
+    await user.click(await screen.findByRole('button', { name: 'Disconnect' }))
+
+    // The disconnect POST is genuinely in flight and its own refetch has not
+    // started yet, so everything below happens before that response.
+    await waitFor(() =>
+      expect(calls(mock, DISCONNECT_URL, 'POST')).toHaveLength(1),
+    )
+    expect(connectionsCalls).toBe(1)
+
+    // A real mutation starts while the disconnect POST is still unresolved:
+    // the Connect button click issues its held link-token request and, through
+    // the screen's capture-phase handler, clears the pending focus intent.
+    await user.click(screen.getByRole('button', { name: 'Connect a bank' }))
+    await waitFor(() =>
+      expect(calls(mock, CONNECT_LINK_TOKEN_URL, 'POST')).toHaveLength(1),
+    )
+
+    // Spy only from the Connect click onward: the question is what the app
+    // focuses after the user moved on, not what userEvent did while clicking.
+    const focusSpy = vi.spyOn(HTMLElement.prototype, 'focus')
+    try {
+      // Chrome drops focus from the now-disabled Connect button to the body;
+      // jsdom will not blur a disabled control, so hand focus to a disposable
+      // node and remove it to land on the body identically.
+      const dropFocus = document.createElement('button')
+      document.body.appendChild(dropFocus)
+      dropFocus.focus()
+      dropFocus.remove()
+      expect(document.activeElement).toBe(document.body)
+
+      // The disconnect POST now settles and GET #2 is issued but still held,
+      // so the old row and its Disconnect control are still on screen.
+      await act(async () => {
+        disconnectResponse.resolve(
+          jsonResponse({ connection_id: 5, status: 'disconnected' }),
+        )
+      })
+      await waitFor(() => expect(connectionsCalls).toBe(2))
+      expect(
+        screen.getByRole('button', { name: 'Disconnect First Plaid Bank' }),
+      ).toBeInTheDocument()
+
+      // The capture-phase click already discarded the intent, so the app must
+      // never programmatically focus the old Disconnect control.
+      const oldDisconnectFocusCalls = focusSpy.mock.contexts.filter(
+        (context) =>
+          context instanceof HTMLButtonElement &&
+          context.getAttribute('aria-label') === 'Disconnect First Plaid Bank',
+      )
+      expect(oldDisconnectFocusCalls).toHaveLength(0)
+
+      // GET #2 finally renders the disconnected record. The user moved to
+      // Connect, so the ready render must not reclaim focus for the old row.
+      await act(async () => {
+        refetch.resolve(
+          jsonResponse([
+            connectionFixture({
+              id: 5,
+              institution_name: 'First Plaid Bank',
+              status: 'disconnected',
+            }),
+          ]),
+        )
+      })
+      await waitFor(() =>
+        expect(
+          within(connectionItem('First Plaid Bank')).getByText('Disconnected'),
+        ).toBeInTheDocument(),
+      )
+      expect(
+        within(connectionItem('First Plaid Bank')).getByRole('heading', {
+          name: 'First Plaid Bank',
+        }),
+      ).not.toHaveFocus()
+    } finally {
+      focusSpy.mockRestore()
+    }
+  })
+
+  it('waits for the disconnected record before moving focus, ignoring an earlier active-row refetch', async () => {
+    const get2 = deferred<Response>()
+    const bank5Disconnect = deferred<Response>()
+    let connectionsCalls = 0
+    installFetchMock(
+      lifecycleHandler({
+        connections: () => {
+          connectionsCalls += 1
+          if (connectionsCalls === 1) {
+            return jsonResponse([
+              connectionFixture({
+                id: 5,
+                institution_name: 'First Plaid Bank',
+                status: 'updating',
+              }),
+              connectionFixture({
+                id: 6,
+                institution_name: 'Second Bank',
+                status: 'active',
+              }),
+            ])
+          }
+          if (connectionsCalls === 2) return get2.promise
+          return jsonResponse([
+            connectionFixture({
+              id: 5,
+              institution_name: 'First Plaid Bank',
+              status: 'disconnected',
+            }),
+            connectionFixture({
+              id: 6,
+              institution_name: 'Second Bank',
+              status: 'active',
+            }),
+          ])
+        },
+        sync: () =>
+          jsonResponse({
+            connection_id: 6,
+            status: 'active',
+            added: 0,
+            modified: 0,
+            removed: 0,
+          }),
+        disconnect: (url) =>
+          url === DISCONNECT_URL
+            ? bank5Disconnect.promise
+            : jsonResponse({ connection_id: 6, status: 'disconnected' }),
+      }),
+    )
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    // Sync bank 6: its POST succeeds but GET #2 is held.
+    await user.click(
+      screen.getByRole('button', { name: 'Sync now for Second Bank' }),
+    )
+    await waitFor(() => expect(connectionsCalls).toBe(2))
+
+    // The GET #2 hold releases bank 5's controls. Disconnect bank 5 and hold its
+    // POST, then simulate Chrome dropping focus to the body without a click, so
+    // the armed intent survives.
+    await user.click(
+      screen.getByRole('button', { name: 'Disconnect First Plaid Bank' }),
+    )
+    await user.click(await screen.findByRole('button', { name: 'Disconnect' }))
+    const dropFocus = document.createElement('button')
+    document.body.appendChild(dropFocus)
+    dropFocus.focus()
+    dropFocus.remove()
+    expect(document.activeElement).toBe(document.body)
+
+    // GET #2 lands first and still reports bank 5 as active with a distinct
+    // bank 6 sync time: the status gate must not consume the intent here.
+    await act(async () => {
+      get2.resolve(
+        jsonResponse([
+          connectionFixture({
+            id: 5,
+            institution_name: 'First Plaid Bank',
+            status: 'updating',
+          }),
+          connectionFixture({
+            id: 6,
+            institution_name: 'Second Bank',
+            status: 'active',
+            last_synced_at: '2026-09-12T09:00:00.000000Z',
+          }),
+        ]),
+      )
+    })
+    await waitFor(() =>
+      expect(
+        within(connectionItem('Second Bank')).getByRole('time'),
+      ).toHaveAttribute('datetime', '2026-09-12T09:00:00.000000Z'),
+    )
+    expect(
+      within(connectionItem('First Plaid Bank')).getByRole('heading', {
+        name: 'First Plaid Bank',
+      }),
+    ).not.toHaveFocus()
+
+    // The disconnect POST settles; GET #3 renders bank 5 disconnected and only
+    // then may focus move to the heading.
+    await act(async () => {
+      bank5Disconnect.resolve(
+        jsonResponse({ connection_id: 5, status: 'disconnected' }),
+      )
+    })
+    await waitFor(() => expect(connectionsCalls).toBe(3))
+    await waitFor(() =>
+      expect(
+        within(connectionItem('First Plaid Bank')).getByText('Disconnected'),
+      ).toBeInTheDocument(),
+    )
+    expect(
+      within(connectionItem('First Plaid Bank')).getByRole('heading', {
+        name: 'First Plaid Bank',
+      }),
+    ).toHaveFocus()
+  })
+
+  it('does not focus the disconnected heading when Retry reloads after a failed refetch', async () => {
+    let connectionsCalls = 0
+    const mock = installFetchMock(
+      lifecycleHandler({
+        connections: () => {
+          connectionsCalls += 1
+          if (connectionsCalls === 2) {
+            return new Response(null, { status: 500 })
+          }
+          return jsonResponse([
+            connectionFixture({
+              id: 5,
+              institution_name: 'First Plaid Bank',
+              status: connectionsCalls === 1 ? 'updating' : 'disconnected',
+            }),
+          ])
+        },
+      }),
+    )
+    renderApp('/connections')
+    expect(await screen.findByText('First Plaid Bank')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole('button', { name: 'Disconnect First Plaid Bank' }),
+    )
+    await user.click(await screen.findByRole('button', { name: 'Disconnect' }))
+
+    // The disconnect's own refetch fails, so the list falls to an error and the
+    // success-only focus intent must be discarded before Retry can consume it.
+    const alert = await screen.findByRole('alert')
+    expect(alert).toBeInTheDocument()
+    expect(calls(mock, DISCONNECT_URL, 'POST')).toHaveLength(1)
+
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+
+    // Await the reloaded disconnected row, not a request count, before checking
+    // that the discarded intent left the old heading unfocused.
+    await waitFor(() =>
+      expect(
+        within(connectionItem('First Plaid Bank')).getByText('Disconnected'),
+      ).toBeInTheDocument(),
+    )
+    expect(connectionsCalls).toBe(3)
+    expect(
+      within(connectionItem('First Plaid Bank')).getByRole('heading', {
+        name: 'First Plaid Bank',
+      }),
+    ).not.toHaveFocus()
   })
 
   it('dedups same-tick double confirm and disables every control while the disconnect is pending', async () => {
