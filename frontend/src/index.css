@@ -577,42 +577,27 @@ a {
   text-decoration: underline;
 }
 
+/* One flat financial summary band (issue 107): a single bordered surface where
+   the monthly metrics are separated by thin rules instead of four detached
+   metric cards. MetricCard.module.css owns the card's own label/value base. */
 .dashboard-metrics-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: var(--space-4);
+  grid-template-columns: minmax(0, 1.4fr) repeat(3, minmax(0, 1fr));
+  gap: 0;
   margin: 0 0 var(--space-6);
-}
-
-.dashboard-metric-card {
-  min-width: 0;
-  display: grid;
-  gap: var(--space-1);
   border: 1px solid var(--color-border);
-  border-radius: 0.75rem;
+  border-radius: 1rem;
   background: var(--color-surface);
-  padding: var(--space-4);
+  overflow: hidden;
 }
 
-.dashboard-metric-card dt {
-  color: var(--color-muted);
-  font-size: 0.8125rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
+.dashboard-metrics-grid .dashboard-metric-card + .dashboard-metric-card {
+  border-inline-start: 1px solid var(--color-border);
 }
 
-.dashboard-metric-card dd {
-  min-width: 0;
-  margin: 0;
-  font-size: 1.375rem;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -0.01em;
-  overflow-wrap: anywhere;
-}
-
-.dashboard-metric-card-total {
-  background: var(--color-primary-container);
+.dashboard-metrics-grid .dashboard-metric-card-total dd {
+  font-size: 1.75rem;
+  letter-spacing: -0.02em;
 }
 
 .dashboard-metric-value-income {
@@ -629,7 +614,7 @@ a {
 
 .dashboard-secondary-grid {
   display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-4);
   margin-block-end: var(--space-6);
 }
@@ -668,7 +653,7 @@ a {
   display: flex;
   align-items: flex-end;
   justify-content: center;
-  height: 10rem;
+  height: 6.5rem;
   margin: 0;
 }
 
@@ -717,6 +702,26 @@ a {
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
+}
+
+/* Remaining budget is the figure the monthly-budget region leads with; the
+   budgeted total stays as compact supporting context. */
+.dashboard-budget-amount-primary {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+}
+
+.dashboard-budget-amount-primary dd {
+  font-size: 1.75rem;
+  letter-spacing: -0.02em;
+}
+
+.dashboard-budget-amount-secondary dt,
+.dashboard-budget-amount-secondary dd {
+  color: var(--color-muted);
+  font-size: 0.8125rem;
+  font-weight: 500;
 }
 
 .dashboard-budget-progress {
@@ -777,9 +782,81 @@ a {
   border-top: 0;
 }
 
+/* Dashboard recent activity (issue 107). Scoped to .dashboard-recent-card so
+   the shared .transaction-* hooks keep their meaning on the Transactions
+   screen. The note leads when present; type and date support it; the signed
+   amount stays end-aligned. Two lines for normal data. */
+.dashboard-recent-card .transaction-main {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  column-gap: var(--space-3);
+}
+
+.dashboard-recent-card .transaction-mark {
+  display: inline-flex;
+  width: 1.5rem;
+  height: 1.5rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-1);
+  background: var(--color-surface-muted);
+  color: var(--color-muted);
+  font-size: 0.75rem;
+  line-height: 1;
+}
+
+.dashboard-recent-card .transaction-body {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-1);
+}
+
+.dashboard-recent-card .transaction-title {
+  min-width: 0;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.dashboard-recent-card .transaction-meta {
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  margin-block-start: 0;
+  font-size: 0.8125rem;
+}
+
+.dashboard-recent-card .transaction-type {
+  font-size: 0.8125rem;
+}
+
+.dashboard-recent-card .transaction-amount {
+  justify-self: end;
+  font-size: 0.9375rem;
+  font-weight: 700;
+  text-align: end;
+  overflow-wrap: anywhere;
+}
+
 @media (max-width: 64rem) {
   .dashboard-metrics-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .dashboard-metrics-grid .dashboard-metric-card-total {
+    grid-column: 1 / -1;
+    border-inline-start: 0;
+    border-block-end: 1px solid var(--color-border);
+  }
+
+  .dashboard-metrics-grid .dashboard-metric-card {
+    border-inline-start: 0;
+  }
+
+  .dashboard-metrics-grid
+    .dashboard-metric-card:not(.dashboard-metric-card-total)
+    + .dashboard-metric-card:not(.dashboard-metric-card-total) {
+    border-inline-start: 1px solid var(--color-border);
   }
 
   .dashboard-secondary-grid {
@@ -788,8 +865,16 @@ a {
 }
 
 @media (max-width: 36rem) {
-  .dashboard-metrics-grid {
-    grid-template-columns: 1fr;
+  .dashboard-metrics-grid .dashboard-metric-card {
+    padding: var(--space-3) var(--space-2);
+  }
+
+  .dashboard-metrics-grid .dashboard-metric-card dd {
+    font-size: 0.9375rem;
+  }
+
+  .dashboard-metrics-grid .dashboard-metric-card-total dd {
+    font-size: 1.5rem;
   }
 
   .dashboard-card {

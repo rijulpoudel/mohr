@@ -56,3 +56,46 @@ Re-read the upstream files at the pinned commit, then port only changes that
 match Mohr's reduced API and variables. Do not copy the unused motion token
 system, accessory/intent callbacks, or the scroll/fade track. Update the
 upstream commit hash above and re-run the focused tests.
+
+# Arc MetricCard (local adaptation)
+
+`MetricCard.tsx` and `MetricCard.module.css` are a locally owned adaptation of
+the MIT-licensed Arc registry component.
+
+## Provenance
+
+- Upstream: Arc registry `registry/components/metric-card/`
+- Upstream commit: `7238f98196b147a8d50ce467abcbad310d4d8414`
+- License: MIT, copyright (c) 2026 Elia Kuratli (see `LICENSE` in this folder)
+
+## What was kept
+
+- `min-width: 0` on the card so long monetary strings cannot force overflow.
+- The flat surface, padding, and the muted-label over emphasized-value
+  hierarchy from upstream's `metric-card.module.css`.
+
+## Deliberate adaptations
+
+- The component renders a `<div>` containing a `<dt>`/`<dd>` pair so it can sit
+  inside an existing parent `<dl>`. Upstream renders an `<article>` owning its
+  own counter and context line.
+- API is reduced to what the Dashboard caller uses: `label: string`, an already
+  formatted `value: string`, and optional `className`/`valueClassName` for the
+  existing financial emphasis hooks. `formatMoney` stays at the caller, so the
+  component never converts money into `Number`.
+- Upstream's `AnimatedCounter`, `Swap`, `ResizeObserver` width morph, trend
+  `change`, and `context` props are removed. Immediate, exact money on every
+  repeated workflow matters more than an entrance animation here.
+- The upstream border, radius, and shadow are dropped: the Dashboard composes
+  several of these into one flat summary band whose single parent supplies the
+  border and 16px radius, so no detached metric boxes remain.
+- CSS maps to Mohr variables (`--color-*`, `--space-*`); no global Arc
+  foundation reset is imported. Only the Dashboard uses this component, so no
+  unused catalog entry is added to the runtime.
+
+## Updating MetricCard from upstream
+
+Re-read the upstream files at the pinned commit, then port only changes that
+match Mohr's reduced API and variables. Do not reintroduce the animated
+counter, text-swap morph, or trend/context props. Update the upstream commit
+hash above and re-run the focused Dashboard tests.

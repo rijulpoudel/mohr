@@ -8,6 +8,7 @@ import {
 import { ApiError, userMessage } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
 import { BankSyncNotice } from '../components/BankSyncNotice'
+import { MetricCard } from '../components/arc/MetricCard'
 import {
   clampedPercent,
   decimalToCents,
@@ -88,29 +89,36 @@ function TransactionItem({
 }: {
   transaction: DashboardTransaction
 }) {
+  const typeLabel = transaction.is_transfer
+    ? 'Transfer'
+    : transaction.transaction_type === 'income'
+      ? 'Income'
+      : 'Expense'
+  const hasNote = transaction.note !== ''
   return (
     <li className="transaction-item">
       <div className="transaction-main">
-        <span className="transaction-type">
-          {transaction.is_transfer
-            ? 'Transfer'
-            : transaction.transaction_type === 'income'
-              ? 'Income'
-              : 'Expense'}
+        <span className="transaction-mark" aria-hidden="true">
+          {transaction.transaction_type === 'income' ? '↑' : '↓'}
+        </span>
+        <span className="transaction-body">
+          {hasNote ? (
+            <span className="transaction-title">{transaction.note}</span>
+          ) : (
+            <span className="transaction-type">{typeLabel}</span>
+          )}
+          <span className="transaction-meta">
+            {hasNote && <span className="transaction-type">{typeLabel}</span>}
+            <time dateTime={transaction.date}>
+              {formatUtcDate(transaction.date)}
+            </time>
+            {transaction.is_transfer && <span>Other side unverified</span>}
+          </span>
         </span>
         <span className="transaction-amount">
           {formatSignedMoney(transaction.amount, transaction.transaction_type)}
         </span>
       </div>
-      <div className="transaction-meta">
-        <time dateTime={transaction.date}>
-          {formatUtcDate(transaction.date)}
-        </time>
-        {transaction.is_transfer && <span>Other side unverified</span>}
-      </div>
-      {transaction.note !== '' && (
-        <p className="transaction-note">{transaction.note}</p>
-      )}
     </li>
   )
 }
@@ -179,13 +187,13 @@ function BudgetCard({
     >
       <h3 id="budget-heading">Monthly budget</h3>
       <dl className="dashboard-budget-amounts">
-        <div className="dashboard-budget-amount">
-          <dt>Budgeted this month</dt>
-          <dd>{formatMoney(budgeted)}</dd>
-        </div>
-        <div className="dashboard-budget-amount">
+        <div className="dashboard-budget-amount dashboard-budget-amount-primary">
           <dt>Remaining budget</dt>
           <dd>{formatMoney(remaining)}</dd>
+        </div>
+        <div className="dashboard-budget-amount dashboard-budget-amount-secondary">
+          <dt>Budgeted this month</dt>
+          <dd>{formatMoney(budgeted)}</dd>
         </div>
       </dl>
       {decimalToCents(budgeted) > 0n ? (
@@ -296,19 +304,18 @@ function DashboardSummaryPanel({ onRetry }: { onRetry: () => void }) {
 
   return (
     <>
-      <dl className="dashboard-metrics-grid">
+      <dl className="dashboard-metrics-grid" aria-label="Financial summary">
         {METRIC_FIELDS.map(({ key, label }) => (
-          <div className={metricCardClassName(key)} key={key}>
-            <dt>{label}</dt>
-            <dd
-              className={metricValueClassName(
-                key,
-                state.summary.remaining_budget,
-              )}
-            >
-              {formatMoney(state.summary[key])}
-            </dd>
-          </div>
+          <MetricCard
+            key={key}
+            label={label}
+            value={formatMoney(state.summary[key])}
+            className={metricCardClassName(key)}
+            valueClassName={metricValueClassName(
+              key,
+              state.summary.remaining_budget,
+            )}
+          />
         ))}
       </dl>
       <div className="dashboard-secondary-grid">
