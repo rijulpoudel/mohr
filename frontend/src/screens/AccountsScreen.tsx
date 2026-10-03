@@ -397,6 +397,7 @@ function EditAccountForm({
             type="text"
             name="name"
             autoComplete="off"
+            autoFocus
             required
             value={name}
             onChange={(event) => setName(event.target.value)}
@@ -561,6 +562,7 @@ function ArchiveAccountConfirm({
         <button
           type="button"
           className="btn btn-secondary"
+          autoFocus
           onClick={onCancelled}
           disabled={pending}
         >
@@ -616,7 +618,7 @@ function AccountItem({
   }
   const status = accountStatus(account)
   return (
-    <li className="accounts-item" id={`account-${account.id}`}>
+    <li className="accounts-item" id={`account-${account.id}`} tabIndex={-1}>
       <div className="accounts-card">
         <div className="accounts-card-head">
           <span className="accounts-type-mark" aria-hidden="true">
@@ -683,6 +685,7 @@ function AccountItem({
         <div className="accounts-actions">
           <button
             type="button"
+            id={`account-edit-${account.id}`}
             className="btn btn-secondary"
             data-account-edit
             aria-label={`Edit ${account.name}`}
@@ -699,6 +702,7 @@ function AccountItem({
           {!account.is_archived && (
             <button
               type="button"
+              id={`account-archive-${account.id}`}
               className="btn btn-secondary"
               aria-label={`Archive ${account.name}`}
               onClick={onArchiveRequest}
@@ -999,9 +1003,9 @@ function AccountList({
   onEdit: (accountId: number) => void
   onArchiveRequest: (accountId: number) => void
   onUpdated: (account: Account) => void
-  onCancelled: () => void
+  onCancelled: (accountId: number) => void
   onArchived: (accountId: number) => void
-  onArchiveCancelled: () => void
+  onArchiveCancelled: (accountId: number) => void
 }) {
   return (
     <ul className="accounts-list">
@@ -1014,9 +1018,9 @@ function AccountList({
           onEdit={() => onEdit(account.id)}
           onArchiveRequest={() => onArchiveRequest(account.id)}
           onUpdated={onUpdated}
-          onCancelled={onCancelled}
+          onCancelled={() => onCancelled(account.id)}
           onArchived={onArchived}
-          onArchiveCancelled={onArchiveCancelled}
+          onArchiveCancelled={() => onArchiveCancelled(account.id)}
         />
       ))}
     </ul>
@@ -1031,13 +1035,25 @@ export function AccountsScreen() {
   const [archivingId, setArchivingId] = useState<number | null>(null)
   const [updatedNotice, setUpdatedNotice] = useState(false)
   const [archivedNotice, setArchivedNotice] = useState(false)
-  const [focusAfterArchiveId, setFocusAfterArchiveId] = useState<number | null>(null)
+  type ReturnFocusTarget = { kind: 'edit' | 'archive'; id: number }
+  const returnFocusRef = useRef<ReturnFocusTarget | null>(null)
 
+  // Restore focus only when a row editor/confirmation closes. An ordinary list
+  // update leaves the ref untouched so unrelated renders never steal focus.
   useEffect(() => {
-    if (focusAfterArchiveId === null) return
-    const archivedRow = document.getElementById(`account-${focusAfterArchiveId}`)
-    archivedRow?.querySelector<HTMLButtonElement>('[data-account-edit]')?.focus()
-  }, [focusAfterArchiveId])
+    if (editingId !== null || archivingId !== null) return
+    const target = returnFocusRef.current
+    if (target === null) return
+    returnFocusRef.current = null
+    const action = document.getElementById(`account-${target.kind}-${target.id}`)
+    if (action instanceof HTMLButtonElement && !action.disabled) {
+      action.focus()
+      return
+    }
+    // A pending archived row keeps its Edit disabled, so focus the record
+    // itself rather than an unavailable action.
+    document.getElementById(`account-${target.id}`)?.focus()
+  }, [editingId, archivingId])
 
   useEffect(() => {
     let cancelled = false
@@ -1082,7 +1098,8 @@ export function AccountsScreen() {
     setArchivedNotice(false)
   }, [])
 
-  const handleCancelled = useCallback(() => {
+  const handleCancelled = useCallback((accountId: number) => {
+    returnFocusRef.current = { kind: 'edit', id: accountId }
     setEditingId(null)
   }, [])
 
@@ -1093,7 +1110,8 @@ export function AccountsScreen() {
     setArchivedNotice(false)
   }, [])
 
-  const handleArchiveCancelled = useCallback(() => {
+  const handleArchiveCancelled = useCallback((accountId: number) => {
+    returnFocusRef.current = { kind: 'archive', id: accountId }
     setArchivingId(null)
   }, [])
 
@@ -1108,9 +1126,9 @@ export function AccountsScreen() {
       accounts[index] = { ...accounts[index], is_archived: true }
       return { status: 'ready', accounts }
     })
+    returnFocusRef.current = { kind: 'edit', id: accountId }
     setArchivingId(null)
     setArchivedNotice(true)
-    setFocusAfterArchiveId(accountId)
   }, [])
 
   const handleUpdated = useCallback((updated: Account) => {
@@ -1122,6 +1140,7 @@ export function AccountsScreen() {
       accounts[index] = updated
       return { status: 'ready', accounts }
     })
+    returnFocusRef.current = { kind: 'edit', id: updated.id }
     setEditingId(null)
     setUpdatedNotice(true)
   }, [])
