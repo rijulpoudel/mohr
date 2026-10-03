@@ -186,21 +186,32 @@ function ConnectionCard({
   const locked = mutationInFlight !== null || confirmationOpen
   const cancelRef = useRef<HTMLButtonElement>(null)
   const disconnectButtonRef = useRef<HTMLButtonElement>(null)
-  const wasConfirmingRef = useRef(false)
+  // Only a Cancel click should hand focus back to the Disconnect control. A
+  // successful disconnect removes that control, so returning focus to it there
+  // would only strand focus on the body once the refreshed row arrives.
+  const restoreAfterCancelRef = useRef(false)
 
   useEffect(() => {
     if (confirmingDisconnect) {
       cancelRef.current?.focus()
-    } else if (wasConfirmingRef.current) {
+      return
+    }
+    if (restoreAfterCancelRef.current) {
+      restoreAfterCancelRef.current = false
       disconnectButtonRef.current?.focus()
     }
-    wasConfirmingRef.current = confirmingDisconnect
   }, [confirmingDisconnect])
 
   return (
     <li className="connection-item">
       <div className="connection-main">
-        <h3 className="connection-name">{connection.institution_name}</h3>
+        <h3
+          className="connection-name"
+          id={`connection-heading-${connection.id}`}
+          tabIndex={-1}
+        >
+          {connection.institution_name}
+        </h3>
         <span className="connection-status">
           {CONNECTION_STATUS_LABELS[connection.status]}
         </span>
@@ -351,7 +362,10 @@ function ConnectionCard({
                 className="btn"
                 ref={cancelRef}
                 disabled={mutationInFlight !== null}
-                onClick={() => onCancelDisconnect(connection.id)}
+                onClick={() => {
+                  restoreAfterCancelRef.current = true
+                  onCancelDisconnect(connection.id)
+                }}
               >
                 Cancel
               </button>
@@ -435,6 +449,7 @@ export function ConnectionsScreen() {
   const reconnectStatusRef = useRef<ReconnectStatus>('idle')
   const openedTokenRef = useRef<string | null>(null)
   const mountedRef = useRef(true)
+  const disconnectFocusRef = useRef<number | null>(null)
 
   useEffect(() => {
     mountedRef.current = true
@@ -613,6 +628,10 @@ export function ConnectionsScreen() {
   const confirmDisconnect = useCallback(
     (connectionId: number) => {
       if (mutationInFlightRef.current !== null) return
+      // Record the intent at entry so any later user action, including a
+      // keyboard-generated click on the Connect button, can clear it before the
+      // deferred refetch renders. It is never re-armed on success.
+      disconnectFocusRef.current = connectionId
       const mutation: Mutation = { kind: 'disconnect', connectionId }
       mutationInFlightRef.current = mutation
       setMutationInFlight(mutation)
@@ -630,6 +649,7 @@ export function ConnectionsScreen() {
         .catch((caught: unknown) => {
           if (!mountedRef.current) return
           if (mutationInFlightRef.current !== mutation) return
+          disconnectFocusRef.current = null
           mutationInFlightRef.current = null
           setMutationInFlight(null)
           if (caught instanceof ApiError && caught.status === 401) {
@@ -684,6 +704,36 @@ export function ConnectionsScreen() {
       cancelled = true
     }
   }, [attempt, clearSession])
+
+  // A successful disconnect removes the row's controls, so focus is moved to
+  // the bank's heading only after the refetched list has rendered, keyed by the
+  // immutable connection id. The intent is consumed once and cleared on a list
+  // error so a later unrelated refetch or Retry cannot steal focus.
+  useEffect(() => {
+    const connectionId = disconnectFocusRef.current
+    if (connectionId === null) return
+    if (state.status === 'error') {
+      disconnectFocusRef.current = null
+      return
+    }
+    if (state.status !== 'ready') return
+    // Wait for the refreshed record to actually read as disconnected. An
+    // unrelated refetch can land while the disconnect POST is still pending,
+    // and consuming there would focus a row whose controls still exist.
+    if (
+      !state.connections.some(
+        (connection) =>
+          connection.id === connectionId && connection.status === 'disconnected',
+      )
+    ) {
+      return
+    }
+    disconnectFocusRef.current = null
+    // Only restore when the initiating control's removal dropped focus to the
+    // body; a still-focused control means the user moved on, so leave it alone.
+    if (document.activeElement !== document.body) return
+    document.getElementById(`connection-heading-${connectionId}`)?.focus()
+  }, [state])
 
   const startSync = useCallback(
     (connectionId: number) => {
@@ -768,7 +818,16 @@ export function ConnectionsScreen() {
   }
 
   return (
-    <div className="screen">
+    <div
+      className="screen"
+      // Capture runs before the child's own click handler, so a user click that
+      // starts any mutation (including a keyboard-generated Connect click)
+      // discards a pending disconnect focus intent before a handler can re-arm
+      // it. A user click is the strongest signal that focus should stay put.
+      onClickCapture={() => {
+        disconnectFocusRef.current = null
+      }}
+    >
       <h2>Connections</h2>
       <ConnectBankButton onConnectionAdded={handleConnectionAdded} />
       {state.connections.length === 0 ? (
