@@ -61,6 +61,7 @@ export function RegisterScreen() {
             required
             value={email}
             onChange={(event) => setEmail(event.target.value)}
+            aria-invalid={fieldErrors?.email !== undefined}
             aria-describedby={
               fieldErrors?.email !== undefined ? 'register-email-error' : undefined
             }
@@ -84,6 +85,7 @@ export function RegisterScreen() {
             required
             value={password}
             onChange={(event) => setPassword(event.target.value)}
+            aria-invalid={fieldErrors?.password !== undefined}
             aria-describedby={
               fieldErrors?.password !== undefined
                 ? 'register-password-error'

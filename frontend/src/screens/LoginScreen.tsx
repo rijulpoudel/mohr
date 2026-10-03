@@ -73,6 +73,7 @@ export function LoginScreen() {
             required
             value={email}
             onChange={(event) => setEmail(event.target.value)}
+            aria-invalid={fieldErrors?.email !== undefined}
             aria-describedby={
               fieldErrors?.email !== undefined ? 'login-email-error' : undefined
             }
@@ -96,6 +97,7 @@ export function LoginScreen() {
             required
             value={password}
             onChange={(event) => setPassword(event.target.value)}
+            aria-invalid={fieldErrors?.password !== undefined}
             aria-describedby={
               fieldErrors?.password !== undefined
                 ? 'login-password-error'
