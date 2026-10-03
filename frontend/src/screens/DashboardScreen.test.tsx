@@ -1170,12 +1170,13 @@ describe('bank sync notice', () => {
   })
 
   it('retries a failed bank-status request without retrying the dashboard summary', async () => {
+    const retry = deferred<Response>()
     let attempts = 0
     const mock = installFetchMock(bankSyncHandler(() => {
       attempts += 1
       return attempts === 1
         ? new Response(null, { status: 500 })
-        : jsonResponse([])
+        : retry.promise
     }))
     const user = userEvent.setup()
     renderApp('/')
@@ -1183,7 +1184,21 @@ describe('bank sync notice', () => {
     const region = await screen.findByRole('region', { name: 'Bank sync status' })
     await within(region).findByText('Bank sync status unavailable.')
     await user.click(within(region).getByRole('button', { name: 'Retry bank status' }))
+
+    expect(
+      await within(region).findByText('Checking bank sync status…'),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('main')).toHaveFocus()
+
+    await user.tab()
+    const signOut = screen.getByRole('button', { name: 'Sign out' })
+    expect(signOut).toHaveFocus()
+
+    await act(async () => {
+      retry.resolve(jsonResponse([]))
+    })
     await waitFor(() => expect(screen.queryByRole('region', { name: 'Bank sync status' })).not.toBeInTheDocument())
+    expect(signOut).toHaveFocus()
     expect(calls(mock, '/api/plaid/connections/')).toHaveLength(2)
     expect(calls(mock, '/api/dashboard/summary/')).toHaveLength(1)
   })
