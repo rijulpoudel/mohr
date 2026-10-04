@@ -859,6 +859,11 @@ describe('dashboard session expiry', () => {
     )
     renderApp('/')
 
+    // The cleared session lands on the public page; follow its Sign in link.
+    const user = userEvent.setup()
+    await user.click(
+      (await screen.findAllByRole('link', { name: 'Sign in' }))[0],
+    )
     expect(await screen.findByLabelText('Email')).toBeInTheDocument()
     expect(window.location.pathname).toBe('/login')
     expect(requestLog(mock)).toEqual([
@@ -892,6 +897,10 @@ describe('logout from the dashboard', () => {
     await screen.findByText('Signed in as out@example.com')
     await user.click(screen.getByRole('button', { name: 'Sign out' }))
 
+    // Post-logout lands on the public page; follow its Sign in link.
+    await user.click(
+      (await screen.findAllByRole('link', { name: 'Sign in' }))[0],
+    )
     expect(await screen.findByLabelText('Email')).toBeInTheDocument()
     expect(window.location.pathname).toBe('/login')
     expect(requestLog(mock)).toEqual([
@@ -1266,6 +1275,11 @@ describe('bank sync notice', () => {
     )
     renderApp('/')
 
+    // The cleared session lands on the public page; follow its Sign in link.
+    const user = userEvent.setup()
+    await user.click(
+      (await screen.findAllByRole('link', { name: 'Sign in' }))[0],
+    )
     expect(await screen.findByLabelText('Email')).toBeInTheDocument()
     expect(window.location.pathname).toBe('/login')
     expect(

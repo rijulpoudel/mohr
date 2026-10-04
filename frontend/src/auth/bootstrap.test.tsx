@@ -1,4 +1,4 @@
-import { act, screen } from '@testing-library/react'
+import { act, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import {
@@ -17,7 +17,9 @@ describe('session bootstrap', () => {
       if (url === '/api/auth/me/') return pending.promise
       return jsonResponse({}, 404)
     })
-    renderApp('/')
+    // A protected deep path, rather than the public `/` landing, is what
+    // still redirects a signed-out visitor to login.
+    renderApp('/accounts')
     expect(screen.getByRole('status')).toHaveTextContent(
       'Checking your session',
     )
@@ -80,16 +82,21 @@ describe('session bootstrap', () => {
       if (url === '/api/auth/login/' && (init?.method ?? 'GET') === 'POST') {
         return jsonResponse({ id: 4, email: 'back@example.com' })
       }
+      if (url === '/api/accounts/') return jsonResponse([])
       return jsonResponse({}, 404)
     })
-    renderApp('/')
+    renderApp('/accounts')
     expect(await screen.findByLabelText('Email')).toBeInTheDocument()
     expect(window.location.pathname).toBe('/login')
     await user.type(screen.getByLabelText('Email'), 'back@example.com')
     await user.type(screen.getByLabelText('Password'), 'correct-horse')
     await user.click(screen.getByRole('button', { name: 'Sign in' }))
-    expect(await screen.findByText('Signed in as back@example.com')).toBeInTheDocument()
-    expect(window.location.pathname).toBe('/')
+    await waitFor(() => {
+      expect(
+        screen.getByRole('heading', { name: 'Accounts' }),
+      ).toBeInTheDocument()
+      expect(window.location.pathname).toBe('/accounts')
+    })
   })
 
   it('redirects authenticated users away from guest routes', async () => {

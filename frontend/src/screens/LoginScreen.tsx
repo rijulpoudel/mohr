@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { ApiError, userMessage, type FieldErrors } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
+import { privateDestination } from '../routes/guards'
 
 interface LoginScreenState {
   from?: { pathname?: string }
@@ -29,7 +30,7 @@ export function LoginScreen() {
     setPending(true)
     try {
       await login(email, password)
-      navigate(state.from?.pathname ?? '/', { replace: true })
+      navigate(privateDestination(state), { replace: true })
     } catch (caught) {
       if (caught instanceof ApiError) {
         setErrorMessage(userMessage(caught))

@@ -15,9 +15,15 @@ import {
 
 async function openLogin(handler: FetchHandler) {
   const mock = installFetchMock(handler)
+  const user = userEvent.setup()
   renderApp('/')
+  // Signed-out visitors now land on the public page; follow its Sign in link
+  // to reach the login form.
+  await user.click(
+    (await screen.findAllByRole('link', { name: 'Sign in' }))[0],
+  )
   await screen.findByLabelText('Email')
-  return { user: userEvent.setup(), mock }
+  return { user, mock }
 }
 
 describe('login', () => {
