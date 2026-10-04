@@ -367,11 +367,13 @@ describe('budgets list', () => {
     expect(screen.getByRole('status')).toHaveTextContent(
       'Loading your budgets',
     )
+    expect(screen.getByLabelText('Budget month')).toBeDisabled()
 
     await act(async () => {
       pending.resolve(jsonResponse([]))
     })
     expect(await screen.findByText(/no budgets exist yet/i)).toBeInTheDocument()
+    expect(screen.getByLabelText('Budget month')).toBeEnabled()
   })
 
   it('does not claim an expense category is missing while the initial load is pending', async () => {
@@ -459,11 +461,13 @@ describe('budgets list', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'Something went wrong. Please try again.',
     )
+    expect(screen.getByLabelText('Budget month')).toBeDisabled()
     const user = userEvent.setup()
     await user.click(screen.getByRole('button', { name: 'Retry' }))
 
     expect(await screen.findByText('October 2026')).toBeInTheDocument()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Budget month')).toBeEnabled()
     expect(calls(mock, '/api/budgets/')).toHaveLength(2)
   })
 
@@ -472,6 +476,17 @@ describe('budgets list', () => {
     renderApp('/budgets')
 
     expect(await screen.findByText(/no budgets exist yet/i)).toBeInTheDocument()
+    expect(screen.queryByRole('listitem')).not.toBeInTheDocument()
+
+    const filter = screen.getByLabelText('Budget month')
+    fireEvent.change(filter, { target: { value: '2026-09' } })
+    expect(
+      screen.getByText('No budgets for September 2026.'),
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/no budgets exist yet/i)).not.toBeInTheDocument()
+
+    fireEvent.change(filter, { target: { value: '' } })
+    expect(screen.getByText(/no budgets exist yet/i)).toBeInTheDocument()
     expect(screen.queryByRole('listitem')).not.toBeInTheDocument()
   })
 
@@ -573,6 +588,59 @@ describe('budgets list', () => {
     ).toBe(false)
     expect(localStorage.length).toBe(0)
     expect(sessionStorage.length).toBe(0)
+  })
+})
+
+describe('budget month filter', () => {
+  it('filters loaded budgets by exact month, shows a friendly empty state, and restores all months on clear with no requests', async () => {
+    const mock = installFetchMock(
+      authenticatedBudgetsHandler(() => jsonResponse(serverOrderedBudgets()), {
+        categories: categoriesWithArchived(),
+      }),
+    )
+    renderApp('/budgets')
+
+    expect(await screen.findAllByRole('listitem')).toHaveLength(3)
+    const requestsBefore = requestLog(mock).length
+
+    const filter = screen.getByLabelText('Budget month')
+    expect(filter).toHaveAttribute(
+      'aria-describedby',
+      'budget-filter-month-help',
+    )
+    expect(
+      screen.getByText('Clear the month to show budgets for all months.'),
+    ).toBeInTheDocument()
+
+    fireEvent.change(filter, { target: { value: '2026-09' } })
+
+    const september = screen.getAllByRole('listitem')
+    expect(september).toHaveLength(1)
+    expect(
+      within(september[0]).getByText('September 2026'),
+    ).toBeInTheDocument()
+    expect(within(september[0]).getByText('$300.00')).toBeInTheDocument()
+    expect(within(september[0]).getByText('-$25.00')).toBeInTheDocument()
+    expect(screen.queryByText('October 2026')).not.toBeInTheDocument()
+    expect(screen.queryByText('August 2026')).not.toBeInTheDocument()
+    expect(budgetActionButton('edit', 10)).toBeInTheDocument()
+    expect(document.getElementById('budget-edit-30')).not.toBeInTheDocument()
+    expect(document.getElementById('budget-edit-20')).not.toBeInTheDocument()
+
+    fireEvent.change(filter, { target: { value: '2026-12' } })
+    expect(
+      screen.getByText('No budgets for December 2026.'),
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('listitem')).not.toBeInTheDocument()
+
+    fireEvent.change(filter, { target: { value: '' } })
+    const restored = screen.getAllByRole('listitem')
+    expect(restored).toHaveLength(3)
+    expect(within(restored[0]).getByText('October 2026')).toBeInTheDocument()
+    expect(within(restored[1]).getByText('September 2026')).toBeInTheDocument()
+    expect(within(restored[2]).getByText('August 2026')).toBeInTheDocument()
+
+    expect(requestLog(mock).length).toBe(requestsBefore)
   })
 })
 
@@ -1552,11 +1620,21 @@ describe('budget inline editing controls', () => {
 
     const first = screen.getByLabelText('Edit budget category')
     expect(first).toHaveFocus()
+    expect(screen.getByLabelText('Budget month')).toBeDisabled()
+    expect(
+      screen.getByText(
+        'Filtering is paused while a budget change is in progress.',
+      ),
+    ).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Cancel' }))
     expect(
       budgetActionButton('edit', 10),
     ).toHaveFocus()
+    expect(screen.getByLabelText('Budget month')).toBeEnabled()
+    expect(
+      screen.getByText('Clear the month to show budgets for all months.'),
+    ).toBeInTheDocument()
     expect(calls(mock, '/api/budgets/10/', 'PATCH')).toHaveLength(0)
     expect(calls(mock, '/api/auth/csrf/')).toHaveLength(0)
   })
@@ -2524,6 +2602,82 @@ describe('budget edit success and refresh', () => {
       expect(screen.getByRole('heading', { name: 'Budgets' })).toHaveFocus(),
     )
   })
+
+  it('retains the selected month when an edit moves the row out of view and shows the authoritative refetch', async () => {
+    const refreshGate = deferred<Response>()
+    let getCalls = 0
+    const initial = [
+      budgetFixture({
+        id: 10,
+        category: 2,
+        month: '2026-09-01',
+        budgeted: '300.00',
+        spent: '10.00',
+        remaining: '290.00',
+      }),
+    ]
+    const authoritative = [
+      budgetFixture({
+        id: 10,
+        category: 2,
+        month: '2026-10-01',
+        budgeted: '300.00',
+        spent: '99.99',
+        remaining: '200.01',
+      }),
+    ]
+    installFetchMock(
+      authenticatedBudgetsHandler((url, init) => {
+        if (url === '/api/budgets/10/' && (init?.method ?? 'GET') === 'PATCH') {
+          return jsonResponse(
+            budgetFixture({ id: 10, month: '2026-10-01', remaining: '999.99' }),
+          )
+        }
+        if (url === '/api/budgets/' && (init?.method ?? 'GET') === 'GET') {
+          getCalls += 1
+          if (getCalls === 1) return jsonResponse(initial)
+          return refreshGate.promise
+        }
+        return jsonResponse({}, 404)
+      }),
+    )
+    renderApp('/budgets')
+    await screen.findByText('September 2026')
+    const user = userEvent.setup()
+    fireEvent.change(screen.getByLabelText('Budget month'), {
+      target: { value: '2026-09' },
+    })
+    expect(screen.getAllByRole('listitem')).toHaveLength(1)
+
+    await user.click(budgetActionButton('edit', 10))
+    fireEvent.change(screen.getByLabelText('Edit budget month'), {
+      target: { value: '2026-10' },
+    })
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    await screen.findByText('Updating budgets…')
+    expect(screen.getByLabelText('Budget month')).toBeDisabled()
+    expect(screen.getByLabelText('Budget month')).toHaveValue('2026-09')
+
+    await act(async () => {
+      refreshGate.resolve(jsonResponse(authoritative))
+    })
+
+    await waitFor(() =>
+      expect(screen.getByRole('heading', { name: 'Budgets' })).toHaveFocus(),
+    )
+    expect(screen.getByLabelText('Budget month')).toBeEnabled()
+    expect(screen.getByLabelText('Budget month')).toHaveValue('2026-09')
+    expect(
+      screen.getByText('No budgets for September 2026.'),
+    ).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('Budget month'), {
+      target: { value: '' },
+    })
+    expect(await screen.findByText('October 2026')).toBeInTheDocument()
+    expect(screen.getByText('$200.01')).toBeInTheDocument()
+    expect(screen.queryByText('$999.99')).not.toBeInTheDocument()
+  })
 })
 
 describe('budget permanent deletion', () => {
@@ -2786,6 +2940,7 @@ describe('budget permanent deletion', () => {
     ).not.toBeInTheDocument()
     expect(budgetActionButton('delete', 20)).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Create budget' })).toBeDisabled()
+    expect(screen.getByLabelText('Budget month')).toBeDisabled()
     expect(
       screen.getByText(/finish or cancel your deletion/i),
     ).toBeInTheDocument()
@@ -3237,6 +3392,7 @@ describe('budget permanent deletion', () => {
     expect(
       budgetActionButton('delete', 20),
     ).toBeDisabled()
+    expect(screen.getByLabelText('Budget month')).toBeDisabled()
 
     await user.click(budgetActionButton('edit', 10))
     await user.click(budgetActionButton('delete', 10))
@@ -3256,6 +3412,7 @@ describe('budget permanent deletion', () => {
     expect(
       budgetActionButton('delete', 20),
     ).toBeDisabled()
+    expect(screen.getByLabelText('Budget month')).toBeDisabled()
 
     await act(async () => {
       refreshGate.resolve(jsonResponse([...deleteList(), created]))
@@ -3266,6 +3423,7 @@ describe('budget permanent deletion', () => {
     expect(budgetActionButton('edit', 20)).toBeEnabled()
     expect(budgetActionButton('delete', 10)).toBeEnabled()
     expect(budgetActionButton('delete', 20)).toBeEnabled()
+    expect(screen.getByLabelText('Budget month')).toBeEnabled()
     expect(calls(mock, '/api/budgets/', 'POST')).toHaveLength(1)
     expect(calls(mock, '/api/budgets/10/', 'DELETE')).toHaveLength(0)
     expect(calls(mock, '/api/budgets/10/', 'PATCH')).toHaveLength(0)

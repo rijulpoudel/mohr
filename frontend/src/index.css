@@ -2143,6 +2143,22 @@ a {
   font-size: 0.875rem;
 }
 
+.budgets-screen .budget-filter {
+  max-width: 20rem;
+  margin-block-end: var(--space-4);
+}
+
+.budgets-screen .budget-filter .input {
+  width: auto;
+  max-width: 12rem;
+}
+
+.budgets-screen .budget-filter-help {
+  margin: var(--space-1) 0 0;
+  color: var(--color-muted);
+  font-size: 0.75rem;
+}
+
 .budgets-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
