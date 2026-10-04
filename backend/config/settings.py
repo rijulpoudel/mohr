@@ -13,6 +13,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 from datetime import timedelta
 from pathlib import Path
 from typing import cast
+from urllib.parse import urlparse
 
 import environ
 from django.core.exceptions import ImproperlyConfigured
@@ -34,6 +35,11 @@ env = environ.Env(
     PLAID_TOKEN_KEYS=(str, ""),
     PLAID_WEBHOOK_INBOX_CAP=(int, 10000),
     PLAID_WEBHOOK_PROCESSED_RETENTION_DAYS=(int, 30),
+    GOOGLE_AUTH_ENABLED=(bool, False),
+    GOOGLE_CLIENT_ID=(str, ""),
+    GOOGLE_CLIENT_SECRET=(str, ""),
+    GOOGLE_REDIRECT_URI=(str, ""),
+    SESSION_ENGINE=(str, "django.contrib.sessions.backends.db"),
 )
 
 environ.Env.read_env(BASE_DIR / ".env")
@@ -51,6 +57,11 @@ CSRF_TRUSTED_ORIGINS = cast(list[str], env("DJANGO_CSRF_TRUSTED_ORIGINS"))
 # The frontend reads the CSRF cookie and echoes it in the X-CSRFToken header,
 # so the cookie must stay readable from JavaScript in every environment.
 CSRF_COOKIE_HTTPONLY = False
+
+# Mohr's Google flow stores its one-time state in the platform database
+# session so retention is covered without a new OAuth-flow model. Keep the
+# database-backed engine (the Django default) and never silently swap it.
+SESSION_ENGINE = env("SESSION_ENGINE")
 
 if PRODUCTION:
     if DEBUG:
@@ -78,6 +89,88 @@ if PRODUCTION:
     if not env("DATABASE_URL"):
         raise ImproperlyConfigured(
             "DATABASE_URL is required when DJANGO_PRODUCTION is enabled."
+        )
+
+
+# Google OpenID Connect sign-in (issue #120). Disabled by default: the
+# settings import succeeds without any Google credentials. When enabled, the
+# import fails closed unless every requirement below is met. Secrets stay
+# server-side and are never placed in a response or logged.
+GOOGLE_AUTH_ENABLED = env("GOOGLE_AUTH_ENABLED")
+GOOGLE_CLIENT_ID = env("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = env("GOOGLE_CLIENT_SECRET")
+GOOGLE_REDIRECT_URI = env("GOOGLE_REDIRECT_URI")
+
+GOOGLE_CALLBACK_PATH = "/api/auth/google/callback/"
+
+if GOOGLE_AUTH_ENABLED:
+    if not GOOGLE_CLIENT_ID.strip():
+        raise ImproperlyConfigured(
+            "GOOGLE_CLIENT_ID must be non-empty when GOOGLE_AUTH_ENABLED is enabled."
+        )
+    if not GOOGLE_CLIENT_SECRET.strip():
+        raise ImproperlyConfigured(
+            "GOOGLE_CLIENT_SECRET must be non-empty when GOOGLE_AUTH_ENABLED is enabled."
+        )
+    # Reject surrounding whitespace instead of silently validating a stripped
+    # copy that the runtime would not use. The configured value is the one
+    # sent to Google, so it must be exact.
+    if not GOOGLE_REDIRECT_URI or GOOGLE_REDIRECT_URI != GOOGLE_REDIRECT_URI.strip():
+        raise ImproperlyConfigured(
+            "GOOGLE_REDIRECT_URI must be a non-empty absolute URL with no "
+            "surrounding whitespace whose exact path is "
+            "/api/auth/google/callback/ when GOOGLE_AUTH_ENABLED is enabled."
+        )
+    try:
+        _google_redirect = urlparse(GOOGLE_REDIRECT_URI)
+        _google_port = _google_redirect.port
+    except ValueError:
+        raise ImproperlyConfigured(
+            "GOOGLE_REDIRECT_URI must be a valid absolute URL whose exact path "
+            "is /api/auth/google/callback/ when GOOGLE_AUTH_ENABLED is enabled."
+        ) from None
+    if (
+        not _google_redirect.scheme
+        or not _google_redirect.netloc
+        or _google_redirect.hostname is None
+        or _google_redirect.username is not None
+        or _google_redirect.password is not None
+        or _google_redirect.path != GOOGLE_CALLBACK_PATH
+        or _google_redirect.params
+        or _google_redirect.query
+        or _google_redirect.fragment
+        or _google_redirect.netloc.endswith(":")
+        or (_google_port is not None and not (0 < _google_port <= 65535))
+    ):
+        raise ImproperlyConfigured(
+            "GOOGLE_REDIRECT_URI must be an absolute URL whose exact path is "
+            "/api/auth/google/callback/, with no userinfo, query, or fragment, "
+            "when GOOGLE_AUTH_ENABLED is enabled."
+        )
+    if PRODUCTION:
+        if _google_redirect.scheme != "https":
+            raise ImproperlyConfigured(
+                "GOOGLE_REDIRECT_URI must use https when DJANGO_PRODUCTION is enabled."
+            )
+        if _google_redirect.hostname not in ALLOWED_HOSTS:
+            raise ImproperlyConfigured(
+                "GOOGLE_REDIRECT_URI host must be one of DJANGO_ALLOWED_HOSTS when "
+                "DJANGO_PRODUCTION is enabled."
+            )
+    elif _google_redirect.scheme == "http":
+        if _google_redirect.hostname not in ("localhost", "127.0.0.1"):
+            raise ImproperlyConfigured(
+                "GOOGLE_REDIRECT_URI may use http only for localhost or 127.0.0.1 "
+                "outside production."
+            )
+    elif _google_redirect.scheme != "https":
+        raise ImproperlyConfigured(
+            "GOOGLE_REDIRECT_URI must use https or a localhost http URL."
+        )
+    if SESSION_ENGINE != "django.contrib.sessions.backends.db":
+        raise ImproperlyConfigured(
+            "SESSION_ENGINE must be django.contrib.sessions.backends.db when "
+            "GOOGLE_AUTH_ENABLED is enabled."
         )
 
 
@@ -182,6 +275,9 @@ REST_FRAMEWORK = {
     # default throttle class is registered, so unrelated APIs are unaffected.
     "DEFAULT_THROTTLE_RATES": {
         "plaid_webhook": "60/min",
+        # Only the public Google start endpoint uses this scope; a normal
+        # browser performs one start per sign-in or link attempt.
+        "google_start": "60/min",
     },
 }
 

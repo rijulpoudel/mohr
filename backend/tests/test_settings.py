@@ -190,6 +190,37 @@ DUMP_PLAID_INBOX = textwrap.dedent(
 )
 
 
+DUMP_GOOGLE_DISABLED = textwrap.dedent(
+    """\
+    print(
+        json.dumps(
+            {
+                "enabled": getattr(settings, "GOOGLE_AUTH_ENABLED", None),
+                "client_id": getattr(settings, "GOOGLE_CLIENT_ID", None),
+                "redirect_uri": getattr(settings, "GOOGLE_REDIRECT_URI", None),
+            }
+        )
+    )
+    """
+)
+
+DUMP_GOOGLE_ENABLED = textwrap.dedent(
+    """\
+    print(
+        json.dumps(
+            {
+                "enabled": settings.GOOGLE_AUTH_ENABLED,
+                "client_id_set": bool(settings.GOOGLE_CLIENT_ID),
+                "secret_set": bool(settings.GOOGLE_CLIENT_SECRET),
+                "redirect_uri": settings.GOOGLE_REDIRECT_URI,
+                "session_engine": settings.SESSION_ENGINE,
+            }
+        )
+    )
+    """
+)
+
+
 def run_settings(env_overrides, body="pass"):
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -656,6 +687,228 @@ class PlaidSettingsTests(TestCase):
         self.assertIn("ImproperlyConfigured", result.stderr)
         self.assertIn("invalid Fernet key", result.stderr)
         self.assertNotIn("not-a-fernet-key", result.stderr)
+
+
+GOOGLE_ENABLED_ENV = {
+    "GOOGLE_AUTH_ENABLED": "True",
+    "GOOGLE_CLIENT_ID": "settings-test-google-client",
+    "GOOGLE_CLIENT_SECRET": "settings-test-google-secret",
+    "GOOGLE_REDIRECT_URI": "http://localhost/api/auth/google/callback/",
+}
+
+
+class GoogleSettingsTests(TestCase):
+    def test_google_disabled_is_default_and_requires_no_credentials(self):
+        result = run_settings({}, body=DUMP_GOOGLE_DISABLED)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertIs(payload["enabled"], False)
+
+    def test_google_disabled_ignores_incomplete_credentials(self):
+        env = {
+            "GOOGLE_AUTH_ENABLED": "",
+            "GOOGLE_CLIENT_ID": "",
+            "GOOGLE_CLIENT_SECRET": "",
+            "GOOGLE_REDIRECT_URI": "",
+        }
+        result = run_settings(env, body=DUMP_GOOGLE_DISABLED)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIs(json.loads(result.stdout)["enabled"], False)
+
+    def test_google_enabled_accepts_local_http_callback(self):
+        result = run_settings(GOOGLE_ENABLED_ENV, body=DUMP_GOOGLE_ENABLED)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertIs(payload["enabled"], True)
+        self.assertIs(payload["client_id_set"], True)
+        self.assertIs(payload["secret_set"], True)
+        self.assertEqual(
+            payload["redirect_uri"], "http://localhost/api/auth/google/callback/"
+        )
+        self.assertEqual(
+            payload["session_engine"], "django.contrib.sessions.backends.db"
+        )
+        combined = result.stdout + result.stderr
+        self.assertNotIn("settings-test-google-secret", combined)
+        self.assertNotIn("settings-test-google-client", combined)
+
+    def test_google_enabled_rejects_empty_client_id(self):
+        env = {**GOOGLE_ENABLED_ENV, "GOOGLE_CLIENT_ID": ""}
+        result = run_settings(env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ImproperlyConfigured", result.stderr)
+        self.assertIn("GOOGLE_CLIENT_ID", result.stderr)
+
+    def test_google_enabled_rejects_empty_secret(self):
+        env = {**GOOGLE_ENABLED_ENV, "GOOGLE_CLIENT_SECRET": " \t "}
+        result = run_settings(env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ImproperlyConfigured", result.stderr)
+        self.assertIn("GOOGLE_CLIENT_SECRET", result.stderr)
+        self.assertNotIn("\t", result.stderr)
+
+    def test_google_enabled_rejects_empty_redirect_uri(self):
+        env = {**GOOGLE_ENABLED_ENV, "GOOGLE_REDIRECT_URI": ""}
+        result = run_settings(env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ImproperlyConfigured", result.stderr)
+        self.assertIn("GOOGLE_REDIRECT_URI", result.stderr)
+
+    def test_google_enabled_rejects_wrong_callback_path(self):
+        env = {**GOOGLE_ENABLED_ENV, "GOOGLE_REDIRECT_URI": "http://localhost/nope/"}
+        result = run_settings(env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ImproperlyConfigured", result.stderr)
+        self.assertIn("/api/auth/google/callback/", result.stderr)
+
+    def test_google_enabled_rejects_plain_http_callback_for_a_non_local_host(self):
+        env = {
+            **GOOGLE_ENABLED_ENV,
+            "GOOGLE_REDIRECT_URI": "http://mohr.example/api/auth/google/callback/",
+        }
+        result = run_settings(env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ImproperlyConfigured", result.stderr)
+        self.assertNotIn("mohr.example", result.stderr)
+
+    def test_google_enabled_rejects_whitespace_padded_redirect_uri(self):
+        env = {
+            **GOOGLE_ENABLED_ENV,
+            "GOOGLE_REDIRECT_URI": " http://localhost/api/auth/google/callback/ ",
+        }
+        result = run_settings(env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ImproperlyConfigured", result.stderr)
+        self.assertIn("GOOGLE_REDIRECT_URI", result.stderr)
+
+    def test_google_enabled_rejects_userinfo_in_redirect_uri(self):
+        env = {
+            **GOOGLE_ENABLED_ENV,
+            "GOOGLE_REDIRECT_URI": (
+                "http://user:pass@localhost/api/auth/google/callback/"
+            ),
+        }
+        result = run_settings(env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ImproperlyConfigured", result.stderr)
+        self.assertIn("GOOGLE_REDIRECT_URI", result.stderr)
+        self.assertNotIn("user:pass", result.stderr)
+
+    def test_google_enabled_rejects_an_imprecise_callback_path(self):
+        env = {
+            **GOOGLE_ENABLED_ENV,
+            "GOOGLE_REDIRECT_URI": ("http://localhost/evil/api/auth/google/callback/"),
+        }
+        result = run_settings(env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ImproperlyConfigured", result.stderr)
+        self.assertIn("/api/auth/google/callback/", result.stderr)
+
+    def test_google_enabled_rejects_a_fragment_hidden_callback_path(self):
+        env = {
+            **GOOGLE_ENABLED_ENV,
+            "GOOGLE_REDIRECT_URI": "http://localhost/#/api/auth/google/callback/",
+        }
+        result = run_settings(env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ImproperlyConfigured", result.stderr)
+        self.assertIn("/api/auth/google/callback/", result.stderr)
+
+    def test_google_enabled_rejects_a_query_on_the_callback(self):
+        env = {
+            **GOOGLE_ENABLED_ENV,
+            "GOOGLE_REDIRECT_URI": (
+                "http://localhost/api/auth/google/callback/?next=/"
+            ),
+        }
+        result = run_settings(env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ImproperlyConfigured", result.stderr)
+        self.assertIn("/api/auth/google/callback/", result.stderr)
+
+    def test_google_enabled_rejects_an_invalid_port(self):
+        for uri in (
+            "http://localhost:70000/api/auth/google/callback/",
+            "http://localhost:notaport/api/auth/google/callback/",
+            "http://localhost:/api/auth/google/callback/",
+        ):
+            with self.subTest(uri=uri):
+                env = {**GOOGLE_ENABLED_ENV, "GOOGLE_REDIRECT_URI": uri}
+                result = run_settings(env)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("ImproperlyConfigured", result.stderr)
+                self.assertIn("GOOGLE_REDIRECT_URI", result.stderr)
+
+    def test_google_enabled_rejects_a_malformed_redirect_uri(self):
+        env = {
+            **GOOGLE_ENABLED_ENV,
+            "GOOGLE_REDIRECT_URI": "http://[::1/api/auth/google/callback/",
+        }
+        result = run_settings(env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ImproperlyConfigured", result.stderr)
+        self.assertIn("GOOGLE_REDIRECT_URI", result.stderr)
+
+    def test_google_enabled_production_requires_https_and_allowed_host(self):
+        env = {
+            **PRODUCTION_ENV,
+            **GOOGLE_ENABLED_ENV,
+            "GOOGLE_REDIRECT_URI": "https://api.mohr.example/api/auth/google/callback/",
+        }
+        result = run_settings(env, body=DUMP_GOOGLE_ENABLED)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIs(json.loads(result.stdout)["enabled"], True)
+
+    def test_google_enabled_production_rejects_plain_http_callback(self):
+        env = {
+            **PRODUCTION_ENV,
+            **GOOGLE_ENABLED_ENV,
+            "GOOGLE_REDIRECT_URI": "http://api.mohr.example/api/auth/google/callback/",
+        }
+        result = run_settings(env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ImproperlyConfigured", result.stderr)
+        self.assertNotIn("http://api.mohr.example", result.stderr)
+
+    def test_google_enabled_production_rejects_unknown_callback_host(self):
+        env = {
+            **PRODUCTION_ENV,
+            **GOOGLE_ENABLED_ENV,
+            "GOOGLE_REDIRECT_URI": "https://other.example/api/auth/google/callback/",
+        }
+        result = run_settings(env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ImproperlyConfigured", result.stderr)
+        self.assertNotIn("other.example", result.stderr)
+
+    def test_google_enabled_rejects_a_non_database_session_engine(self):
+        env = {
+            **GOOGLE_ENABLED_ENV,
+            "SESSION_ENGINE": "django.contrib.sessions.backends.cache",
+        }
+        result = run_settings(env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ImproperlyConfigured", result.stderr)
+        self.assertIn("SESSION_ENGINE", result.stderr)
 
 
 class PlaidInboxSettingsTests(TestCase):
