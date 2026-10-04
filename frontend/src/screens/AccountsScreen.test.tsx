@@ -172,6 +172,16 @@ describe('accounts list', () => {
     expect(within(activeItems[1]).getByText('Current balance')).toBeInTheDocument()
     expect(within(activeItems[0]).getByText('Opening balance')).toBeInTheDocument()
     expect(within(activeItems[1]).getByText('Opening balance')).toBeInTheDocument()
+    expect(
+      within(activeItems[0])
+        .getByText('Current balance')
+        .closest('.accounts-balance'),
+    ).toHaveClass('accounts-balance-current')
+    expect(
+      within(activeItems[0])
+        .getByText('Opening balance')
+        .closest('.accounts-balance'),
+    ).not.toHaveClass('accounts-balance-current')
     const archivedItems = within(archived).getAllByRole('listitem')
     expect(archivedItems).toHaveLength(1)
     expect(archivedItems[0]).toHaveTextContent('Old Card')
@@ -529,13 +539,13 @@ describe('accounts summary and sections', () => {
     expect(archivedItems[1]).toHaveTextContent('Archived Second')
   })
 
-  it('links the header Add account action to the create form card', async () => {
+  it('links the header Add account action to the focusable create heading with accounts before the summary sidebar', async () => {
     installFetchMock(authenticatedHandler(() => jsonResponse([accountFixture()])))
     renderApp('/accounts')
     await screen.findAllByText('Everyday Checking')
 
     const addLink = screen.getByRole('link', { name: 'Add account' })
-    expect(addLink).toHaveAttribute('href', '#account-create')
+    expect(addLink).toHaveAttribute('href', '#account-create-heading')
     expect(addLink.closest('header')).not.toBeNull()
     expect(screen.getByText('ACCOUNTS')).toBeInTheDocument()
     expect(
@@ -547,11 +557,29 @@ describe('accounts summary and sections', () => {
 
     const createCard = document.getElementById('account-create')
     expect(createCard).not.toBeNull()
+    const createHeading = within(createCard as HTMLElement).getByRole('heading', {
+      name: 'Add account',
+    })
+    expect(createHeading).toHaveAttribute('id', 'account-create-heading')
+    expect(createHeading).toHaveAttribute('tabindex', '-1')
+
+    const collection = document.querySelector('.accounts-collection')
+    const sidebar = document.querySelector('.accounts-sidebar')
+    const summary = document.querySelector('.accounts-summary')
+    expect(collection).not.toBeNull()
+    expect(sidebar).not.toBeNull()
+    expect(summary).not.toBeNull()
+    // The accounts come first, and the summary lives in the sidebar that
+    // follows the collection in the DOM.
     expect(
-      within(createCard as HTMLElement).getByRole('heading', {
-        name: 'Add account',
-      }),
-    ).toBeInTheDocument()
+      collection!.compareDocumentPosition(sidebar!) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+    expect(
+      collection!.compareDocumentPosition(summary!) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+    expect(sidebar!.contains(summary)).toBe(true)
   })
 
   it('keeps a pending account inside Active accounts while excluding it from the positive-balance chart', async () => {
