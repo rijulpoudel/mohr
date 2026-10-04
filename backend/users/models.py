@@ -27,6 +27,10 @@ class UserManager(BaseUserManager):
 class User(AbstractUser):
     username = None
     email = models.EmailField(unique=True)
+    # Stable, opaque Google subject identifier. Null until the owner
+    # explicitly links a Google identity; unique so one Google account can
+    # never sign in as two Mohr users.
+    google_sub = models.CharField(max_length=255, unique=True, null=True, blank=True)
 
     USERNAME_FIELD = "email"
     REQUIRED_FIELDS = []

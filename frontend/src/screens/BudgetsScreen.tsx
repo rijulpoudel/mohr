@@ -889,6 +889,7 @@ export function BudgetsScreen() {
   const [deletePending, setDeletePending] = useState(false)
   const [createPending, setCreatePending] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
+  const [selectedMonth, setSelectedMonth] = useState('')
   const metaPromiseRef = useRef<Promise<Category[]> | null>(null)
   const requestSeqRef = useRef(0)
   const mutationSeqRef = useRef<number | null>(null)
@@ -1100,6 +1101,11 @@ export function BudgetsScreen() {
     refreshing ||
     editingId !== null ||
     deletingId !== null
+  const budgets = state.status === 'ready' ? state.budgets : []
+  const visibleBudgets =
+    selectedMonth === ''
+      ? budgets
+      : budgets.filter((budget) => budget.month.slice(0, 7) === selectedMonth)
 
   return (
     <div className="screen budgets-screen">
@@ -1111,6 +1117,25 @@ export function BudgetsScreen() {
           Remaining budget is not available cash.
         </p>
       </header>
+      <div className="budget-filter form-field">
+        <label htmlFor="budget-filter-month">Budget month</label>
+        <input
+          id="budget-filter-month"
+          className="input"
+          type="month"
+          name="budget-month"
+          autoComplete="off"
+          value={selectedMonth}
+          onChange={(event) => setSelectedMonth(event.target.value)}
+          disabled={state.status !== 'ready' || rowLocked}
+          aria-describedby="budget-filter-month-help"
+        />
+        <p id="budget-filter-month-help" className="budget-filter-help">
+          {rowLocked
+            ? 'Filtering is paused while a budget change is in progress.'
+            : 'Clear the month to show budgets for all months.'}
+        </p>
+      </div>
       <div className="budgets-layout">
         <section
           className="budgets-collection"
@@ -1144,13 +1169,15 @@ export function BudgetsScreen() {
             </div>
           )}
           {state.status === 'ready' &&
-            (state.budgets.length === 0 ? (
+            (visibleBudgets.length === 0 ? (
               <p className="empty-state">
-                No budgets exist yet. Budgets you create will appear here.
+                {selectedMonth === ''
+                  ? 'No budgets exist yet. Budgets you create will appear here.'
+                  : `No budgets for ${formatMonthLabel(selectedMonth)}.`}
               </p>
             ) : (
               <ul className="budget-list">
-                {state.budgets.map((budget) =>
+                {visibleBudgets.map((budget) =>
                   editingId === budget.id ? (
                     <EditBudgetForm
                       key={budget.id}

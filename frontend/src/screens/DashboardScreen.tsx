@@ -8,6 +8,7 @@ import {
 import { ApiError, userMessage } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
 import { BankSyncNotice } from '../components/BankSyncNotice'
+import { GoogleSignInButton } from '../components/GoogleSignInButton'
 import { MetricCard } from '../components/arc/MetricCard'
 import {
   clampedPercent,
@@ -364,14 +365,17 @@ export function DashboardScreen() {
           </p>
           <p className="dashboard-user">Signed in as {user?.email}</p>
         </div>
-        <button
-          type="button"
-          className="btn btn-secondary"
-          onClick={handleLogout}
-          disabled={pending}
-        >
-          {pending ? 'Signing out…' : 'Sign out'}
-        </button>
+        <div className="dashboard-header-actions">
+          <GoogleSignInButton intent="link" next="/" />
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={handleLogout}
+            disabled={pending}
+          >
+            {pending ? 'Signing out…' : 'Sign out'}
+          </button>
+        </div>
       </div>
       {logoutError !== null && (
         <div className="error-summary" role="alert">

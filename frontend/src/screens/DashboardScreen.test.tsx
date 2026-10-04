@@ -866,11 +866,9 @@ describe('dashboard session expiry', () => {
     )
     expect(await screen.findByLabelText('Email')).toBeInTheDocument()
     expect(window.location.pathname).toBe('/login')
-    expect(requestLog(mock)).toEqual([
-      'GET /api/auth/me/',
-      'GET /api/plaid/connections/',
-      'GET /api/dashboard/summary/',
-    ])
+    expect(requestLog(mock)[0]).toBe('GET /api/auth/me/')
+    expect(calls(mock, '/api/dashboard/summary/')).toHaveLength(1)
+    expect(calls(mock, '/api/auth/logout/', 'POST')).toHaveLength(0)
     expect(localStorage.length).toBe(0)
     expect(sessionStorage.length).toBe(0)
   })
@@ -903,13 +901,8 @@ describe('logout from the dashboard', () => {
     )
     expect(await screen.findByLabelText('Email')).toBeInTheDocument()
     expect(window.location.pathname).toBe('/login')
-    expect(requestLog(mock)).toEqual([
-      'GET /api/auth/me/',
-      'GET /api/plaid/connections/',
-      'GET /api/dashboard/summary/',
-      'GET /api/auth/csrf/',
-      'POST /api/auth/logout/',
-    ])
+    expect(requestLog(mock)[0]).toBe('GET /api/auth/me/')
+    expect(calls(mock, '/api/auth/csrf/')).toHaveLength(1)
     const logoutCalls = calls(mock, '/api/auth/logout/', 'POST')
     expect(logoutCalls).toHaveLength(1)
     const init = logoutCalls[0][1]
@@ -1262,6 +1255,45 @@ describe('bank sync notice', () => {
         screen.queryByRole('region', { name: 'Bank sync status' }),
       ).not.toBeInTheDocument(),
     )
+  })
+
+  it('shows an explicit Google link control when sign-in is enabled', async () => {
+    installFetchMock((url) => {
+      if (url === '/api/auth/me/') {
+        return jsonResponse({ id: 1, email: 'student@example.com' })
+      }
+      if (url === '/api/plaid/connections/') return jsonResponse([])
+      if (url === '/api/dashboard/summary/') return jsonResponse(summaryFixture())
+      if (url === '/api/auth/google/config/') {
+        return jsonResponse({ enabled: true, linked: false })
+      }
+      return jsonResponse({}, 404)
+    })
+    renderApp('/')
+
+    expect(
+      await screen.findByRole('button', { name: 'Link Google account' }),
+    ).toBeInTheDocument()
+  })
+
+  it('shows the connected state without a link button once linked', async () => {
+    installFetchMock((url) => {
+      if (url === '/api/auth/me/') {
+        return jsonResponse({ id: 1, email: 'student@example.com' })
+      }
+      if (url === '/api/plaid/connections/') return jsonResponse([])
+      if (url === '/api/dashboard/summary/') return jsonResponse(summaryFixture())
+      if (url === '/api/auth/google/config/') {
+        return jsonResponse({ enabled: true, linked: true })
+      }
+      return jsonResponse({}, 404)
+    })
+    renderApp('/')
+
+    expect(await screen.findByText('Google connected')).toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Link Google account' }),
+    ).not.toBeInTheDocument()
   })
 
   it('clears the session on a 401 without rendering a bank notice', async () => {

@@ -1,7 +1,8 @@
 import { useState, type FormEvent } from 'react'
-import { Link, useLocation, useNavigate } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { ApiError, userMessage, type FieldErrors } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
+import { GoogleSignInButton } from '../components/GoogleSignInButton'
 import { privateDestination } from '../routes/guards'
 
 interface LoginScreenState {
@@ -15,7 +16,15 @@ export function LoginScreen() {
   const { login } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
+  const [searchParams] = useSearchParams()
   const state = (location.state ?? {}) as LoginScreenState
+  const googleParam = searchParams.get('google')
+  const googleNotice =
+    googleParam === 'link-required'
+      ? 'An account with this email already exists. Sign in with your password, then link Google from your dashboard.'
+      : googleParam === 'failed'
+        ? 'Google sign-in could not be completed. Please try again.'
+        : null
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [pending, setPending] = useState(false)
@@ -55,6 +64,14 @@ export function LoginScreen() {
       {state.notice !== undefined && (
         <p className="notice" role="status">
           {state.notice}
+        </p>
+      )}
+      {googleNotice !== null && (
+        <p
+          className="notice"
+          role={googleParam === 'failed' ? 'alert' : 'status'}
+        >
+          {googleNotice}
         </p>
       )}
       {summary !== null && (
@@ -117,6 +134,10 @@ export function LoginScreen() {
           {pending ? 'Signing in…' : 'Sign in'}
         </button>
       </form>
+      <GoogleSignInButton
+        intent="sign-in"
+        next={state.from?.pathname ?? '/'}
+      />
       <p className="screen-alt">
         New to Mohr? <Link to="/register">Create an account</Link>
       </p>

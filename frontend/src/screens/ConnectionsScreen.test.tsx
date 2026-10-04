@@ -887,7 +887,7 @@ describe('connections session expiry', () => {
 
     expect(await screen.findByLabelText('Email')).toBeInTheDocument()
     expect(window.location.pathname).toBe('/login')
-    expect(requestLog(mock)).toEqual([
+    expect(requestLog(mock).slice(0, 2)).toEqual([
       'GET /api/auth/me/',
       'GET /api/plaid/connections/',
     ])

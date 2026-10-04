@@ -258,6 +258,24 @@ describe('transactions list', () => {
     expect(within(items[2]).getByText('-$45.00')).toBeInTheDocument()
     expect(within(items[1]).queryByText('Groceries')).not.toBeInTheDocument()
 
+    // Direction tones come from the semantic transaction_type field, not from
+    // parsing the formatted amount, so the +/− sign and the label stay the
+    // accessible key while color only reinforces them.
+    const incomeAmount = within(items[0]).getByText('+$2,500.00')
+    const expenseAmount = within(items[1]).getByText('-$12.50')
+    expect(incomeAmount).toHaveClass('transaction-amount-income')
+    expect(incomeAmount).not.toHaveClass('transaction-amount-expense')
+    expect(expenseAmount).toHaveClass('transaction-amount-expense')
+    expect(expenseAmount).not.toHaveClass('transaction-amount-income')
+    expect(within(items[0]).getByText('Income')).toHaveClass(
+      'transaction-type-income',
+    )
+    expect(within(items[2]).getByText('Expense')).toHaveClass(
+      'transaction-type-expense',
+    )
+    expect(items[0].querySelector('.transaction-mark-income')).not.toBeNull()
+    expect(items[1].querySelector('.transaction-mark-expense')).not.toBeNull()
+
     expect(within(items[0]).getByText('Savings')).toBeInTheDocument()
     expect(within(items[0]).getByText('Salary')).toBeInTheDocument()
     expect(within(items[1]).getByText('Everyday Checking')).toBeInTheDocument()
@@ -4459,7 +4477,18 @@ describe('transaction transfer marking', () => {
     expect(within(item).getByText('Transfer')).toBeInTheDocument()
     expect(within(item).getByText('Other side unverified')).toBeInTheDocument()
     expect(within(item).queryByText('Expense')).not.toBeInTheDocument()
-    expect(within(item).getByText('-$12.50')).toBeInTheDocument()
+    const transferAmount = within(item).getByText('-$12.50')
+    expect(transferAmount).toBeInTheDocument()
+    // A marked transfer is neutral even though its transaction_type is expense,
+    // so a card payment is never tinted green as if it were income.
+    expect(transferAmount).toHaveClass('transaction-amount-transfer')
+    expect(transferAmount).not.toHaveClass('transaction-amount-expense')
+    expect(transferAmount).not.toHaveClass('transaction-amount-income')
+    expect(within(item).getByText('Transfer')).toHaveClass(
+      'transaction-type-transfer',
+    )
+    expect(item.querySelector('.transaction-mark-transfer')).not.toBeNull()
+    expect(item.querySelector('.transaction-mark-expense')).toBeNull()
   })
 })
 
@@ -6272,6 +6301,12 @@ describe('transactions result summary', () => {
     expect(screen.getByText('3 transactions shown')).toBeInTheDocument()
     expect(screen.getByText('Money in $2,500.00')).toBeInTheDocument()
     expect(screen.getByText('Money out $57.50')).toBeInTheDocument()
+    expect(screen.getByText('Money in $2,500.00')).toHaveClass(
+      'transactions-summary-money-in',
+    )
+    expect(screen.getByText('Money out $57.50')).toHaveClass(
+      'transactions-summary-money-out',
+    )
   })
 
   it('excludes pending and still-importing rows from money figures but keeps them in the count', async () => {
@@ -6315,6 +6350,9 @@ describe('transactions result summary', () => {
     expect(screen.getByText('Money in $100.00')).toBeInTheDocument()
     expect(screen.getByText('Money out $0.00')).toBeInTheDocument()
     expect(screen.queryByText('Money out $75.00')).not.toBeInTheDocument()
+    // A zero figure stays neutral; only an actual settled outflow turns red.
+    expect(document.querySelector('.transactions-summary-money-in')).not.toBeNull()
+    expect(document.querySelector('.transactions-summary-money-out')).toBeNull()
   })
 
   it('shows the scope caption even when every row is settled', async () => {
