@@ -420,11 +420,6 @@ a {
   background: var(--color-surface);
 }
 
-.transaction-create {
-  max-width: 32rem;
-  margin-block-end: var(--space-6);
-}
-
 .transaction-create h3 {
   margin: 0 0 var(--space-4);
   font-size: 1rem;
@@ -972,6 +967,30 @@ a {
    the new visual design on top of the same class hooks; the legacy
    .transaction-* rules keep their meaning untouched. */
 
+.transactions-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-4);
+  margin-block-end: var(--space-6);
+}
+
+.transactions-header h2 {
+  margin: 0;
+}
+
+.transactions-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-6);
+  align-items: start;
+}
+
+.transactions-history {
+  min-width: 0;
+}
+
 .transactions-toolbar {
   border-radius: 0.75rem;
   grid-template-columns: repeat(auto-fit, minmax(min(12.5rem, 100%), 1fr));
@@ -1054,12 +1073,25 @@ a {
   padding: 0;
 }
 
-.transactions-list .transaction-main {
+/* Ordinary ledger rows form a two-column grid so the identity and the signed
+   amount share one line while the action group stays end-aligned on the right.
+   Edit/delete rows are excluded and keep their full-width forms. */
+.transactions-list
+  .transaction-item:not(.transaction-edit):not(.transaction-delete) {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) auto;
   grid-template-areas:
-    'mark identity'
-    'mark amount';
+    'main actions'
+    'meta actions';
+  align-items: center;
+  column-gap: var(--space-4);
+}
+
+.transactions-list .transaction-main {
+  grid-area: main;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: 'mark identity amount';
   align-items: center;
   column-gap: var(--space-3);
 }
@@ -1118,12 +1150,39 @@ a {
 }
 
 .transactions-list .transaction-meta {
+  grid-area: meta;
   align-items: center;
   gap: var(--space-1) var(--space-3);
 }
 
-.transactions-list .transaction-note {
-  margin: 0;
+.transactions-list .transaction-meta > * {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.transactions-list .transaction-actions {
+  grid-area: actions;
+  align-self: center;
+  justify-self: end;
+  margin-block-start: 0;
+}
+
+/* On narrow screens the row collapses to one column so the action group drops
+   below the identity and metadata instead of squeezing the signed amount. */
+@media (max-width: 36rem) {
+  .transactions-list
+    .transaction-item:not(.transaction-edit):not(.transaction-delete) {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      'main'
+      'meta'
+      'actions';
+  }
+
+  .transactions-list .transaction-actions {
+    justify-self: start;
+  }
 }
 
 .transactions-badge {
@@ -1193,10 +1252,19 @@ a {
 }
 
 .transactions-create {
+  min-width: 0;
   padding: var(--space-6);
   border: 1px solid var(--color-border);
   border-radius: 0.75rem;
   background: var(--color-surface);
+}
+
+#transaction-create-heading {
+  scroll-margin-top: calc(var(--shell-header-height) + var(--space-4));
+}
+
+.transactions-create .form {
+  margin-block-end: 0;
 }
 
 @media (max-width: 36rem) {
@@ -1646,6 +1714,10 @@ a {
   .accounts-pending-note {
     grid-column: 1 / -1;
     grid-row: 2;
+  }
+
+  .transactions-layout {
+    grid-template-columns: minmax(0, 1fr) 20rem;
   }
 }
 

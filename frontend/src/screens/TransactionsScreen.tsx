@@ -391,6 +391,8 @@ function TransactionItem({
   const categoryName = categoryById.get(transaction.category)?.name
   const context = transactionContext(transaction, categoryName, accountName)
   const mark = (categoryName ?? '?').slice(0, 1) || '?'
+  const hasNote = transaction.note.trim() !== ''
+  const title = hasNote ? transaction.note : categoryName ?? UNCATEGORIZED_LABEL
   return (
     <li className="transaction-item">
       <div className="transaction-main">
@@ -401,9 +403,7 @@ function TransactionItem({
           {mark}
         </span>
         <div className="transactions-identity">
-          <span className="transactions-title">
-            {categoryName ?? UNCATEGORIZED_LABEL}
-          </span>
+          <span className="transactions-title">{title}</span>
           <span
             className={
               transaction.is_transfer
@@ -425,6 +425,7 @@ function TransactionItem({
       <div className="transaction-meta">
         <time dateTime={transaction.date}>{transaction.date}</time>
         {accountName !== undefined && <span>{accountName}</span>}
+        {hasNote && <span>{categoryName ?? UNCATEGORIZED_LABEL}</span>}
         {transaction.is_transfer && <span>Other side unverified</span>}
         {transaction.source === 'plaid' && (
           <span className="transaction-source transactions-badge transactions-badge-synced">
@@ -447,9 +448,6 @@ function TransactionItem({
           <span className="transaction-source transactions-badge transactions-badge-importing">
             History still importing
           </span>
-        )}
-        {transaction.note !== '' && (
-          <span className="transaction-note">{transaction.note}</span>
         )}
       </div>
       <div className="transaction-actions">
@@ -1205,7 +1203,9 @@ function CreateTransactionForm({
       className="transaction-create transactions-create"
       aria-labelledby="transaction-create-heading"
     >
-      <h3 id="transaction-create-heading">Add transaction</h3>
+      <h3 id="transaction-create-heading" tabIndex={-1}>
+        Add transaction
+      </h3>
       {created && (
         <p role="status" className="notice">
           Transaction created.
@@ -1704,226 +1704,238 @@ export function TransactionsScreen() {
 
   return (
     <div className="screen">
-      <h2 ref={headingRef} tabIndex={-1}>
-        Transactions
-      </h2>
-      <CreateTransactionForm
-        accounts={accounts}
-        categories={categories}
-        setupLoaded={state.status === 'ready'}
-        onCreated={handleTransactionCreated}
-        submitLocked={filtersLocked}
-      />
-      <section
-        className="transaction-filters transactions-toolbar"
-        aria-describedby={
-          editingId !== null || deletingId !== null
-            ? 'transactions-filters-locked-hint'
-            : undefined
-        }
-      >
-        {editingId !== null && (
-          <p id="transactions-filters-locked-hint" className="notice">
-            Finish or cancel your edit to change filters.
-          </p>
-        )}
-        {editingId === null && deletingId !== null && (
-          <p id="transactions-filters-locked-hint" className="notice">
-            Finish or cancel your deletion to change filters.
-          </p>
-        )}
-        <div className="form-field">
-          <label htmlFor="transactions-account">Account</label>
-          <select
-            id="transactions-account"
-            className="select"
-            name="account"
-            value={draft.account}
-            onChange={(event) => handleDraftChange({ account: event.target.value })}
-            disabled={filtersLocked}
-          >
-            <option value="">All</option>
-            {accounts.map((account) => (
-              <option key={account.id} value={account.id}>
-                {account.name}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className="form-field">
-          <label htmlFor="transactions-category">Category</label>
-          <select
-            id="transactions-category"
-            className="select"
-            name="category"
-            value={draft.category}
-            onChange={(event) =>
-              handleDraftChange({ category: event.target.value })
-            }
-            disabled={filtersLocked}
-          >
-            <option value="">All</option>
-            {categories.map((category) => (
-              <option key={category.id} value={category.id}>
-                {category.name}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className="form-field">
-          <label aria-hidden="true">Transaction type</label>
-          <SegmentedControl
-            options={TYPE_FILTER_OPTIONS}
-            value={draft.type}
-            onValueChange={(value) => handleDraftChange({ type: value })}
-            label="Transaction type"
-            disabled={filtersLocked}
-          />
-        </div>
-        <div className="form-field">
-          <label htmlFor="transactions-start">Start date</label>
-          <input
-            id="transactions-start"
-            className="input"
-            type="date"
-            name="start_date"
-            value={draft.start}
-            onChange={(event) => handleDraftChange({ start: event.target.value })}
-            disabled={filtersLocked}
-          />
-        </div>
-        <div className="form-field">
-          <label htmlFor="transactions-end">End date</label>
-          <input
-            id="transactions-end"
-            className="input"
-            type="date"
-            name="end_date"
-            value={draft.end}
-            onChange={(event) => handleDraftChange({ end: event.target.value })}
-            disabled={filtersLocked}
-            aria-invalid={dateError !== null}
+      <header className="transactions-header">
+        <h2 ref={headingRef} tabIndex={-1}>
+          Transactions
+        </h2>
+        <a className="btn btn-secondary" href="#transaction-create-heading">
+          Add transaction
+        </a>
+      </header>
+      <div className="transactions-layout">
+        <section
+          className="transactions-history"
+          aria-label="Transaction history"
+        >
+          <section
+            className="transaction-filters transactions-toolbar"
             aria-describedby={
-              dateError !== null ? 'transactions-end-date-error' : undefined
+              editingId !== null || deletingId !== null
+                ? 'transactions-filters-locked-hint'
+                : undefined
             }
-          />
-          {dateError !== null && (
-            <p id="transactions-end-date-error" className="field-errors" role="alert">
-              {dateError}
+          >
+            {editingId !== null && (
+              <p id="transactions-filters-locked-hint" className="notice">
+                Finish or cancel your edit to change filters.
+              </p>
+            )}
+            {editingId === null && deletingId !== null && (
+              <p id="transactions-filters-locked-hint" className="notice">
+                Finish or cancel your deletion to change filters.
+              </p>
+            )}
+            <div className="form-field">
+              <label htmlFor="transactions-account">Account</label>
+              <select
+                id="transactions-account"
+                className="select"
+                name="account"
+                value={draft.account}
+                onChange={(event) => handleDraftChange({ account: event.target.value })}
+                disabled={filtersLocked}
+              >
+                <option value="">All</option>
+                {accounts.map((account) => (
+                  <option key={account.id} value={account.id}>
+                    {account.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="form-field">
+              <label htmlFor="transactions-category">Category</label>
+              <select
+                id="transactions-category"
+                className="select"
+                name="category"
+                value={draft.category}
+                onChange={(event) =>
+                  handleDraftChange({ category: event.target.value })
+                }
+                disabled={filtersLocked}
+              >
+                <option value="">All</option>
+                {categories.map((category) => (
+                  <option key={category.id} value={category.id}>
+                    {category.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="form-field">
+              <label aria-hidden="true">Transaction type</label>
+              <SegmentedControl
+                options={TYPE_FILTER_OPTIONS}
+                value={draft.type}
+                onValueChange={(value) => handleDraftChange({ type: value })}
+                label="Transaction type"
+                disabled={filtersLocked}
+              />
+            </div>
+            <div className="form-field">
+              <label htmlFor="transactions-start">Start date</label>
+              <input
+                id="transactions-start"
+                className="input"
+                type="date"
+                name="start_date"
+                value={draft.start}
+                onChange={(event) => handleDraftChange({ start: event.target.value })}
+                disabled={filtersLocked}
+              />
+            </div>
+            <div className="form-field">
+              <label htmlFor="transactions-end">End date</label>
+              <input
+                id="transactions-end"
+                className="input"
+                type="date"
+                name="end_date"
+                value={draft.end}
+                onChange={(event) => handleDraftChange({ end: event.target.value })}
+                disabled={filtersLocked}
+                aria-invalid={dateError !== null}
+                aria-describedby={
+                  dateError !== null ? 'transactions-end-date-error' : undefined
+                }
+              />
+              {dateError !== null && (
+                <p id="transactions-end-date-error" className="field-errors" role="alert">
+                  {dateError}
+                </p>
+              )}
+            </div>
+            {hasActiveFilters(draft) && (
+              <button
+                type="button"
+                className="btn transactions-clear-filters"
+                onClick={handleClearFilters}
+                disabled={filtersLocked}
+              >
+                Clear all filters
+              </button>
+            )}
+          </section>
+          {state.status === 'ready' && state.transactions.length > 0 && (
+            <ResultSummary
+              transactions={state.transactions}
+              syncPendingAccountIds={syncPendingAccountIds}
+            />
+          )}
+          {state.status === 'loading' && (
+            <p role="status" className="transactions-status">
+              Loading your transactions…
             </p>
           )}
-        </div>
-        {hasActiveFilters(draft) && (
-          <button
-            type="button"
-            className="btn transactions-clear-filters"
-            onClick={handleClearFilters}
-            disabled={filtersLocked}
-          >
-            Clear all filters
-          </button>
-        )}
-      </section>
-      {state.status === 'ready' && state.transactions.length > 0 && (
-        <ResultSummary
-          transactions={state.transactions}
-          syncPendingAccountIds={syncPendingAccountIds}
-        />
-      )}
-      {state.status === 'loading' && (
-        <p role="status" className="transactions-status">
-          Loading your transactions…
-        </p>
-      )}
-      {refreshing && state.status === 'ready' && (
-        <p role="status" className="transactions-status">
-          Updating results…
-        </p>
-      )}
-      {state.status === 'error' && (
-        <div className="error-summary transactions-error" role="alert">
-          <p>{state.message}</p>
-          <button type="button" className="btn" onClick={handleRetry}>
-            Retry
-          </button>
-        </div>
-      )}
-      {updateNotice !== null && state.status === 'ready' && (
-        <p role="status" className="notice">
-          {updateNotice}
-        </p>
-      )}
-      {hasSyncedTransactions && (
-        <p className="transaction-retention-note transactions-retention-note">
-          Bank-synced transactions are kept for the audit trail and cannot be
-          deleted.
-        </p>
-      )}
-      {state.status === 'ready' &&
-        (state.transactions.length === 0 ? (
-          hasActiveFilters(draft) ? (
-            <p className="empty-state transactions-empty">
-              No matches for these filters. Try clearing or changing a filter.
+          {refreshing && state.status === 'ready' && (
+            <p role="status" className="transactions-status">
+              Updating results…
             </p>
-          ) : (
-            <p className="empty-state transactions-empty">
-              No transactions yet. Transactions you add will appear here.
+          )}
+          {state.status === 'error' && (
+            <div className="error-summary transactions-error" role="alert">
+              <p>{state.message}</p>
+              <button type="button" className="btn" onClick={handleRetry}>
+                Retry
+              </button>
+            </div>
+          )}
+          {updateNotice !== null && state.status === 'ready' && (
+            <p role="status" className="notice">
+              {updateNotice}
             </p>
-          )
-        ) : (
-          <div className="transaction-list transactions-list">
-            {groupByMonth(state.transactions).map((group, index) => (
-              <section
-                key={`${group.month}-${index}`}
-                className="transactions-month"
-                aria-labelledby={`transactions-month-${index}`}
-              >
-                <h3 id={`transactions-month-${index}`}>
-                  {formatMonthLabel(group.month)}
-                </h3>
-                <p className="transactions-month-subtotal">
-                  {monthSubtotal(group.rows, syncPendingAccountIds)}
+          )}
+          {hasSyncedTransactions && (
+            <p className="transaction-retention-note transactions-retention-note">
+              Bank-synced transactions are kept for the audit trail and cannot be
+              deleted.
+            </p>
+          )}
+          {state.status === 'ready' &&
+            (state.transactions.length === 0 ? (
+              hasActiveFilters(draft) ? (
+                <p className="empty-state transactions-empty">
+                  No matches for these filters. Try clearing or changing a filter.
                 </p>
-                <ul>
-                  {group.rows.map((transaction) =>
-                    editingId === transaction.id ? (
-                      <EditTransactionForm
-                        key={transaction.id}
-                        transaction={transaction}
-                        accounts={accounts}
-                        categories={categories}
-                        onCancel={() => handleEditCancel(transaction.id)}
-                        onUpdated={handleEditUpdated}
-                        onPendingChange={handleEditPendingChange}
-                      />
-                    ) : deletingId === transaction.id ? (
-                      <DeleteTransactionConfirm
-                        key={transaction.id}
-                        transaction={transaction}
-                        accountName={accountById.get(transaction.account)?.name}
-                        categoryName={categoryById.get(transaction.category)?.name}
-                        onCancel={() => handleDeleteCancel(transaction.id)}
-                        onDeleted={handleDeleteDeleted}
-                        onPendingChange={handleDeletePendingChange}
-                      />
-                    ) : (
-                      <TransactionItem
-                        key={transaction.id}
-                        transaction={transaction}
-                        accountById={accountById}
-                        categoryById={categoryById}
-                        editDisabled={rowLocked}
-                        deleteDisabled={rowLocked}
-                        onEdit={() => handleEditOpen(transaction.id)}
-                        onDelete={() => handleDeleteOpen(transaction.id)}
-                      />
-                    ),
-                  )}
-                </ul>
-              </section>
+              ) : (
+                <p className="empty-state transactions-empty">
+                  No transactions yet. Transactions you add will appear here.
+                </p>
+              )
+            ) : (
+              <div className="transaction-list transactions-list">
+                {groupByMonth(state.transactions).map((group, index) => (
+                  <section
+                    key={`${group.month}-${index}`}
+                    className="transactions-month"
+                    aria-labelledby={`transactions-month-${index}`}
+                  >
+                    <h3 id={`transactions-month-${index}`}>
+                      {formatMonthLabel(group.month)}
+                    </h3>
+                    <p className="transactions-month-subtotal">
+                      {monthSubtotal(group.rows, syncPendingAccountIds)}
+                    </p>
+                    <ul>
+                      {group.rows.map((transaction) =>
+                        editingId === transaction.id ? (
+                          <EditTransactionForm
+                            key={transaction.id}
+                            transaction={transaction}
+                            accounts={accounts}
+                            categories={categories}
+                            onCancel={() => handleEditCancel(transaction.id)}
+                            onUpdated={handleEditUpdated}
+                            onPendingChange={handleEditPendingChange}
+                          />
+                        ) : deletingId === transaction.id ? (
+                          <DeleteTransactionConfirm
+                            key={transaction.id}
+                            transaction={transaction}
+                            accountName={accountById.get(transaction.account)?.name}
+                            categoryName={categoryById.get(transaction.category)?.name}
+                            onCancel={() => handleDeleteCancel(transaction.id)}
+                            onDeleted={handleDeleteDeleted}
+                            onPendingChange={handleDeletePendingChange}
+                          />
+                        ) : (
+                          <TransactionItem
+                            key={transaction.id}
+                            transaction={transaction}
+                            accountById={accountById}
+                            categoryById={categoryById}
+                            editDisabled={rowLocked}
+                            deleteDisabled={rowLocked}
+                            onEdit={() => handleEditOpen(transaction.id)}
+                            onDelete={() => handleDeleteOpen(transaction.id)}
+                          />
+                        ),
+                      )}
+                    </ul>
+                  </section>
+                ))}
+              </div>
             ))}
-          </div>
-        ))}
+          </section>
+        <CreateTransactionForm
+          accounts={accounts}
+          categories={categories}
+          setupLoaded={state.status === 'ready'}
+          onCreated={handleTransactionCreated}
+          submitLocked={filtersLocked}
+        />
+      </div>
     </div>
   )
 }

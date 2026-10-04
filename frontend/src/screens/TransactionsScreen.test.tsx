@@ -244,6 +244,12 @@ describe('transactions list', () => {
     expect(items[0]).toHaveTextContent('Monthly paycheck')
     expect(items[1]).toHaveTextContent('Expense')
     expect(items[2]).toHaveTextContent('Dinner')
+    expect(
+      Array.from(
+        document.querySelectorAll('.transactions-title'),
+        (node) => node.textContent,
+      ),
+    ).toEqual(['Monthly paycheck', 'Food', 'Dinner'])
 
     expect(within(items[0]).getByText('Income')).toBeInTheDocument()
     expect(within(items[0]).getByText('+$2,500.00')).toBeInTheDocument()
@@ -1447,7 +1453,7 @@ async function fillValidCreateForm(
 }
 
 describe('transaction creation form', () => {
-  it('renders an accessible Add transaction form above the list with local-date default', async () => {
+  it('renders the ledger history before an accessible Add transaction form with local-date default', async () => {
     const yearSpy = vi
       .spyOn(Date.prototype, 'getFullYear')
       .mockReturnValue(2026)
@@ -1462,10 +1468,16 @@ describe('transaction creation form', () => {
       })
       expect(await screen.findByText(/No transactions yet/)).toBeInTheDocument()
       const emptyState = screen.getByText(/No transactions yet/)
+      // Ledger-first: the history precedes the entry form in document order.
       expect(
-        heading.compareDocumentPosition(emptyState) &
+        emptyState.compareDocumentPosition(heading) &
           Node.DOCUMENT_POSITION_FOLLOWING,
       ).toBeTruthy()
+
+      const addLink = screen.getByRole('link', { name: 'Add transaction' })
+      expect(addLink).toHaveAttribute('href', '#transaction-create-heading')
+      expect(heading).toHaveAttribute('id', 'transaction-create-heading')
+      expect(heading).toHaveAttribute('tabindex', '-1')
 
       const accountSelect = screen.getByLabelText('New transaction account')
       expect(accountSelect).toHaveAttribute('name', 'account')
@@ -6439,8 +6451,11 @@ describe('transactions result summary', () => {
     expect(identity).not.toBeNull()
     const title = document.querySelector('.transactions-title')
     expect(title).not.toBeNull()
-    expect(title?.textContent).toBe('Salary')
+    expect(title?.textContent).toBe('Groceries')
     expect(identity?.contains(title)).toBe(true)
+    const meta = document.querySelector('.transaction-meta')
+    expect(meta).not.toBeNull()
+    expect(within(meta as HTMLElement).getByText('Salary')).toBeInTheDocument()
   })
 
   it('does not paint zero money in with the positive class', async () => {
@@ -6889,6 +6904,11 @@ describe('transaction action accessible names', () => {
       name: 'Edit transaction Uncategorized, +$5.00, 2026-09-11',
     })
     expect(fallback).toHaveAttribute('id', 'transaction-edit-2')
+    const fallbackRow = fallback.closest('li')
+    expect(fallbackRow).not.toBeNull()
+    expect(
+      within(fallbackRow as HTMLElement).getByText('Uncategorized'),
+    ).toBeInTheDocument()
   })
 
   it('resolves a duplicated-looking record label to the correct second row native action on cancel without mutating', async () => {
