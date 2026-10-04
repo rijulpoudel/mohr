@@ -1771,18 +1771,56 @@ a {
   }
 }
 
+.categories-header {
+  display: grid;
+  gap: var(--space-1);
+  margin-block-end: var(--space-4);
+}
+
+.categories-header h2 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+.categories-add-link {
+  justify-self: start;
+  margin-block-start: var(--space-2);
+}
+
+.categories-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-6);
+  align-items: start;
+}
+
+.categories-collection {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-6);
+}
+
+.categories-collection .notice {
+  margin-block-end: 0;
+}
+
 .category-create {
-  max-width: 32rem;
-  margin-block-end: var(--space-6);
+  min-width: 0;
+  padding: var(--space-6);
+  border: 1px solid var(--color-border);
+  border-radius: 0.75rem;
+  background: var(--color-surface);
 }
 
 .category-create h3 {
   margin: 0 0 var(--space-4);
   font-size: 1rem;
+  /* Keep the header-link target clear of the sticky shell header. */
+  scroll-margin-top: calc(var(--shell-header-height) + var(--space-4));
 }
 
-.category-groups {
-  margin-block-start: var(--space-6);
+.category-create .form {
+  margin-block-end: 0;
 }
 
 .category-group + .category-group {
@@ -1804,24 +1842,32 @@ a {
 }
 
 .category-item {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-2);
   padding-block: var(--space-3);
   border-bottom: 1px solid var(--color-border);
 }
 
 .category-main {
+  min-width: 0;
   display: flex;
-  justify-content: space-between;
+  flex-wrap: wrap;
   align-items: baseline;
-  gap: var(--space-3);
+  gap: var(--space-1) var(--space-3);
 }
 
 .category-name {
+  min-width: 0;
   margin: 0;
   font-size: 1rem;
   font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
 .category-type {
+  flex-shrink: 0;
   margin: 0;
   color: var(--color-muted);
   font-size: 0.8125rem;
@@ -1831,7 +1877,10 @@ a {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
-  margin-block-start: var(--space-2);
+}
+
+.category-edit {
+  min-width: 0;
 }
 
 .category-edit h3 {
@@ -1849,6 +1898,10 @@ a {
   gap: var(--space-2);
 }
 
+.category-archive {
+  min-width: 0;
+}
+
 .category-archive h3 {
   margin: 0 0 var(--space-2);
   font-size: 1rem;
@@ -1857,6 +1910,7 @@ a {
 .category-archive p {
   margin: 0 0 var(--space-2);
   font-size: 0.875rem;
+  overflow-wrap: anywhere;
 }
 
 .category-archive-actions {
@@ -1864,6 +1918,22 @@ a {
   flex-wrap: wrap;
   gap: var(--space-2);
   margin-block-start: var(--space-3);
+}
+
+@media (min-width: 75rem) {
+  .categories-workspace {
+    grid-template-columns: minmax(0, 1fr) 20rem;
+  }
+
+  .category-item {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: var(--space-4);
+  }
+
+  .category-actions {
+    justify-content: flex-end;
+  }
 }
 
 .budget-create {

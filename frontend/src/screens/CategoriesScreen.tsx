@@ -134,7 +134,9 @@ function CreateCategoryForm({ onCreated }: { onCreated: (category: Category) => 
       className="category-create"
       aria-labelledby="add-category-heading"
     >
-      <h3 id="add-category-heading">Add category</h3>
+      <h3 id="add-category-heading" tabIndex={-1}>
+        Add category
+      </h3>
       {created && (
         <p role="status" className="notice">
           Category created.
@@ -668,75 +670,84 @@ export function CategoriesScreen() {
   const archived = state.categories.filter((category) => category.is_archived)
 
   return (
-    <div className="screen">
-      <h2>Categories</h2>
-      <CreateCategoryForm onCreated={handleCreated} />
-      {updatedNotice && (
-        <p role="status" className="notice">
-          Category updated.
-        </p>
-      )}
-      {archivedNotice && (
-        <p role="status" className="notice">
-          Category archived.
-        </p>
-      )}
-      {state.categories.length === 0 ? (
-        <p className="empty-state">
-          No categories yet. Categories you create will appear here.
-        </p>
-      ) : (
-        <div className="category-groups">
-          {active.length > 0 && (
-            <section
-              className="category-group"
-              aria-labelledby="category-active-heading"
-            >
-              <h3 id="category-active-heading">Active ({active.length})</h3>
-              <ul className="category-list">
-                {active.map((category) => (
-                  <CategoryItem
-                    key={category.id}
-                    category={category}
-                    editing={editingId === category.id}
-                    archiving={archivingId === category.id}
-                    onRename={() => handleRename(category.id)}
-                    onArchiveRequest={() => handleArchiveRequest(category.id)}
-                    onUpdated={handleUpdated}
-                    onCancelled={() => handleCancelled(category.id)}
-                    onArchived={handleArchived}
-                    onArchiveCancelled={() => handleArchiveCancelled(category.id)}
-                  />
-                ))}
-              </ul>
-            </section>
+    <div className="screen categories-screen">
+      <header className="categories-header">
+        <h2>Categories</h2>
+        <a className="btn categories-add-link" href="#add-category-heading">
+          Add category
+        </a>
+      </header>
+      <div className="categories-workspace">
+        <div className="categories-collection">
+          {updatedNotice && (
+            <p role="status" className="notice">
+              Category updated.
+            </p>
           )}
-          {archived.length > 0 && (
-            <section
-              className="category-group"
-              aria-labelledby="category-archived-heading"
-            >
-              <h3 id="category-archived-heading">Archived ({archived.length})</h3>
-              <ul className="category-list">
-                {archived.map((category) => (
-                  <CategoryItem
-                    key={category.id}
-                    category={category}
-                    editing={editingId === category.id}
-                    archiving={archivingId === category.id}
-                    onRename={() => handleRename(category.id)}
-                    onArchiveRequest={() => handleArchiveRequest(category.id)}
-                    onUpdated={handleUpdated}
-                    onCancelled={() => handleCancelled(category.id)}
-                    onArchived={handleArchived}
-                    onArchiveCancelled={() => handleArchiveCancelled(category.id)}
-                  />
-                ))}
-              </ul>
-            </section>
+          {archivedNotice && (
+            <p role="status" className="notice">
+              Category archived.
+            </p>
+          )}
+          {state.categories.length === 0 ? (
+            <p className="empty-state">
+              No categories yet. Categories you create will appear here.
+            </p>
+          ) : (
+            <div className="category-groups">
+              {active.length > 0 && (
+                <section
+                  className="category-group"
+                  aria-labelledby="category-active-heading"
+                >
+                  <h3 id="category-active-heading">Active ({active.length})</h3>
+                  <ul className="category-list">
+                    {active.map((category) => (
+                      <CategoryItem
+                        key={category.id}
+                        category={category}
+                        editing={editingId === category.id}
+                        archiving={archivingId === category.id}
+                        onRename={() => handleRename(category.id)}
+                        onArchiveRequest={() => handleArchiveRequest(category.id)}
+                        onUpdated={handleUpdated}
+                        onCancelled={() => handleCancelled(category.id)}
+                        onArchived={handleArchived}
+                        onArchiveCancelled={() => handleArchiveCancelled(category.id)}
+                      />
+                    ))}
+                  </ul>
+                </section>
+              )}
+              {archived.length > 0 && (
+                <section
+                  className="category-group"
+                  aria-labelledby="category-archived-heading"
+                >
+                  <h3 id="category-archived-heading">Archived ({archived.length})</h3>
+                  <ul className="category-list">
+                    {archived.map((category) => (
+                      <CategoryItem
+                        key={category.id}
+                        category={category}
+                        editing={editingId === category.id}
+                        archiving={archivingId === category.id}
+                        onRename={() => handleRename(category.id)}
+                        onArchiveRequest={() => handleArchiveRequest(category.id)}
+                        onUpdated={handleUpdated}
+                        onCancelled={() => handleCancelled(category.id)}
+                        onArchived={handleArchived}
+                        onArchiveCancelled={() => handleArchiveCancelled(category.id)}
+                      />
+                    ))}
+                  </ul>
+                </section>
+              )}
+            </div>
           )}
         </div>
-      )}
+        <CreateCategoryForm onCreated={handleCreated} />
+      </div>
     </div>
   )
 }

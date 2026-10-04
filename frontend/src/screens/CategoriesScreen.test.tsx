@@ -347,7 +347,7 @@ describe('categories list', () => {
 })
 
 describe('category creation form', () => {
-  it('renders a form above the list with a name input and type select defaulting to expense', async () => {
+  it('renders the collection before a linked creation form with a name input and type select defaulting to expense', async () => {
     installFetchMock(
       authenticatedCategoriesHandler((_url, init) => {
         if ((init?.method ?? 'GET') === 'GET') return jsonResponse([])
@@ -357,9 +357,13 @@ describe('category creation form', () => {
     renderApp('/categories')
     await screen.findByText(/No categories yet/)
 
-    expect(
-      screen.getByRole('heading', { name: 'Add category' }),
-    ).toBeInTheDocument()
+    const addHeading = screen.getByRole('heading', { name: 'Add category' })
+    expect(addHeading).toBeInTheDocument()
+    expect(addHeading).toHaveAttribute('id', 'add-category-heading')
+    expect(addHeading).toHaveAttribute('tabindex', '-1')
+    const addLink = screen.getByRole('link', { name: 'Add category' })
+    expect(addLink).toHaveAttribute('href', '#add-category-heading')
+    expect(addLink.closest('header')).not.toBeNull()
     const nameInput = screen.getByLabelText('Name')
     expect(nameInput).toHaveAttribute('type', 'text')
     expect(nameInput).toHaveAttribute('maxlength', '100')
@@ -378,6 +382,15 @@ describe('category creation form', () => {
     expect(
       screen.getByRole('button', { name: 'Create category' }),
     ).toBeInTheDocument()
+
+    const collection = document.querySelector('.categories-collection')
+    const createForm = document.querySelector('.category-create')
+    expect(collection).not.toBeNull()
+    expect(createForm).not.toBeNull()
+    expect(
+      collection!.compareDocumentPosition(createForm!) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
   })
 
   it('creates with exact CSRF order and body, appends once, resets, and announces on an empty list', async () => {
