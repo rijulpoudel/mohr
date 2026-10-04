@@ -6904,6 +6904,11 @@ describe('transaction action accessible names', () => {
       name: 'Edit transaction Uncategorized, +$5.00, 2026-09-11',
     })
     expect(fallback).toHaveAttribute('id', 'transaction-edit-2')
+    const fallbackRow = fallback.closest('li')
+    expect(fallbackRow).not.toBeNull()
+    expect(
+      within(fallbackRow as HTMLElement).getByText('Uncategorized'),
+    ).toBeInTheDocument()
   })
 
   it('resolves a duplicated-looking record label to the correct second row native action on cancel without mutating', async () => {

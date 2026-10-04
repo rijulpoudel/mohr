@@ -425,7 +425,7 @@ function TransactionItem({
       <div className="transaction-meta">
         <time dateTime={transaction.date}>{transaction.date}</time>
         {accountName !== undefined && <span>{accountName}</span>}
-        {hasNote && categoryName !== undefined && <span>{categoryName}</span>}
+        {hasNote && <span>{categoryName ?? UNCATEGORIZED_LABEL}</span>}
         {transaction.is_transfer && <span>Other side unverified</span>}
         {transaction.source === 'plaid' && (
           <span className="transaction-source transactions-badge transactions-badge-synced">
