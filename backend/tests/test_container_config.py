@@ -463,6 +463,14 @@ class StartScriptTests(unittest.TestCase):
         for flag in expected:
             self.assertIn(flag, self.content)
 
+    def test_access_logformat_redacts_the_query_string(self):
+        self.assertIn("--access-logformat", self.content)
+        self.assertIn("%(U)s", self.content)
+        self.assertIn("%(m)s", self.content)
+        self.assertIn("%(s)s", self.content)
+        self.assertNotIn("%(r)s", self.content)
+        self.assertNotIn("%(q)s", self.content)
+
     def test_forwarded_ips_wildcard_comment_explains_render_safety(self):
         self.assertIn("sole network path", self.content)
         self.assertIn("render.yaml", self.content)
