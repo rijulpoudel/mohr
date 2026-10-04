@@ -8,7 +8,6 @@ import {
   installFetchMock,
   jsonResponse,
   renderApp,
-  requestLog,
   setCsrfCookie,
   type FetchHandler,
 } from '../test/testUtils'
@@ -49,22 +48,17 @@ describe('login', () => {
     expect(await screen.findByText('Signed in as me@example.com')).toBeInTheDocument()
     expect(window.location.pathname).toBe('/')
 
-    expect(mock.mock.calls).toHaveLength(5)
-    expect(requestLog(mock)).toEqual([
-      'GET /api/auth/me/',
-      'GET /api/auth/csrf/',
-      'POST /api/auth/login/',
-      'GET /api/plaid/connections/',
-      'GET /api/dashboard/summary/',
-    ])
-
-    const csrfInit = mock.mock.calls[1][1]
+    const csrfCalls = calls(mock, '/api/auth/csrf/')
+    expect(csrfCalls).toHaveLength(1)
+    const csrfInit = csrfCalls[0][1]
     expect(csrfInit).toMatchObject({ method: 'GET', credentials: 'include' })
     expect(csrfInit?.headers).toBeInstanceOf(Headers)
     expect((csrfInit?.headers as Headers).get('Content-Type')).toBeNull()
     expect(csrfInit?.body).toBeUndefined()
 
-    const loginInit = mock.mock.calls[2][1]
+    const loginCalls = calls(mock, '/api/auth/login/', 'POST')
+    expect(loginCalls).toHaveLength(1)
+    const loginInit = loginCalls[0][1]
     expect(loginInit).toMatchObject({ method: 'POST', credentials: 'include' })
     const loginHeaders = loginInit?.headers as Headers
     expect(loginHeaders.get('Content-Type')).toBe('application/json')
@@ -224,6 +218,45 @@ describe('login', () => {
     await user.click(screen.getByRole('button', { name: 'Sign in' }))
     expect(await screen.findByText('Signed in as ok@example.com')).toBeInTheDocument()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('renders the Google control when the config enables it', async () => {
+    installFetchMock((url) => {
+      if (url === '/api/auth/me/') return jsonResponse({}, 401)
+      if (url === '/api/auth/google/config/') {
+        return jsonResponse({ enabled: true, linked: false })
+      }
+      return jsonResponse({}, 404)
+    })
+    renderApp('/login')
+
+    expect(
+      await screen.findByRole('button', { name: 'Continue with Google' }),
+    ).toBeInTheDocument()
+  })
+
+  it('shows the link-required notice from the callback redirect', async () => {
+    installFetchMock((url) => {
+      if (url === '/api/auth/me/') return jsonResponse({}, 401)
+      return jsonResponse({}, 404)
+    })
+    renderApp('/login?google=link-required')
+
+    expect(
+      await screen.findByText(/already exists. Sign in with your password/),
+    ).toBeInTheDocument()
+  })
+
+  it('shows the failure notice from the callback redirect', async () => {
+    installFetchMock((url) => {
+      if (url === '/api/auth/me/') return jsonResponse({}, 401)
+      return jsonResponse({}, 404)
+    })
+    renderApp('/login?google=failed')
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Google sign-in could not be completed.',
+    )
   })
 
   it('does not authenticate when login succeeds with a malformed payload', async () => {

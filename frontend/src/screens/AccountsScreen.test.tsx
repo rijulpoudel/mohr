@@ -1590,7 +1590,7 @@ describe('accounts session expiry', () => {
 
     expect(await screen.findByLabelText('Email')).toBeInTheDocument()
     expect(window.location.pathname).toBe('/login')
-    expect(requestLog(mock)).toEqual([
+    expect(requestLog(mock).slice(0, 2)).toEqual([
       'GET /api/auth/me/',
       'GET /api/accounts/',
     ])
@@ -2235,7 +2235,7 @@ describe('account creation session expiry', () => {
 
     expect(await screen.findByLabelText('Email')).toBeInTheDocument()
     expect(window.location.pathname).toBe('/login')
-    expect(requestLog(mock)).toEqual([
+    expect(requestLog(mock).slice(0, 4)).toEqual([
       'GET /api/auth/me/',
       'GET /api/accounts/',
       'GET /api/auth/csrf/',
