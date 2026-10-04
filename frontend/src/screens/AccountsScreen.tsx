@@ -644,7 +644,7 @@ function AccountItem({
           </div>
         </div>
         <dl className="accounts-balances">
-          <div className="accounts-balance">
+          <div className="accounts-balance accounts-balance-current">
             <dt>Current balance</dt>
             <dd
               className={
@@ -796,7 +796,9 @@ function CreateAccountForm({ onCreated }: { onCreated: (account: Account) => voi
       id="account-create"
       aria-labelledby="account-create-heading"
     >
-      <h3 id="account-create-heading">Add account</h3>
+      <h3 id="account-create-heading" tabIndex={-1}>
+        Add account
+      </h3>
       {created && (
         <p role="status" className="notice">
           Account created.
@@ -1189,11 +1191,10 @@ export function AccountsScreen() {
         <p className="accounts-subtitle">
           Your current balances, without the guesswork.
         </p>
-        <a className="btn accounts-add-link" href="#account-create">
+        <a className="btn accounts-add-link" href="#account-create-heading">
           Add account
         </a>
       </header>
-      <AccountsSummary accounts={accounts} />
       {updatedNotice && (
         <p role="status" className="notice">
           Account updated.
@@ -1267,7 +1268,10 @@ export function AccountsScreen() {
             </>
           )}
         </div>
-        <CreateAccountForm onCreated={handleCreated} />
+        <div className="accounts-sidebar">
+          <AccountsSummary accounts={accounts} />
+          <CreateAccountForm onCreated={handleCreated} />
+        </div>
       </div>
     </div>
   )

@@ -369,7 +369,7 @@ a {
 .accounts-header {
   display: grid;
   gap: var(--space-1);
-  margin-block-end: var(--space-6);
+  margin-block-end: var(--space-4);
 }
 
 .accounts-eyebrow {
@@ -1405,7 +1405,7 @@ a {
 
 .accounts-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 20rem;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-6);
   align-items: start;
 }
@@ -1414,6 +1414,23 @@ a {
   min-width: 0;
   display: grid;
   gap: var(--space-6);
+}
+
+.accounts-sidebar {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-6);
+  align-content: start;
+}
+
+.accounts-sidebar .accounts-summary {
+  margin-block-end: 0;
+}
+
+/* The sidebar keeps the composition chart and the create form in one narrow
+   column, so the doughnut stacks above its legend instead of splitting. */
+.accounts-sidebar .accounts-chart {
+  grid-template-columns: 1fr;
 }
 
 .accounts-section-head {
@@ -1443,7 +1460,7 @@ a {
   margin: 0;
   padding: 0;
   display: grid;
-  gap: var(--space-4);
+  gap: var(--space-3);
 }
 
 .accounts-item {
@@ -1453,7 +1470,7 @@ a {
 .accounts-card {
   min-width: 0;
   display: grid;
-  gap: var(--space-4);
+  gap: var(--space-3);
   padding: var(--space-4);
   border: 1px solid var(--color-border);
   border-radius: 0.75rem;
@@ -1547,6 +1564,21 @@ a {
   color: var(--color-error);
 }
 
+/* Keep the opening balance visible as context, not a competing headline. */
+.accounts-balance-current .accounts-balance-value {
+  font-size: 1.125rem;
+  font-weight: 700;
+}
+
+.accounts-balance-current dt {
+  color: var(--color-text);
+  font-weight: 600;
+}
+
+.accounts-balance:not(.accounts-balance-current) .accounts-balance-value {
+  font-size: 0.875rem;
+}
+
 .accounts-pending-note {
   margin: 0;
   color: var(--color-muted);
@@ -1613,12 +1645,14 @@ a {
   border: 1px solid var(--color-border);
   border-radius: 0.75rem;
   background: var(--color-surface);
-  scroll-margin-top: calc(var(--shell-header-height) + var(--space-4));
 }
 
 .accounts-create-card h3 {
   margin: 0 0 var(--space-4);
   font-size: 1rem;
+  /* The header link scrolls to this heading, so the offset belongs here rather
+     than on the card, where the shell header could cover the heading. */
+  scroll-margin-top: calc(var(--shell-header-height) + var(--space-4));
 }
 
 .accounts-create-card .form {
@@ -1626,6 +1660,10 @@ a {
 }
 
 @media (min-width: 75rem) {
+  .accounts-layout {
+    grid-template-columns: minmax(0, 1fr) 20rem;
+  }
+
   .accounts-card {
     grid-template-columns: minmax(13rem, 1.4fr) minmax(14rem, 1fr) auto;
     align-items: center;
@@ -1646,12 +1684,6 @@ a {
   .accounts-pending-note {
     grid-column: 1 / -1;
     grid-row: 2;
-  }
-}
-
-@media (max-width: 64rem) {
-  .accounts-layout {
-    grid-template-columns: 1fr;
   }
 }
 
