@@ -1073,12 +1073,25 @@ a {
   padding: 0;
 }
 
-.transactions-list .transaction-main {
+/* Ordinary ledger rows form a two-column grid so the identity and the signed
+   amount share one line while the action group stays end-aligned on the right.
+   Edit/delete rows are excluded and keep their full-width forms. */
+.transactions-list
+  .transaction-item:not(.transaction-edit):not(.transaction-delete) {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) auto;
   grid-template-areas:
-    'mark identity'
-    'mark amount';
+    'main actions'
+    'meta actions';
+  align-items: center;
+  column-gap: var(--space-4);
+}
+
+.transactions-list .transaction-main {
+  grid-area: main;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: 'mark identity amount';
   align-items: center;
   column-gap: var(--space-3);
 }
@@ -1137,6 +1150,7 @@ a {
 }
 
 .transactions-list .transaction-meta {
+  grid-area: meta;
   align-items: center;
   gap: var(--space-1) var(--space-3);
 }
@@ -1147,8 +1161,28 @@ a {
   overflow-wrap: anywhere;
 }
 
-.transactions-list .transaction-note {
-  margin: 0;
+.transactions-list .transaction-actions {
+  grid-area: actions;
+  align-self: center;
+  justify-self: end;
+  margin-block-start: 0;
+}
+
+/* On narrow screens the row collapses to one column so the action group drops
+   below the identity and metadata instead of squeezing the signed amount. */
+@media (max-width: 36rem) {
+  .transactions-list
+    .transaction-item:not(.transaction-edit):not(.transaction-delete) {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      'main'
+      'meta'
+      'actions';
+  }
+
+  .transactions-list .transaction-actions {
+    justify-self: start;
+  }
 }
 
 .transactions-badge {
@@ -1226,7 +1260,7 @@ a {
 }
 
 #transaction-create-heading {
-  scroll-margin-top: var(--shell-header-height);
+  scroll-margin-top: calc(var(--shell-header-height) + var(--space-4));
 }
 
 .transactions-create .form {

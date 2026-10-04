@@ -244,6 +244,12 @@ describe('transactions list', () => {
     expect(items[0]).toHaveTextContent('Monthly paycheck')
     expect(items[1]).toHaveTextContent('Expense')
     expect(items[2]).toHaveTextContent('Dinner')
+    expect(
+      Array.from(
+        document.querySelectorAll('.transactions-title'),
+        (node) => node.textContent,
+      ),
+    ).toEqual(['Monthly paycheck', 'Food', 'Dinner'])
 
     expect(within(items[0]).getByText('Income')).toBeInTheDocument()
     expect(within(items[0]).getByText('+$2,500.00')).toBeInTheDocument()
@@ -6445,8 +6451,11 @@ describe('transactions result summary', () => {
     expect(identity).not.toBeNull()
     const title = document.querySelector('.transactions-title')
     expect(title).not.toBeNull()
-    expect(title?.textContent).toBe('Salary')
+    expect(title?.textContent).toBe('Groceries')
     expect(identity?.contains(title)).toBe(true)
+    const meta = document.querySelector('.transaction-meta')
+    expect(meta).not.toBeNull()
+    expect(within(meta as HTMLElement).getByText('Salary')).toBeInTheDocument()
   })
 
   it('does not paint zero money in with the positive class', async () => {

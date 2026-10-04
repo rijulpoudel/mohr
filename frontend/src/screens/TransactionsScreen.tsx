@@ -391,6 +391,8 @@ function TransactionItem({
   const categoryName = categoryById.get(transaction.category)?.name
   const context = transactionContext(transaction, categoryName, accountName)
   const mark = (categoryName ?? '?').slice(0, 1) || '?'
+  const hasNote = transaction.note.trim() !== ''
+  const title = hasNote ? transaction.note : categoryName ?? UNCATEGORIZED_LABEL
   return (
     <li className="transaction-item">
       <div className="transaction-main">
@@ -401,9 +403,7 @@ function TransactionItem({
           {mark}
         </span>
         <div className="transactions-identity">
-          <span className="transactions-title">
-            {categoryName ?? UNCATEGORIZED_LABEL}
-          </span>
+          <span className="transactions-title">{title}</span>
           <span
             className={
               transaction.is_transfer
@@ -425,6 +425,7 @@ function TransactionItem({
       <div className="transaction-meta">
         <time dateTime={transaction.date}>{transaction.date}</time>
         {accountName !== undefined && <span>{accountName}</span>}
+        {hasNote && categoryName !== undefined && <span>{categoryName}</span>}
         {transaction.is_transfer && <span>Other side unverified</span>}
         {transaction.source === 'plaid' && (
           <span className="transaction-source transactions-badge transactions-badge-synced">
@@ -447,9 +448,6 @@ function TransactionItem({
           <span className="transaction-source transactions-badge transactions-badge-importing">
             History still importing
           </span>
-        )}
-        {transaction.note !== '' && (
-          <span className="transaction-note">{transaction.note}</span>
         )}
       </div>
       <div className="transaction-actions">
