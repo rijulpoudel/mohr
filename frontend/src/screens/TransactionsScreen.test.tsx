@@ -1447,7 +1447,7 @@ async function fillValidCreateForm(
 }
 
 describe('transaction creation form', () => {
-  it('renders an accessible Add transaction form above the list with local-date default', async () => {
+  it('renders the ledger history before an accessible Add transaction form with local-date default', async () => {
     const yearSpy = vi
       .spyOn(Date.prototype, 'getFullYear')
       .mockReturnValue(2026)
@@ -1462,10 +1462,16 @@ describe('transaction creation form', () => {
       })
       expect(await screen.findByText(/No transactions yet/)).toBeInTheDocument()
       const emptyState = screen.getByText(/No transactions yet/)
+      // Ledger-first: the history precedes the entry form in document order.
       expect(
-        heading.compareDocumentPosition(emptyState) &
+        emptyState.compareDocumentPosition(heading) &
           Node.DOCUMENT_POSITION_FOLLOWING,
       ).toBeTruthy()
+
+      const addLink = screen.getByRole('link', { name: 'Add transaction' })
+      expect(addLink).toHaveAttribute('href', '#transaction-create-heading')
+      expect(heading).toHaveAttribute('id', 'transaction-create-heading')
+      expect(heading).toHaveAttribute('tabindex', '-1')
 
       const accountSelect = screen.getByLabelText('New transaction account')
       expect(accountSelect).toHaveAttribute('name', 'account')
