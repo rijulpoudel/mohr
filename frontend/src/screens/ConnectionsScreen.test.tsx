@@ -830,6 +830,10 @@ describe('connections error handling', () => {
       )
     })
 
+    // The cleared session lands on the public page; follow its Sign in link.
+    await user.click(
+      (await screen.findAllByRole('link', { name: 'Sign in' }))[0],
+    )
     expect(await screen.findByLabelText('Email')).toBeInTheDocument()
     expect(window.location.pathname).toBe('/login')
     expect(screen.queryByRole('heading', { name: 'Overview' })).not.toBeInTheDocument()

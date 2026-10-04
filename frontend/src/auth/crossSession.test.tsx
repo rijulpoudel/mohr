@@ -71,6 +71,11 @@ async function crossAuthBoundary() {
   await screen.findByText('Signed in as owner-a@example.com')
 
   await user.click(screen.getByRole('button', { name: 'Sign out' }))
+  // Signing out returns to the public landing at `/`, so follow its Sign in
+  // link to reach the login form again.
+  await user.click(
+    (await screen.findAllByRole('link', { name: 'Sign in' }))[0],
+  )
   await screen.findByLabelText('Email')
 
   await user.type(screen.getByLabelText('Email'), 'owner-b@example.com')

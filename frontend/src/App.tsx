@@ -1,9 +1,10 @@
 import { BrowserRouter, Route, Routes } from 'react-router-dom'
 import { AuthProvider } from './auth/AuthProvider'
 import { AppShell } from './AppShell'
-import { GuestRoute, ProtectedRoute } from './routes/guards'
+import { GuestRoute, HomeRoute, ProtectedRoute } from './routes/guards'
 import { LoginScreen } from './screens/LoginScreen'
 import { NotFoundScreen } from './screens/NotFoundScreen'
+import { LandingScreen } from './screens/LandingScreen'
 import { AccountsScreen } from './screens/AccountsScreen'
 import { ConnectionsScreen } from './screens/ConnectionsScreen'
 import { CategoriesScreen } from './screens/CategoriesScreen'
@@ -38,9 +39,10 @@ function App() {
             <Route
               path="/"
               element={
-                <ProtectedRoute>
-                  <DashboardScreen />
-                </ProtectedRoute>
+                <HomeRoute
+                  guest={<LandingScreen />}
+                  authenticated={<DashboardScreen />}
+                />
               }
             />
             <Route

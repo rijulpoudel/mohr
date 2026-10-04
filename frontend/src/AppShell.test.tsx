@@ -297,7 +297,8 @@ describe('application shell navigation', () => {
     expect(document.body.style.overflow).toBe('hidden')
 
     await user.click(screen.getByRole('button', { name: 'Sign out' }))
-    await screen.findByRole('button', { name: 'Sign in' })
+    // Signed out at `/` now shows the public landing with Sign in links.
+    await screen.findAllByRole('link', { name: 'Sign in' })
 
     expect(screen.getByRole('main')).not.toHaveAttribute('inert')
     expect(document.body.style.overflow).toBe('')
@@ -318,6 +319,10 @@ describe('application shell navigation', () => {
     expect(document.body.style.overflow).toBe('hidden')
 
     await user.click(screen.getByRole('button', { name: 'Sign out' }))
+    // Follow the landing Sign in link before typing credentials again.
+    await user.click(
+      (await screen.findAllByRole('link', { name: 'Sign in' }))[0],
+    )
     await screen.findByLabelText('Email')
 
     await user.type(screen.getByLabelText('Email'), 'student@example.com')
