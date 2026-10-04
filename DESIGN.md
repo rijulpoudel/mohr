@@ -113,11 +113,11 @@ The product promise controls the hierarchy: help students and young professional
 
 - **Action indigo (`#4338CA`)** is the accessible high-emphasis interaction color. Use it for one primary action per region, active navigation details, and critical chart emphasis.
 - **Brand indigo (`#6366F1`)** is a brand and illustration color. Do not place normal-size white text on it.
-- **Emerald (`#006C49`)** communicates positive financial outcomes such as income, remaining funds, and healthy progress. Never rely on color alone.
+- **Emerald (`#006C49`)** communicates actual income and positive financial outcomes such as remaining funds and healthy progress. In the transaction ledger it colors income amounts, income marks, and the Money in summary. Never rely on color alone.
 - **Blue (`#006194`)** identifies neutral analytical information. It is not a second call-to-action color.
 - **Deep navy (`#0F172A`)** is the primary text color and anchors the identity.
 - Cool lavender-gray backgrounds separate the application canvas from flat white working surfaces.
-- Error red is reserved for destructive actions, invalid input, and overspending. Do not use indigo as an error color.
+- **Error red (`#BA1A1A`)** marks individual expense rows in the transaction ledger—the outflow amount, expense mark, and Expense label—alongside destructive actions and invalid input. The Transactions **Money out** figure is the settled account outflow for the view and includes marked transfers, so it is not a true expense-only total even though it carries the same red; each marked transfer's own mark, type, and amount stay neutral (`#596175`) rather than green or red. Red does not mean every negative figure everywhere—credit balances and other liabilities are not expenses. Do not use indigo as an error color.
 
 Charts use the smallest meaningful palette. Categories must also have labels or direct values so color is never the only key.
 

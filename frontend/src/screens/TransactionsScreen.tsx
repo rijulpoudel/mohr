@@ -78,6 +78,7 @@ function ResultSummary({
 }) {
   const summary = summarizeTransactions(transactions, syncPendingAccountIds)
   const moneyInPositive = decimalToCents(summary.moneyIn) > 0n
+  const moneyOutPositive = decimalToCents(summary.moneyOut) > 0n
   const countLabel =
     summary.shown === 1
       ? '1 transaction shown'
@@ -94,7 +95,13 @@ function ResultSummary({
       >
         {`Money in ${formatMoney(summary.moneyIn)}`}
       </p>
-      <p className="transactions-summary-money transactions-summary-money-out">
+      <p
+        className={
+          moneyOutPositive
+            ? 'transactions-summary-money transactions-summary-money-out'
+            : 'transactions-summary-money'
+        }
+      >
         {`Money out ${formatMoney(summary.moneyOut)}`}
       </p>
       <p className="transactions-summary-caption">{SUMMARY_CAPTION}</p>
@@ -393,24 +400,24 @@ function TransactionItem({
   const mark = (categoryName ?? '?').slice(0, 1) || '?'
   const hasNote = transaction.note.trim() !== ''
   const title = hasNote ? transaction.note : categoryName ?? UNCATEGORIZED_LABEL
+  // A marked transfer is neutral regardless of the signed direction it was
+  // entered with, so card payments are never tinted like income. Every tone
+  // is derived from these semantic fields, never from the formatted amount.
+  const tone = transaction.is_transfer
+    ? 'transfer'
+    : transaction.transaction_type
   return (
     <li className="transaction-item">
       <div className="transaction-main">
         <span
-          className={`transaction-mark transactions-mark transactions-mark-${transaction.transaction_type}`}
+          className={`transaction-mark transactions-mark transaction-mark-${tone}`}
           aria-hidden="true"
         >
           {mark}
         </span>
         <div className="transactions-identity">
           <span className="transactions-title">{title}</span>
-          <span
-            className={
-              transaction.is_transfer
-                ? 'transaction-type transaction-type-transfer'
-                : 'transaction-type'
-            }
-          >
+          <span className={`transaction-type transaction-type-${tone}`}>
             {transaction.is_transfer
               ? 'Transfer'
               : transaction.transaction_type === 'income'
@@ -418,7 +425,7 @@ function TransactionItem({
                 : 'Expense'}
           </span>
         </div>
-        <span className="transaction-amount">
+        <span className={`transaction-amount transaction-amount-${tone}`}>
           {formatSignedMoney(transaction.amount, transaction.transaction_type)}
         </span>
       </div>
