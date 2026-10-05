@@ -1995,6 +1995,11 @@ class TransactionFilterAPITests(APITestCase):
             name="Their Groceries",
             category_type=CategoryType.EXPENSE,
         )
+        cls.connection = PlaidConnection.objects.create(
+            user=cls.user,
+            item_id="item-transaction-filter-0001",
+            institution_name="Filter Bank",
+        )
 
     def create_transaction(self, **overrides):
         values = {
@@ -2004,6 +2009,22 @@ class TransactionFilterAPITests(APITestCase):
             "transaction_type": TransactionType.INCOME,
             "amount": Decimal("25.50"),
             "date": date(2026, 9, 1),
+        }
+        values.update(overrides)
+        return Transaction.objects.create(**values)
+
+    def create_plaid_transaction(self, **overrides):
+        values = {
+            "user": self.user,
+            "connection": self.connection,
+            "account": self.account,
+            "category": self.expense_category,
+            "transaction_type": TransactionType.EXPENSE,
+            "amount": Decimal("25.50"),
+            "date": date(2026, 9, 1),
+            "source": TransactionSource.PLAID,
+            "plaid_transaction_id": "plaid-filter-0001",
+            "provider_name": "Synthetic Merchant",
         }
         values.update(overrides)
         return Transaction.objects.create(**values)
@@ -2178,6 +2199,217 @@ class TransactionFilterAPITests(APITestCase):
 
                 self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
                 self.assertIn("transaction_type", response.data)
+
+    def test_list_searches_note_case_insensitive_substring(self):
+        matching = self.create_transaction(note="Weekly groceries run")
+        self.create_transaction(note="Unrelated coffee payment")
+        self.client.force_login(self.user)
+
+        response = self.get_list(search="GROCER")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([item["id"] for item in response.data], [matching.id])
+
+    def test_list_searches_imported_provider_description_without_note(self):
+        matching = self.create_plaid_transaction(
+            provider_name="Corner Coffee Roasters",
+            note="",
+        )
+        self.create_transaction(note="Unrelated groceries")
+        self.client.force_login(self.user)
+
+        response = self.get_list(search="roasters")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([item["id"] for item in response.data], [matching.id])
+
+    def test_list_search_trims_whitespace_blank_means_no_filter_and_no_match_is_empty(
+        self,
+    ):
+        matching = self.create_transaction(note="Weekly groceries run")
+        other = self.create_transaction(note="Unrelated coffee payment")
+        self.client.force_login(self.user)
+
+        trimmed = self.get_list(search="  groceries  ")
+        blank = self.get_list(search="   ")
+        empty = self.get_list(search="")
+        no_match = self.get_list(search="no such text anywhere")
+
+        self.assertEqual([item["id"] for item in trimmed.data], [matching.id])
+        self.assertEqual({item["id"] for item in blank.data}, {matching.id, other.id})
+        self.assertEqual({item["id"] for item in empty.data}, {matching.id, other.id})
+        self.assertEqual(no_match.status_code, status.HTTP_200_OK)
+        self.assertEqual(no_match.data, [])
+
+    def test_list_search_treats_wildcard_and_quote_characters_literally(self):
+        percent = self.create_transaction(note="100% juice")
+        underscore = self.create_transaction(note="under_score")
+        apostrophe = self.create_transaction(note="O'Brien lunch")
+        backslash = self.create_transaction(note="back\\slash")
+        self.create_transaction(note="plain note")
+        self.client.force_login(self.user)
+
+        for term, expected in (
+            ("100%", percent),
+            ("_", underscore),
+            ("o'brien", apostrophe),
+            ("back\\slash", backslash),
+        ):
+            with self.subTest(term=term):
+                response = self.get_list(search=term)
+
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertEqual([item["id"] for item in response.data], [expected.id])
+
+    def test_list_search_accepts_two_hundred_characters(self):
+        note = "a" * 199 + "b"
+        matching = self.create_transaction(note=note)
+        self.create_transaction(note="c" * 201)
+        self.client.force_login(self.user)
+
+        response = self.get_list(search=note)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([item["id"] for item in response.data], [matching.id])
+
+    def test_list_search_rejects_over_length_and_null_characters(self):
+        self.client.force_login(self.user)
+
+        over_length = self.get_list(search="a" * 201)
+        null_character = self.get_list(search="bad\x00value")
+
+        self.assertEqual(over_length.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("search", over_length.data)
+        self.assertEqual(null_character.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("search", null_character.data)
+
+    def test_list_search_never_exposes_another_users_matching_rows(self):
+        mine = self.create_transaction(note="shared token")
+        self.create_transaction(
+            user=self.other_user,
+            account=self.other_account,
+            category=self.other_category,
+            note="shared token",
+        )
+        self.client.force_login(self.user)
+
+        response = self.get_list(search="shared token")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([item["id"] for item in response.data], [mine.id])
+        self.assertEqual(Transaction.objects.count(), 2)
+
+    def test_list_search_hides_removed_and_superseded_but_keeps_pending(self):
+        pending = self.create_plaid_transaction(
+            plaid_transaction_id="plaid-filter-pending",
+            provider_name="Pending Vendor",
+            is_pending=True,
+        )
+        self.create_plaid_transaction(
+            plaid_transaction_id="plaid-filter-removed",
+            provider_name="Pending Vendor",
+            is_provider_removed=True,
+        )
+        target = self.create_plaid_transaction(
+            plaid_transaction_id="plaid-filter-target",
+            provider_name="Other Target",
+        )
+        self.create_plaid_transaction(
+            plaid_transaction_id="plaid-filter-superseded",
+            provider_name="Pending Vendor",
+            is_superseded=True,
+            superseded_by=target,
+        )
+        self.client.force_login(self.user)
+
+        response = self.get_list(search="Pending Vendor")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([item["id"] for item in response.data], [pending.id])
+
+    def test_list_search_combines_with_existing_filters(self):
+        matching = self.create_transaction(
+            account=self.second_account,
+            category=self.category,
+            note="shared token",
+            date=date(2026, 9, 10),
+        )
+        self.create_transaction(note="shared token", date=date(2026, 9, 10))
+        self.create_transaction(
+            account=self.second_account,
+            category=self.expense_category,
+            transaction_type=TransactionType.EXPENSE,
+            note="shared token",
+            date=date(2026, 9, 10),
+        )
+        self.create_transaction(
+            account=self.second_account,
+            category=self.category,
+            note="shared token",
+            date=date(2026, 9, 20),
+        )
+        self.create_transaction(
+            account=self.second_account,
+            category=self.freelance_category,
+            note="shared token",
+            date=date(2026, 9, 10),
+        )
+        self.client.force_login(self.user)
+
+        response = self.get_list(
+            search="shared token",
+            account=self.second_account.id,
+            category=self.category.id,
+            transaction_type="income",
+            start_date="2026-09-01",
+            end_date="2026-09-15",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([item["id"] for item in response.data], [matching.id])
+
+    def test_list_search_results_preserve_model_ordering(self):
+        older = self.create_transaction(note="token", date=date(2026, 8, 1))
+        newer = self.create_transaction(
+            account=self.second_account,
+            note="token",
+            date=date(2026, 9, 10),
+        )
+        newest = self.create_transaction(
+            account=self.second_account,
+            note="token",
+            date=date(2026, 9, 15),
+        )
+        self.create_transaction(note="unrelated", date=date(2026, 9, 20))
+        self.client.force_login(self.user)
+
+        response = self.get_list(search="token")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [item["id"] for item in response.data],
+            [newest.id, newer.id, older.id],
+        )
+
+    def test_list_search_does_not_mutate_rows(self):
+        transaction = self.create_transaction(note="Weekly groceries run")
+        before = (Transaction.objects.count(), transaction.note)
+        self.client.force_login(self.user)
+
+        self.get_list(search="groceries")
+        self.get_list(search="a" * 201)
+
+        transaction.refresh_from_db()
+        self.assertEqual((Transaction.objects.count(), transaction.note), before)
+
+    def test_list_search_requires_authentication(self):
+        response = self.get_list(search="groceries")
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(
+            response.data,
+            {"detail": "Authentication credentials were not provided."},
+        )
 
     def test_list_filters_by_start_date_inclusive(self):
         before = self.create_transaction(amount=Decimal("50.00"), date=date(2026, 8, 1))

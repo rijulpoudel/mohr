@@ -1,3 +1,4 @@
+from django.db.models import Q
 from rest_framework import mixins, status, viewsets
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -47,6 +48,11 @@ class TransactionViewSet(
             queryset = queryset.filter(date__gte=filters["start_date"])
         if "end_date" in filters:
             queryset = queryset.filter(date__lte=filters["end_date"])
+        if filters.get("search"):
+            queryset = queryset.filter(
+                Q(note__icontains=filters["search"])
+                | Q(provider_name__icontains=filters["search"])
+            )
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
 

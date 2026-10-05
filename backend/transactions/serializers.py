@@ -75,6 +75,12 @@ class TransactionFilterSerializer(serializers.Serializer):
     )
     start_date = StrictDateField(required=False)
     end_date = StrictDateField(required=False)
+    search = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        trim_whitespace=True,
+        max_length=200,
+    )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

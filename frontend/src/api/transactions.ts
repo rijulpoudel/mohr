@@ -31,6 +31,29 @@ export interface TransactionFilters {
   transaction_type?: TransactionType
   start_date?: string
   end_date?: string
+  search?: string
+}
+
+// The backend caps `search` at 200 characters, trims the edges, and rejects NUL
+// and unpaired surrogate input with a field error. A pure validator keeps the
+// screen's field message and the query builder agreeing on what is invalid.
+export const SEARCH_MAX_LENGTH = 200
+
+export type TransactionSearchError = 'too_long' | 'invalid_characters'
+
+const LONE_SURROGATE_PATTERN = /[\uD800-\uDFFF]/u
+
+export function validateTransactionSearch(
+  value: unknown,
+): TransactionSearchError | null {
+  if (typeof value !== 'string') return 'invalid_characters'
+  const trimmed = value.trim()
+  if (trimmed === '') return null
+  if (trimmed.includes('\u0000') || LONE_SURROGATE_PATTERN.test(trimmed)) {
+    return 'invalid_characters'
+  }
+  if (Array.from(trimmed).length > SEARCH_MAX_LENGTH) return 'too_long'
+  return null
 }
 
 export interface TransactionInput {
@@ -85,6 +108,7 @@ const FILTER_KEYS = [
   'transaction_type',
   'start_date',
   'end_date',
+  'search',
 ] as const
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -216,6 +240,10 @@ function buildTransactionQuery(filters: TransactionFilters): string {
     } else if (key === 'start_date' || key === 'end_date') {
       if (!isCalendarDate(value)) throw invalid()
       params.append(key, value)
+    } else if (key === 'search') {
+      if (validateTransactionSearch(value) !== null) throw invalid()
+      const trimmed = (value as string).trim()
+      if (trimmed !== '') params.append(key, trimmed)
     }
   }
   const query = params.toString()

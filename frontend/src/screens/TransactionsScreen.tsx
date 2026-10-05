@@ -7,6 +7,7 @@ import {
   fetchTransactions,
   resetTransactionsRequest,
   updateTransaction,
+  validateTransactionSearch,
   type Transaction,
   type TransactionFilters,
   type TransactionPatch,
@@ -26,6 +27,12 @@ import { formatMonthLabel } from '../format/month'
 const GENERIC_ERROR_MESSAGE = 'Something went wrong. Please try again.'
 const FIELD_ERROR_SUMMARY = 'Please check the highlighted fields.'
 const REVERSED_RANGE_MESSAGE = 'Start date must not be after end date.'
+const SEARCH_LIMIT_MESSAGE = 'Search must be 200 characters or fewer.'
+const SEARCH_INVALID_MESSAGE =
+  'Search contains characters that cannot be used.'
+const SEARCH_HINT = 'Search notes and bank descriptions.'
+const SEARCH_HINT_ID = 'transactions-search-hint'
+const SEARCH_ERROR_ID = 'transactions-search-error'
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/
 const AMOUNT_PATTERN = /^\d+\.\d{2}$/
 const ZERO_AMOUNT_PATTERN = /^0+\.00$/
@@ -1436,6 +1443,8 @@ export function TransactionsScreen() {
   const [categories, setCategories] = useState<Category[]>([])
   const [draft, setDraft] = useState<FilterDraft>(EMPTY_DRAFT)
   const [dateError, setDateError] = useState<string | null>(null)
+  const [searchDraft, setSearchDraft] = useState('')
+  const [searchError, setSearchError] = useState<string | null>(null)
   const [filters, setFilters] = useState<TransactionFilters>({})
   const [editingId, setEditingId] = useState<number | null>(null)
   const [updateNotice, setUpdateNotice] = useState<string | null>(null)
@@ -1565,6 +1574,10 @@ export function TransactionsScreen() {
     }
     if (nextDraft.start !== '') next.start_date = nextDraft.start
     if (nextDraft.end !== '') next.end_date = nextDraft.end
+    // Live filter edits reuse the last applied search, never an unsaved draft.
+    if (filtersRef.current.search !== undefined) {
+      next.search = filtersRef.current.search
+    }
 
     if (
       next.start_date !== undefined &&
@@ -1585,9 +1598,50 @@ export function TransactionsScreen() {
     setFilters(next)
   }
 
+  function handleSearchSubmit(event: FormEvent<HTMLFormElement>): void {
+    event.preventDefault()
+    if (
+      editPending ||
+      editingId !== null ||
+      deletePending ||
+      deletingId !== null
+    ) {
+      return
+    }
+    const trimmed = searchDraft.trim()
+    if (trimmed !== '') {
+      const validation = validateTransactionSearch(trimmed)
+      if (validation !== null) {
+        setSearchError(
+          validation === 'too_long' ? SEARCH_LIMIT_MESSAGE : SEARCH_INVALID_MESSAGE,
+        )
+        return
+      }
+    }
+    setSearchError(null)
+    const nextSearch = trimmed === '' ? undefined : trimmed
+    if (nextSearch === filtersRef.current.search) return
+    setUpdateNotice(null)
+    if (stateRef.current.status === 'ready') {
+      setRefreshing(true)
+    } else {
+      setState({ status: 'loading' })
+    }
+    const next: TransactionFilters = { ...filtersRef.current }
+    if (nextSearch === undefined) {
+      delete next.search
+    } else {
+      next.search = nextSearch
+    }
+    filtersRef.current = next
+    setFilters(next)
+  }
+
   function handleClearFilters(): void {
     setDraft(EMPTY_DRAFT)
     setDateError(null)
+    setSearchDraft('')
+    setSearchError(null)
     setUpdateNotice(null)
     if (stateRef.current.status === 'ready') {
       setRefreshing(true)
@@ -1662,6 +1716,23 @@ export function TransactionsScreen() {
 
   const handleEditUpdated = useCallback((updated: Transaction) => {
     const currentFilters = filtersRef.current
+    if (currentFilters.search !== undefined) {
+      // The browser cannot reproduce the database's collation, so let the
+      // server decide membership by refetching the applied query instead of
+      // guessing whether the edited row still matches. Focus moves to the
+      // stable heading because the row may change or disappear.
+      setEditingId(null)
+      setEditPending(false)
+      returnFocusRef.current = { kind: 'heading' }
+      setUpdateNotice('Transaction updated.')
+      if (stateRef.current.status === 'ready') {
+        setRefreshing(true)
+      }
+      requestSeqRef.current += 1
+      resetTransactionsRequest()
+      setAttempt((current) => current + 1)
+      return
+    }
     const matches = transactionMatchesFilters(updated, currentFilters)
     setState((current) => {
       if (current.status !== 'ready') return current
@@ -1708,6 +1779,10 @@ export function TransactionsScreen() {
     refreshing ||
     editingId !== null ||
     deletingId !== null
+  const searchApplied = filters.search !== undefined
+  const clearAllVisible =
+    hasActiveFilters(draft) || searchDraft.trim() !== '' || searchApplied
+  const hasQueryContext = hasActiveFilters(draft) || searchApplied
 
   return (
     <div className="screen">
@@ -1823,7 +1898,48 @@ export function TransactionsScreen() {
                 </p>
               )}
             </div>
-            {hasActiveFilters(draft) && (
+            <form
+              className="transaction-search"
+              onSubmit={handleSearchSubmit}
+              noValidate
+            >
+              <div className="form-field transaction-search-field">
+                <label htmlFor="transactions-search">Search</label>
+                <input
+                  id="transactions-search"
+                  className="input"
+                  type="search"
+                  name="search"
+                  autoComplete="off"
+                  value={searchDraft}
+                  onChange={(event) => {
+                    setSearchDraft(event.target.value)
+                    if (searchError !== null) setSearchError(null)
+                  }}
+                  disabled={filtersLocked}
+                  aria-invalid={searchError !== null}
+                  aria-describedby={
+                    searchError !== null ? SEARCH_ERROR_ID : SEARCH_HINT_ID
+                  }
+                />
+                <p id={SEARCH_HINT_ID} className="field-hint">
+                  {SEARCH_HINT}
+                </p>
+                {searchError !== null && (
+                  <ul id={SEARCH_ERROR_ID} className="field-errors" role="alert">
+                    <li>{searchError}</li>
+                  </ul>
+                )}
+              </div>
+              <button
+                type="submit"
+                className="btn transactions-search-submit"
+                disabled={filtersLocked}
+              >
+                Search
+              </button>
+            </form>
+            {clearAllVisible && (
               <button
                 type="button"
                 className="btn transactions-clear-filters"
@@ -1871,7 +1987,7 @@ export function TransactionsScreen() {
           )}
           {state.status === 'ready' &&
             (state.transactions.length === 0 ? (
-              hasActiveFilters(draft) ? (
+              hasQueryContext ? (
                 <p className="empty-state transactions-empty">
                   No matches for these filters. Try clearing or changing a filter.
                 </p>
