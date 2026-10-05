@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
-import { Link, NavLink, Outlet } from 'react-router-dom'
+import { Link, NavLink, Outlet, useLocation } from 'react-router-dom'
 import { useAuth } from './auth/AuthContext'
 import { MohrMark } from './components/MohrMark'
+import landingStyles from './screens/LandingScreen.module.css'
 
 const DOWNLOAD_ICON = (
   <>
@@ -92,7 +93,11 @@ const DESKTOP_MEDIA_QUERY = '(min-width: 48rem)'
 
 export function AppShell() {
   const { status } = useAuth()
+  const { pathname } = useLocation()
   const authenticated = status === 'authenticated'
+  // Marketing chrome belongs only on the signed-out landing; every private
+  // route, auth form, and not-found screen keeps the standard shell.
+  const publicLanding = status === 'unauthenticated' && pathname === '/'
   const [menuOpen, setMenuOpen] = useState(false)
   const [previousAuthenticated, setPreviousAuthenticated] = useState(
     authenticated,
@@ -179,7 +184,11 @@ export function AppShell() {
   }, [authenticated, menuOpen, isDesktop])
 
   return (
-    <div className={`app-shell${authenticated ? ' is-authenticated' : ''}`}>
+    <div
+      className={`app-shell${authenticated ? ' is-authenticated' : ''}${
+        publicLanding ? ` ${landingStyles.publicLanding}` : ''
+      }`}
+    >
       <a className="skip-link" href="#main">
         Skip to content
       </a>
@@ -192,6 +201,25 @@ export function AppShell() {
                 <span>Mohr</span>
               </Link>
             </h1>
+            {publicLanding && (
+              <nav className={landingStyles.publicNav} aria-label="Public">
+                <a
+                  className={`${landingStyles.publicNavLink} ${landingStyles.publicNavFeatures}`}
+                  href="#features"
+                >
+                  Features
+                </a>
+                <Link className={landingStyles.publicNavLink} to="/login">
+                  Sign in
+                </Link>
+                <Link
+                  className={`${landingStyles.primaryAction} ${landingStyles.publicNavCta}`}
+                  to="/register"
+                >
+                  Get started
+                </Link>
+              </nav>
+            )}
             {authenticated && (
               <button
                 ref={toggleRef}

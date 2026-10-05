@@ -1,7 +1,8 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import App from './App'
+import landingStyles from './screens/LandingScreen.module.css'
 import {
   installFetchMock,
   jsonResponse,
@@ -61,10 +62,46 @@ describe('Mohr shell', () => {
       }),
     ).toBeInTheDocument()
     expect(screen.getAllByRole('link', { name: 'Get started' }).length).toBe(
-      2,
+      3,
+    )
+    const publicNav = screen.getByRole('navigation', { name: 'Public' })
+    expect(within(publicNav).getByRole('link', { name: 'Sign in' })).toHaveAttribute(
+      'href',
+      '/login',
+    )
+    expect(
+      within(publicNav).getByRole('link', { name: 'Get started' }),
+    ).toHaveAttribute('href', '/register')
+    expect(document.querySelector('.app-shell')).toHaveClass(
+      landingStyles.publicLanding,
     )
     expect(window.location.pathname).toBe('/')
     expect(screen.queryByText('Signed in as')).not.toBeInTheDocument()
+  })
+
+  it('omits the public navigation on guest auth pages', async () => {
+    installFetchMock((url) => {
+      if (url === '/api/auth/me/') return jsonResponse({}, 401)
+      return jsonResponse({}, 404)
+    })
+    const login = renderApp('/login')
+    await screen.findByLabelText('Email')
+    expect(
+      screen.queryByRole('navigation', { name: 'Public' }),
+    ).not.toBeInTheDocument()
+    expect(document.querySelector('.app-shell')).not.toHaveClass(
+      landingStyles.publicLanding,
+    )
+    login.unmount()
+
+    renderApp('/register')
+    await screen.findByLabelText('Email')
+    expect(
+      screen.queryByRole('navigation', { name: 'Public' }),
+    ).not.toBeInTheDocument()
+    expect(document.querySelector('.app-shell')).not.toHaveClass(
+      landingStyles.publicLanding,
+    )
   })
 })
 

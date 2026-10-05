@@ -1,108 +1,276 @@
+/* Public marketing surface (issue 124). This is the only place that may use
+   full-bleed natural photography and an editorial serif; the authenticated
+   finance screens keep the flat, Plus Jakarta Sans system in DESIGN.md. */
+
 .landing {
-  display: grid;
-  gap: var(--space-8);
+  display: block;
   min-width: 0;
-  padding: var(--space-6) 0 var(--space-8);
 }
 
-.hero {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: var(--space-8);
-  align-items: center;
+/* Shell overrides are scoped to the signed-out landing only. They win by
+   specificity (0,2,0) over the global shell rules and leave every private
+   route and auth form untouched. */
+.publicLanding {
+  position: relative;
+  background-color: #0b1f42;
+}
+
+.publicLanding :global(.site-main) {
+  width: 100%;
+  max-width: none;
+  margin-inline: 0;
+  padding: 0;
+  scroll-margin-top: 0;
+}
+
+.publicLanding :global(.site-header) {
+  position: absolute;
+  inset: 24px 24px auto;
+  z-index: 6;
+  min-height: 68px;
+  border: 0;
+  border-radius: 16px;
+  background: rgba(0, 70, 110, 0.42);
+}
+
+.publicLanding :global(.site-header-inner) {
   min-width: 0;
+  min-height: 68px;
+  flex-wrap: wrap;
+  padding-inline: 20px;
+  gap: 16px;
+}
+
+.publicLanding :global(.brand a) {
+  min-height: 44px;
+  color: #ffffff;
+}
+
+.publicLanding :global(.brand .mohr-mark) {
+  color: #ffffff;
+}
+
+.publicLanding :global(.brand a:focus-visible) {
+  outline-color: #ffffff;
+}
+
+.publicNav {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: clamp(0.5rem, 2vw, 1.5rem);
+}
+
+/* Two-class selector (.publicNav ancestor + .publicNavFeatures descendant) so
+   the later .publicNavLink display never reveals Features. */
+.publicNav .publicNavFeatures {
+  display: none;
+}
+
+.publicNavLink {
+  display: inline-flex;
+  min-width: 44px;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  padding-inline: 8px;
+  color: #ffffff;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  white-space: nowrap;
+  text-decoration: none;
+}
+
+.publicNavLink:hover {
+  text-decoration: underline;
+}
+
+.publicNavLink:focus-visible {
+  outline-color: #ffffff;
+}
+
+/* Reuses the primary CTA fill from the hero, reduced to header scale. The
+   two-class selector (.publicNav ancestor + .publicNavCta descendant) keeps
+   this above the later .primaryAction hero rules that would otherwise restore
+   the larger hero padding inside the header. */
+.publicNav .publicNavCta {
+  min-height: 44px;
+  padding-inline: 18px;
+  font-size: 0.9375rem;
+  font-weight: 700;
+}
+
+@media (min-width: 48rem) {
+  .publicNav .publicNavFeatures {
+    display: inline-flex;
+  }
+}
+
+@media (max-width: 30rem) {
+  .publicLanding :global(.site-header) {
+    inset: 12px 12px auto;
+  }
+
+  .publicLanding :global(.site-header-inner) {
+    padding-inline: 12px;
+    gap: 8px;
+  }
+
+  .publicLanding :global(.brand) {
+    font-size: 1rem;
+  }
+
+  .publicNav {
+    gap: 4px;
+  }
+
+  .publicNavLink {
+    padding-inline: 6px;
+    font-size: 0.875rem;
+  }
+
+  .publicNav .publicNavCta {
+    padding-inline: 14px;
+    font-size: 0.875rem;
+  }
+}
+
+/* Full-bleed sky hero with one uniform deep-blue tint over the photograph.
+   The tint is an opaque-enough flat layer, never a gradient, so ordinary
+   white text keeps >=4.5 contrast even on the brightest cloud pixel. */
+.hero {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  gap: 0;
+  padding: clamp(8rem, 15vw, 13rem) clamp(1.25rem, 4vw, 3rem)
+    clamp(3.5rem, 8vw, 6rem);
+  text-align: center;
+  background-color: #075986;
+  background-image: url('../assets/landing-sky.webp');
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: cover;
+}
+
+.hero::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-color: rgba(0, 70, 110, 0.8);
+}
+
+.hero > * {
+  position: relative;
 }
 
 .heroCopy {
+  display: grid;
+  justify-items: center;
   min-width: 0;
-  max-width: 36rem;
-}
-
-.eyebrow {
-  margin: 0 0 var(--space-3);
-  color: var(--color-accent);
-  font-size: 0.8125rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  max-width: 76rem;
 }
 
 .headline {
   margin: 0;
-  color: var(--color-text);
-  font-size: clamp(2rem, 5vw + 1rem, 3rem);
-  font-weight: 700;
-  line-height: 1.15;
-  letter-spacing: -0.03em;
+  max-width: 76rem;
+  color: #ffffff;
+  font-family: Georgia, 'Times New Roman', Times, serif;
+  font-size: clamp(2.75rem, 6vw, 5.75rem);
+  font-weight: 400;
+  line-height: 1.05;
+  letter-spacing: -0.015em;
   overflow-wrap: anywhere;
 }
 
+.headlineItalic {
+  font-style: italic;
+}
+
 .supporting {
-  margin: var(--space-4) 0 0;
-  max-width: 34rem;
-  color: var(--color-muted);
-  font-size: 1rem;
+  margin: clamp(1.25rem, 2.5vw, 1.75rem) 0 0;
+  max-width: 32.5rem;
+  color: rgba(255, 255, 255, 0.92);
+  font-size: clamp(1rem, 1.1vw, 1.125rem);
   line-height: 1.6;
 }
 
 .actions {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-3);
-  margin-block-start: var(--space-6);
+  justify-content: center;
+  gap: 1rem;
+  margin-block-start: 2rem;
 }
 
 .primaryAction,
 .secondaryAction {
   display: inline-flex;
-  min-height: 2.75rem;
+  min-height: 52px;
   align-items: center;
   justify-content: center;
-  padding: var(--space-2) var(--space-6);
-  border-radius: 9999px;
-  font-size: 0.9375rem;
+  padding: var(--space-2) 1.75rem;
+  border-radius: 10px;
+  font-size: 1rem;
   font-weight: 600;
   text-decoration: none;
 }
 
 .primaryAction {
-  background: var(--color-accent);
-  color: var(--color-surface);
+  background: #ffffff;
+  color: #0f2a52;
 }
 
 .secondaryAction {
-  border: 1px solid var(--color-border);
-  background: var(--color-surface);
-  color: var(--color-text);
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  background: transparent;
+  color: #ffffff;
 }
 
-.primaryAction:hover,
+.primaryAction:hover {
+  background: #eef2ff;
+}
+
 .secondaryAction:hover {
-  text-decoration: underline;
+  background: rgba(255, 255, 255, 0.12);
 }
 
+.primaryAction:focus-visible,
+.secondaryAction:focus-visible {
+  outline: 3px solid #ffffff;
+  outline-offset: 2px;
+}
+
+/* A labeled, honest sample window — a web product preview, not a phone. */
 .preview {
-  min-width: 0;
-  margin: 0;
   display: grid;
+  justify-items: center;
   gap: var(--space-2);
+  width: 100%;
+  max-width: 46.25rem;
+  margin: clamp(2.5rem, 6vw, 4rem) 0 0;
+  text-align: left;
 }
 
 .previewCaption {
-  color: var(--color-muted);
-  font-size: 0.75rem;
+  color: rgba(255, 255, 255, 0.86);
+  font-size: 0.8125rem;
   font-weight: 600;
   letter-spacing: 0.02em;
+  text-align: center;
 }
 
 .previewSurface {
+  width: 100%;
   min-width: 0;
   display: grid;
   gap: var(--space-4);
-  padding: var(--space-4);
-  border: 1px solid var(--color-border);
+  padding: var(--space-6);
+  border: 1px solid rgba(15, 23, 42, 0.08);
   border-radius: 1rem;
   background: var(--color-surface);
+  box-shadow: 0 24px 56px -30px rgba(2, 8, 30, 0.6);
 }
 
 .previewHeader {
@@ -211,19 +379,20 @@
   white-space: nowrap;
 }
 
+/* Flat light working surface with simple column dividers. */
 .benefits {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: var(--space-4);
-  min-width: 0;
+  justify-content: center;
+  gap: clamp(2rem, 5vw, 3rem);
+  padding: clamp(3rem, 7vw, 5rem) clamp(1.25rem, 4vw, 3rem);
+  background: var(--color-surface);
+  scroll-margin-top: 6rem;
 }
 
 .benefit {
   min-width: 0;
-  padding: var(--space-4);
-  border: 1px solid var(--color-border);
-  border-radius: 0.75rem;
-  background: var(--color-surface);
+  text-align: left;
 }
 
 .benefit h2 {
@@ -240,53 +409,46 @@
   line-height: 1.55;
 }
 
+@media (min-width: 48rem) {
+  .benefits {
+    grid-template-columns: repeat(3, minmax(0, 20rem));
+  }
+
+  .benefit + .benefit {
+    border-inline-start: 1px solid var(--color-border);
+    padding-inline-start: clamp(1.5rem, 4vw, 3rem);
+  }
+}
+
+/* Understated dark-blue close. */
 .closing {
   min-width: 0;
   display: grid;
-  justify-items: start;
+  justify-items: center;
   gap: var(--space-2);
-  padding: var(--space-6);
-  border: 1px solid var(--color-border);
-  border-radius: 1rem;
-  background: var(--color-surface);
+  padding: clamp(4rem, 9vw, 6.5rem) clamp(1.25rem, 4vw, 3rem);
+  background: #0b1f42;
+  text-align: center;
 }
 
 .closing h2 {
   margin: 0;
-  color: var(--color-text);
-  font-size: 1.5rem;
-  font-weight: 700;
-  letter-spacing: -0.02em;
+  max-width: 40rem;
+  color: #ffffff;
+  font-family: Georgia, 'Times New Roman', Times, serif;
+  font-size: clamp(1.75rem, 3.5vw, 2.75rem);
+  font-weight: 400;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
 }
 
 .closing p {
   margin: 0;
-  color: var(--color-muted);
-  font-size: 0.9375rem;
+  max-width: 34rem;
+  color: rgba(255, 255, 255, 0.86);
+  font-size: 1rem;
 }
 
 .closing .actions {
-  margin-block-start: var(--space-3);
-}
-
-@media (min-width: 48rem) {
-  .hero {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    gap: var(--space-6);
-  }
-
-  .benefits {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-}
-
-@media (min-width: 75rem) {
-  .landing {
-    gap: var(--space-8);
-    padding-block: var(--space-8);
-  }
-
-  .hero {
-    gap: var(--space-8);
-  }
+  margin-block-start: var(--space-4);
 }
