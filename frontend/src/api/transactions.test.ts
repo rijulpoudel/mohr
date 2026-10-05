@@ -379,6 +379,7 @@ describe('fetchTransactions', () => {
     ['transaction_type', { transaction_type: 'income' }, 'transaction_type=income'],
     ['start_date', { start_date: '2026-09-01' }, 'start_date=2026-09-01'],
     ['end_date', { end_date: '2026-09-30' }, 'end_date=2026-09-30'],
+    ['search', { search: 'grocer' }, 'search=grocer'],
   ])('builds the %s filter alone', async (_label, filters, query) => {
     const mock = installFetchMock((url) => {
       if (url === `/api/transactions/?${query}`) return jsonResponse([])
@@ -390,15 +391,16 @@ describe('fetchTransactions', () => {
     expect(requestLog(mock)).toEqual([`GET /api/transactions/?${query}`])
   })
 
-  it('builds combined filters in a deterministic order', async () => {
+  it('builds combined filters with search allowlisted last in a deterministic order', async () => {
     const expected =
-      '/api/transactions/?account=3&category=5&transaction_type=expense&start_date=2026-09-01&end_date=2026-09-30'
+      '/api/transactions/?account=3&category=5&transaction_type=expense&start_date=2026-09-01&end_date=2026-09-30&search=coffee'
     const mock = installFetchMock((url) => {
       if (url === expected) return jsonResponse([])
       return jsonResponse({}, 404)
     })
 
     await fetchTransactions({
+      search: 'coffee',
       end_date: '2026-09-30',
       transaction_type: 'expense',
       start_date: '2026-09-01',
@@ -407,6 +409,58 @@ describe('fetchTransactions', () => {
     })
 
     expect(requestLog(mock)).toEqual([`GET ${expected}`])
+  })
+
+  it('trims search edges and counts length in Unicode code points', async () => {
+    const codepoints = '😀'.repeat(200)
+    const mock = installFetchMock((url) => {
+      if (url === '/api/transactions/?search=coffee') return jsonResponse([])
+      if (
+        url ===
+        `/api/transactions/?${new URLSearchParams({ search: codepoints }).toString()}`
+      ) {
+        return jsonResponse([])
+      }
+      return jsonResponse({}, 404)
+    })
+
+    await fetchTransactions({ search: '  coffee  ' })
+    await fetchTransactions({ search: codepoints })
+
+    expect(requestLog(mock)).toEqual([
+      'GET /api/transactions/?search=coffee',
+      `GET /api/transactions/?${new URLSearchParams({ search: codepoints }).toString()}`,
+    ])
+  })
+
+  it('URL-encodes literal search characters like a real URLSearchParams query', async () => {
+    const search = "O'Brien & 100%_\\"
+    const expected = `/api/transactions/?${new URLSearchParams({ search }).toString()}`
+    const mock = installFetchMock((url) => {
+      if (url === expected) return jsonResponse([])
+      return jsonResponse({}, 404)
+    })
+
+    await fetchTransactions({ search })
+
+    expect(requestLog(mock)).toEqual([`GET ${expected}`])
+  })
+
+  it('skips blank, whitespace, undefined, and empty search values', async () => {
+    const mock = installFetchMock((url) => {
+      if (url === '/api/transactions/?account=3') return jsonResponse([])
+      return jsonResponse({}, 404)
+    })
+
+    await fetchTransactions({ account: 3, search: '   ' })
+    await fetchTransactions({ account: 3, search: '' })
+    await fetchTransactions({ account: 3, search: undefined })
+
+    expect(requestLog(mock)).toEqual([
+      'GET /api/transactions/?account=3',
+      'GET /api/transactions/?account=3',
+      'GET /api/transactions/?account=3',
+    ])
   })
 
   it('omits query params when no filters are provided', async () => {
@@ -444,6 +498,14 @@ describe('fetchTransactions', () => {
     ['an unsafe category id', { category: 9007199254740992 }],
     ['an unknown transaction type', { transaction_type: 'savings' }],
     ['an impossible date', { start_date: '2026-02-30' }],
+    ['an over-length search', { search: 'a'.repeat(201) }],
+    ['a trim-only over-length search', { search: `  ${'a'.repeat(201)}  ` }],
+    ['a 201-code-point search', { search: '😀'.repeat(201) }],
+    ['a NUL search', { search: 'bad\u0000value' }],
+    ['an unpaired high surrogate search', { search: '\uD800' }],
+    ['an unpaired low surrogate search', { search: 'abc\uDC00' }],
+    ['a numeric search', { search: 42 }],
+    ['a null search', { search: null }],
   ]
 
   it.each(invalidFilterVariants)(
