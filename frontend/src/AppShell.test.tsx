@@ -2,6 +2,7 @@ import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { MohrMark } from './components/MohrMark'
+import landingStyles from './screens/LandingScreen.module.css'
 import {
   emptyResponse,
   installFetchMock,
@@ -136,6 +137,69 @@ describe('application shell navigation', () => {
     expect(screen.queryByRole('button', { name: 'Menu' })).not.toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'Dashboard' })).not.toBeInTheDocument()
     expect(screen.getByRole('main')).toHaveClass('site-main-guest')
+  })
+
+  it('shows the public marketing navigation on the signed-out landing', async () => {
+    installFetchMock(guestHandler)
+    renderApp('/')
+
+    const nav = await screen.findByRole('navigation', { name: 'Public' })
+    expect(within(nav).getByRole('link', { name: 'Features' })).toHaveAttribute(
+      'href',
+      '#features',
+    )
+    expect(within(nav).getByRole('link', { name: 'Sign in' })).toHaveAttribute(
+      'href',
+      '/login',
+    )
+    expect(
+      within(nav).getByRole('link', { name: 'Get started' }),
+    ).toHaveAttribute('href', '/register')
+    expect(document.querySelector('.app-shell')).toHaveClass(
+      landingStyles.publicLanding,
+    )
+    expect(
+      screen.getByRole('region', { name: 'What Mohr helps with' }),
+    ).toHaveAttribute('tabindex', '-1')
+    expect(
+      screen.queryByRole('navigation', { name: 'Primary' }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('drops the public landing shell after native guest link navigation', async () => {
+    installFetchMock(guestHandler)
+    const user = userEvent.setup()
+    renderApp('/')
+
+    const nav = await screen.findByRole('navigation', { name: 'Public' })
+    expect(document.querySelector('.app-shell')).toHaveClass(
+      landingStyles.publicLanding,
+    )
+
+    await user.click(within(nav).getByRole('link', { name: 'Sign in' }))
+    await screen.findByLabelText('Email')
+
+    expect(window.location.pathname).toBe('/login')
+    expect(
+      screen.queryByRole('navigation', { name: 'Public' }),
+    ).not.toBeInTheDocument()
+    expect(document.querySelector('.app-shell')).not.toHaveClass(
+      landingStyles.publicLanding,
+    )
+  })
+
+  it('omits the public navigation for an authenticated visitor at /', async () => {
+    installFetchMock(authenticatedHandler)
+    renderApp('/')
+
+    await screen.findByText('Signed in as student@example.com')
+    expect(
+      screen.queryByRole('navigation', { name: 'Public' }),
+    ).not.toBeInTheDocument()
+    expect(document.querySelector('.app-shell')).toHaveClass('is-authenticated')
+    expect(document.querySelector('.app-shell')).not.toHaveClass(
+      landingStyles.publicLanding,
+    )
   })
 
   it('exposes an accessible menu button that opens and closes the navigation', async () => {

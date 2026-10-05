@@ -156,6 +156,34 @@ The ornamental Mohr seal may appear in full on onboarding or marketing surfaces.
 - Charts require a title phrased as a financial question or a label that clearly states the measure and period.
 - Tables retain visible focus, keyboard operation, aligned amounts, and responsive alternatives rather than hiding required columns without explanation.
 
+## Public marketing surface exception
+
+The signed-out landing page (`/` for unauthenticated visitors) is the one
+marketing surface and may step outside the authenticated finance system in
+exactly two bounded ways:
+
+- **Natural photography.** A real sky photograph may back the hero. It is a
+  bundled local asset, not a hotlink, and it carries one uniform flat blue tint
+  (`rgba(0, 70, 110, 0.80)` over a `#075986` fallback) — never a CSS gradient,
+  blur, or glassmorphism. Ordinary white text lands at 5.81:1, the supporting
+  copy (white at 0.92) at 5.21:1, and the preview caption (white at 0.86) at
+  4.78:1 over the brightest cloud pixel; all pass 4.5:1. The floating header
+  uses the same hue at `rgba(0, 70, 110, 0.42)`; because the header paints above
+  the hero tint (z-index 6 over the hero overlay), its effective alpha compounds
+  to 0.884, so the header is darker than the hero behind it and needs no
+  opaque fill.
+- **Editorial serif.** The hero and closing headings may use a native serif
+  stack (Georgia / Times New Roman / Times) for a large editorial voice.
+
+Everything else holds: no gradients, no invented financial claims, no fake
+graphs, no price promotions, and every interactive target stays at least
+44 × 44px with visible focus. The product preview remains honest, sample
+labeled data.
+
+The exception is scoped to that public landing only. Login, registration, the
+dashboard, and every other authenticated screen keep the flat Plus Jakarta Sans
+system, lavender-gray canvas, and white working surfaces described above.
+
 ## Do's and Don'ts
 
 ### Do

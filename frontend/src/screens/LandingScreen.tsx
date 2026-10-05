@@ -7,11 +7,10 @@ export function LandingScreen() {
     <div className={styles.landing}>
       <section className={styles.hero} aria-labelledby="landing-headline">
         <div className={styles.heroCopy}>
-          <p className={styles.eyebrow}>Personal finance, made calm</p>
           <h2 id="landing-headline" className={styles.headline}>
             Where your money went.
-            <br />
-            A clearer view of your month.
+            <br />A <em className={styles.headlineItalic}>clearer view</em> of
+            your month.
           </h2>
           <p className={styles.supporting}>
             Mohr brings your accounts, transactions, and monthly budgets into
@@ -78,7 +77,12 @@ export function LandingScreen() {
         </figure>
       </section>
 
-      <section className={styles.benefits} aria-label="What Mohr helps with">
+      <section
+        id="features"
+        className={styles.benefits}
+        aria-label="What Mohr helps with"
+        tabIndex={-1}
+      >
         <article className={styles.benefit}>
           <h2>Accounts</h2>
           <p>
