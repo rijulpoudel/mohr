@@ -147,6 +147,84 @@ function plaidTransactionFixture(overrides: Record<string, unknown> = {}) {
   })
 }
 
+function searchableRows() {
+  return [
+    transactionFixture({
+      id: 1,
+      account: 1,
+      category: 2,
+      amount: '12.50',
+      date: '2026-09-10',
+      note: 'Weekly groceries run',
+    }),
+    transactionFixture({
+      id: 2,
+      account: 1,
+      category: 2,
+      amount: '45.00',
+      date: '2026-09-09',
+      note: 'Unrelated coffee payment',
+    }),
+    plaidTransactionFixture({
+      id: 3,
+      account: 1,
+      category: 2,
+      amount: '30.00',
+      date: '2026-09-08',
+      note: '',
+      provider_name: 'Corner Coffee Roasters',
+    }),
+    transactionFixture({
+      id: 4,
+      account: 2,
+      category: 1,
+      transaction_type: 'income',
+      amount: '2500.00',
+      date: '2026-09-11',
+      note: 'shared token income',
+    }),
+  ]
+}
+
+// Mirrors the backend contract: literal, case-insensitive substring over note
+// OR provider_name, combined with the existing relation/date filters.
+function filterTransactionsByUrl(
+  rows: Array<Record<string, unknown>>,
+  url: string,
+): Array<Record<string, unknown>> {
+  const params = new URL(url, 'http://localhost').searchParams
+  return rows.filter((row) => {
+    const account = params.get('account')
+    if (account !== null && String(row.account) !== account) return false
+    const category = params.get('category')
+    if (category !== null && String(row.category) !== category) return false
+    const type = params.get('transaction_type')
+    if (type !== null && row.transaction_type !== type) return false
+    const start = params.get('start_date')
+    if (start !== null && String(row.date) < start) return false
+    const end = params.get('end_date')
+    if (end !== null && String(row.date) > end) return false
+    const search = params.get('search')
+    if (search !== null) {
+      const needle = search.toLowerCase()
+      const note = typeof row.note === 'string' ? row.note.toLowerCase() : ''
+      const provider =
+        typeof row.provider_name === 'string'
+          ? row.provider_name.toLowerCase()
+          : ''
+      if (!note.includes(needle) && !provider.includes(needle)) return false
+    }
+    return true
+  })
+}
+
+function searchAwareHandler(rows: Array<Record<string, unknown>>) {
+  return authenticatedTransactionsHandler(
+    (url) => jsonResponse(filterTransactionsByUrl(rows, url)),
+    { accounts: defaultAccounts(), categories: defaultCategories() },
+  )
+}
+
 function transactionRequests(mock: FetchMock): number {
   return mock.mock.calls.filter(([input]) =>
     String(input).startsWith('/api/transactions/'),
@@ -1350,6 +1428,425 @@ describe('transactions filters', () => {
     expect(screen.queryByText('Stale result')).not.toBeInTheDocument()
     expect(calls(mock, '/api/accounts/')).toHaveLength(1)
     expect(calls(mock, '/api/categories/')).toHaveLength(1)
+  })
+})
+
+describe('transactions search', () => {
+  it('keeps an unsaved search draft out of requests and the rendered result', async () => {
+    const mock = installFetchMock(searchAwareHandler(searchableRows()))
+    renderApp('/transactions')
+    await screen.findByText('Weekly groceries run')
+    const before = transactionRequests(mock)
+
+    const user = userEvent.setup()
+    await user.type(screen.getByLabelText('Search'), 'coffee')
+
+    expect(transactionRequests(mock)).toBe(before)
+    expect(screen.getByText('Weekly groceries run')).toBeInTheDocument()
+    expect(screen.getByText('Unrelated coffee payment')).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Clear all filters' }),
+    ).toBeInTheDocument()
+  })
+
+  it('applies a trimmed search on Enter and hides non-matching rows', async () => {
+    const mock = installFetchMock(searchAwareHandler(searchableRows()))
+    renderApp('/transactions')
+    await screen.findByText('Weekly groceries run')
+
+    const user = userEvent.setup()
+    const input = screen.getByLabelText('Search')
+    await user.type(input, '  grocer  ')
+    await user.keyboard('{Enter}')
+
+    await waitFor(() =>
+      expect(calls(mock, '/api/transactions/?search=grocer')).toHaveLength(1),
+    )
+    expect(await screen.findByText('Weekly groceries run')).toBeInTheDocument()
+    expect(screen.queryByText('Unrelated coffee payment')).not.toBeInTheDocument()
+    expect(screen.queryByText('Corner Coffee Roasters')).not.toBeInTheDocument()
+  })
+
+  it('combines a submitted search with applied filters and uses the last applied search for live filter changes', async () => {
+    const mock = installFetchMock(searchAwareHandler(searchableRows()))
+    renderApp('/transactions')
+    await screen.findByText('Weekly groceries run')
+
+    const user = userEvent.setup()
+    await user.selectOptions(screen.getByLabelText('Account'), '1')
+    await waitFor(() =>
+      expect(calls(mock, '/api/transactions/?account=1')).toHaveLength(1),
+    )
+
+    await user.type(screen.getByLabelText('Search'), 'coffee')
+    await user.click(screen.getByRole('button', { name: 'Search' }))
+    await waitFor(() =>
+      expect(
+        calls(mock, '/api/transactions/?account=1&search=coffee'),
+      ).toHaveLength(1),
+    )
+    expect(await screen.findByText('Unrelated coffee payment')).toBeInTheDocument()
+    expect(screen.queryByText('Weekly groceries run')).not.toBeInTheDocument()
+
+    // A newer, unsaved draft must not leak into a live filter change; the
+    // request keeps the last applied search.
+    await user.clear(screen.getByLabelText('Search'))
+    await user.type(screen.getByLabelText('Search'), 'grocer')
+    await user.selectOptions(screen.getByLabelText('Category'), '2')
+    await waitFor(() =>
+      expect(
+        calls(mock, '/api/transactions/?account=1&category=2&search=coffee'),
+      ).toHaveLength(1),
+    )
+    expect(screen.queryByText('Weekly groceries run')).not.toBeInTheDocument()
+  })
+
+  it('clears only the applied search on a blank submit while preserving other filters', async () => {
+    const mock = installFetchMock(searchAwareHandler(searchableRows()))
+    renderApp('/transactions')
+    await screen.findByText('Weekly groceries run')
+
+    const user = userEvent.setup()
+    await user.selectOptions(screen.getByLabelText('Account'), '1')
+    await waitFor(() =>
+      expect(calls(mock, '/api/transactions/?account=1')).toHaveLength(1),
+    )
+    await user.type(screen.getByLabelText('Search'), 'coffee')
+    await user.click(screen.getByRole('button', { name: 'Search' }))
+    await waitFor(() =>
+      expect(
+        calls(mock, '/api/transactions/?account=1&search=coffee'),
+      ).toHaveLength(1),
+    )
+
+    await user.clear(screen.getByLabelText('Search'))
+    await user.click(screen.getByRole('button', { name: 'Search' }))
+    await waitFor(() =>
+      expect(calls(mock, '/api/transactions/?account=1')).toHaveLength(2),
+    )
+    expect(await screen.findByText('Weekly groceries run')).toBeInTheDocument()
+    expect(screen.getByLabelText('Account')).toHaveValue('1')
+    expect(screen.queryByText('Unrelated coffee payment')).toBeInTheDocument()
+  })
+
+  it('Clear all filters resets the search draft, applied search, and other filters', async () => {
+    const mock = installFetchMock(searchAwareHandler(searchableRows()))
+    renderApp('/transactions')
+    await screen.findByText('Weekly groceries run')
+
+    const user = userEvent.setup()
+    await user.type(screen.getByLabelText('Search'), 'coffee')
+    await user.click(screen.getByRole('button', { name: 'Search' }))
+    await waitFor(() =>
+      expect(calls(mock, '/api/transactions/?search=coffee')).toHaveLength(1),
+    )
+
+    const unfilteredBefore = calls(mock, '/api/transactions/').length
+    await user.click(screen.getByRole('button', { name: 'Clear all filters' }))
+
+    await waitFor(() =>
+      expect(calls(mock, '/api/transactions/')).toHaveLength(
+        unfilteredBefore + 1,
+      ),
+    )
+    expect(screen.getByLabelText('Search')).toHaveValue('')
+    expect(
+      screen.queryByRole('button', { name: 'Clear all filters' }),
+    ).not.toBeInTheDocument()
+    expect(await screen.findByText('Weekly groceries run')).toBeInTheDocument()
+  })
+
+  it('rejects an over-length search at the field with no request', async () => {
+    const mock = installFetchMock(searchAwareHandler(searchableRows()))
+    renderApp('/transactions')
+    await screen.findByText('Weekly groceries run')
+    const before = transactionRequests(mock)
+
+    fireEvent.change(screen.getByLabelText('Search'), {
+      target: { value: 'a'.repeat(201) },
+    })
+    await userEvent.click(screen.getByRole('button', { name: 'Search' }))
+
+    const input = screen.getByLabelText('Search')
+    expect(input).toHaveAttribute('aria-invalid', 'true')
+    expect(input).toHaveAttribute(
+      'aria-describedby',
+      'transactions-search-error',
+    )
+    expect(screen.getByRole('alert')).toHaveTextContent('200 characters')
+    expect(transactionRequests(mock)).toBe(before)
+  })
+
+  it('rejects a malformed search character at the field with no request', async () => {
+    const mock = installFetchMock(searchAwareHandler(searchableRows()))
+    renderApp('/transactions')
+    await screen.findByText('Weekly groceries run')
+    const before = transactionRequests(mock)
+
+    fireEvent.change(screen.getByLabelText('Search'), {
+      target: { value: 'bad\u0000value' },
+    })
+    await userEvent.click(screen.getByRole('button', { name: 'Search' }))
+
+    expect(screen.getByLabelText('Search')).toHaveAttribute(
+      'aria-invalid',
+      'true',
+    )
+    expect(screen.getByRole('alert')).toHaveTextContent('cannot be used')
+    expect(transactionRequests(mock)).toBe(before)
+  })
+
+  it('shows the no-matches empty state with no month groups when search matches nothing', async () => {
+    installFetchMock(searchAwareHandler(searchableRows()))
+    renderApp('/transactions')
+    await screen.findByText('Weekly groceries run')
+
+    const user = userEvent.setup()
+    await user.type(screen.getByLabelText('Search'), 'nothing-matches-this')
+    await user.click(screen.getByRole('button', { name: 'Search' }))
+
+    expect(
+      await screen.findByText(/No matches for these filters/),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByRole('heading', { name: 'September 2026' }),
+    ).not.toBeInTheDocument()
+    expect(screen.queryByRole('listitem')).not.toBeInTheDocument()
+  })
+
+  it('lets the newest submitted search own the rendered result over a stale response', async () => {
+    const first = deferred<Response>()
+    const second = deferred<Response>()
+    installFetchMock(
+      authenticatedTransactionsHandler(
+        (url) => {
+          if (url === '/api/transactions/?search=coffee') return first.promise
+          if (url === '/api/transactions/?search=grocer') return second.promise
+          return jsonResponse(searchableRows())
+        },
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Weekly groceries run')
+
+    const user = userEvent.setup()
+    await user.type(screen.getByLabelText('Search'), 'coffee')
+    await user.keyboard('{Enter}')
+    await user.clear(screen.getByLabelText('Search'))
+    await user.type(screen.getByLabelText('Search'), 'grocer')
+    await user.keyboard('{Enter}')
+
+    await act(async () => {
+      second.resolve(jsonResponse([searchableRows()[0]]))
+    })
+    expect(await screen.findByText('Weekly groceries run')).toBeInTheDocument()
+
+    await act(async () => {
+      first.resolve(jsonResponse([searchableRows()[1]]))
+    })
+    expect(screen.getByText('Weekly groceries run')).toBeInTheDocument()
+    expect(screen.queryByText('Unrelated coffee payment')).not.toBeInTheDocument()
+  })
+
+  it('keeps the applied search on retry after a safe error', async () => {
+    let searchCalls = 0
+    const mock = installFetchMock(
+      authenticatedTransactionsHandler(
+        (url) => {
+          if (url === '/api/transactions/?search=grocer') {
+            searchCalls += 1
+            if (searchCalls === 1) {
+              return jsonResponse({ detail: 'Server exploded.' }, 500)
+            }
+            return jsonResponse([searchableRows()[0]])
+          }
+          return jsonResponse(searchableRows())
+        },
+        { accounts: defaultAccounts(), categories: defaultCategories() },
+      ),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Weekly groceries run')
+
+    const user = userEvent.setup()
+    await user.type(screen.getByLabelText('Search'), 'grocer')
+    await user.keyboard('{Enter}')
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Server exploded.',
+    )
+    expect(screen.getByLabelText('Search')).toHaveValue('grocer')
+
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(await screen.findByText('Weekly groceries run')).toBeInTheDocument()
+    expect(
+      calls(mock, '/api/transactions/?search=grocer'),
+    ).toHaveLength(2)
+  })
+
+  it('clears only in-memory session and returns to login on search 401', async () => {
+    const mock = installFetchMock(
+      authenticatedTransactionsHandler((url) => {
+        if (url === '/api/transactions/?search=grocer') {
+          return jsonResponse(
+            { detail: 'Authentication credentials were not provided.' },
+            401,
+          )
+        }
+        return jsonResponse(searchableRows())
+      }, { accounts: defaultAccounts(), categories: defaultCategories() }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Weekly groceries run')
+
+    const user = userEvent.setup()
+    await user.type(screen.getByLabelText('Search'), 'grocer')
+    await user.keyboard('{Enter}')
+
+    expect(await screen.findByLabelText('Email')).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/login')
+    expect(calls(mock, '/api/transactions/?search=grocer')).toHaveLength(1)
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  it('refetches the applied search after an edit that removes the note match and focuses the heading', async () => {
+    const rows = searchableRows()
+    const mock = installFetchMock(
+      authenticatedEditHandler({
+        transactions: (url, init) => {
+          if ((init?.method ?? 'GET') === 'PATCH') {
+            const id = Number(url.split('/')[3])
+            const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+            const index = rows.findIndex((row) => row.id === id)
+            rows[index] = { ...rows[index], ...body }
+            return jsonResponse(rows[index])
+          }
+          return jsonResponse(filterTransactionsByUrl(rows, url))
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Weekly groceries run')
+
+    const user = userEvent.setup()
+    await user.type(screen.getByLabelText('Search'), 'grocer')
+    await user.keyboard('{Enter}')
+    await waitFor(() =>
+      expect(calls(mock, '/api/transactions/?search=grocer')).toHaveLength(1),
+    )
+    expect(await screen.findByText('Weekly groceries run')).toBeInTheDocument()
+
+    await openEditorFor(user, 0)
+    const noteInput = screen.getByLabelText('Edit transaction note')
+    await user.clear(noteInput)
+    await user.type(noteInput, 'misc')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    // Wait for the refetch to paint the discriminating empty result before
+    // reading notice or focus; a dispatched GET is not a settled render.
+    expect(
+      await screen.findByText(/No matches for these filters/),
+    ).toBeInTheDocument()
+    expect(screen.queryByText('Weekly groceries run')).not.toBeInTheDocument()
+    expect(screen.getByText('Transaction updated.')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Transactions' })).toHaveFocus()
+    expect(calls(mock, '/api/transactions/1/', 'PATCH')).toHaveLength(1)
+    expect(calls(mock, '/api/transactions/?search=grocer')).toHaveLength(2)
+  })
+
+  it('keeps a row whose provider description still matches the search after an edit', async () => {
+    const rows = searchableRows()
+    const mock = installFetchMock(
+      authenticatedEditHandler({
+        transactions: (url, init) => {
+          if ((init?.method ?? 'GET') === 'PATCH') {
+            const id = Number(url.split('/')[3])
+            const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+            const index = rows.findIndex((row) => row.id === id)
+            rows[index] = { ...rows[index], ...body }
+            return jsonResponse(rows[index])
+          }
+          return jsonResponse(filterTransactionsByUrl(rows, url))
+        },
+      }),
+    )
+    renderApp('/transactions')
+    await screen.findByText('Weekly groceries run')
+
+    const user = userEvent.setup()
+    await user.type(screen.getByLabelText('Search'), 'roasters')
+    await user.keyboard('{Enter}')
+    await waitFor(() =>
+      expect(calls(mock, '/api/transactions/?search=roasters')).toHaveLength(1),
+    )
+    expect(
+      await screen.findByText('Bank description: Corner Coffee Roasters'),
+    ).toBeInTheDocument()
+
+    await openEditorFor(user, 0)
+    const noteInput = screen.getByLabelText('Edit transaction note')
+    await user.clear(noteInput)
+    await user.type(noteInput, 'updated note')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    // The server refetch must paint the updated note before the notice and the
+    // retained provider description are read; dispatch alone does not settle.
+    expect(await screen.findByText('updated note')).toBeInTheDocument()
+    expect(screen.getByText('Transaction updated.')).toBeInTheDocument()
+    expect(
+      screen.getByText('Bank description: Corner Coffee Roasters'),
+    ).toBeInTheDocument()
+    expect(calls(mock, '/api/transactions/3/', 'PATCH')).toHaveLength(1)
+    expect(calls(mock, '/api/transactions/?search=roasters')).toHaveLength(2)
+  })
+
+  it('locks search while an editor or delete confirmation is open and blocks programmatic submit', async () => {
+    const mock = installFetchMock(searchAwareHandler(searchableRows()))
+    renderApp('/transactions')
+    await screen.findByText('Weekly groceries run')
+
+    const user = userEvent.setup()
+    // An unsaved, nonempty draft differs from the omitted applied search, so a
+    // dropped lock guard cannot hide behind the equality early-return.
+    await user.type(screen.getByLabelText('Search'), 'grocer')
+    await openEditorFor(user, 0)
+    expect(screen.getByLabelText('Search')).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Search' })).toBeDisabled()
+    const searchForm = screen
+      .getByLabelText('Search')
+      .closest('form') as HTMLFormElement
+    const before = transactionRequests(mock)
+    await act(async () => {
+      fireEvent.submit(searchForm)
+    })
+    expect(transactionRequests(mock)).toBe(before)
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await screen.findByText('Weekly groceries run')
+    await openDeleteFor(user, 0)
+    expect(screen.getByLabelText('Search')).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Search' })).toBeDisabled()
+    await act(async () => {
+      fireEvent.submit(searchForm)
+    })
+    expect(transactionRequests(mock)).toBe(before)
+  })
+
+  it('never writes a search query to local or session storage', async () => {
+    installFetchMock(searchAwareHandler(searchableRows()))
+    renderApp('/transactions')
+    await screen.findByText('Weekly groceries run')
+
+    const user = userEvent.setup()
+    await user.type(screen.getByLabelText('Search'), 'grocer')
+    await user.keyboard('{Enter}')
+    await waitFor(() =>
+      screen.getByText('Weekly groceries run'),
+    )
+
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
   })
 })
 

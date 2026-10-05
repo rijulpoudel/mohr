@@ -1020,6 +1020,27 @@ a {
   white-space: nowrap;
 }
 
+/* Search is a full-width row: the field flexes and the submit keeps its 44px
+   touch target, reusing the existing input, button, and hint styles. */
+.transaction-search {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-3);
+}
+
+.transaction-search .transaction-search-field {
+  flex: 1 1 14rem;
+  min-width: 0;
+  margin: 0;
+}
+
+.transactions-search-submit {
+  min-height: 2.75rem;
+  white-space: nowrap;
+}
+
 /* A compact segmented strip inside the history panel, not another card. */
 .transactions-summary {
   display: flex;
